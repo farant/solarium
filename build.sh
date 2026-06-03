@@ -9,7 +9,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c \
+    main.c gl_backend.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit \
     -o solarium

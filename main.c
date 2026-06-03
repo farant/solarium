@@ -1,16 +1,14 @@
-#define GL_SILENCE_DEPRECATION
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
-#include <OpenGL/gl3.h>
+#include <GLFW/glfw3.h>          /* platform: window, input, time — not GL */
 
+#include "rhi.h"                 /* the graphics seam — no GL above here */
 #include "sol_math.h"
 
-/* --- shaders: plain text, compiled at runtime by the driver --- */
+/* --- shaders: GLSL source handed to the backend (still app-authored) --- */
 static const char *VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
@@ -53,56 +51,14 @@ static const char *FRAGMENT_SRC =
     "    FragColor = vec4(color, 1.0);\n"
     "}\n";
 
-typedef struct {
-    GLuint  vao;
-    GLsizei vertex_count;
-} Mesh;
+typedef struct { RhiBuffer buffer; int vertex_count; } Mesh;
 
 typedef struct {
-    int    fb_width;
-    int    fb_height;
-    GLuint program;
-    Mesh   mesh;
-    GLint  u_model_loc, u_view_loc, u_proj_loc, u_viewpos_loc;
-    float  angle;
+    int         fb_width, fb_height;
+    RhiPipeline pipeline;
+    Mesh        mesh;
+    float       angle;
 } AppState;
-
-/* Compile one shader, and ACTUALLY CHECK it — silent failure otherwise */
-static GLuint compile_shader(GLenum type, const char *src) {
-    GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &src, NULL);
-    glCompileShader(shader);
-
-    GLint ok = 0;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetShaderInfoLog(shader, sizeof(log), NULL, log);
-        fprintf(stderr, "shader compile failed:\n%s\n", log);
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
-}
-
-/* Link vertex+fragment into one program, and check the link too */
-static GLuint link_program(GLuint vs, GLuint fs) {
-    GLuint program = glCreateProgram();
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glLinkProgram(program);
-
-    GLint ok = 0;
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[1024];
-        glGetProgramInfoLog(program, sizeof(log), NULL, log);
-        fprintf(stderr, "program link failed:\n%s\n", log);
-        glDeleteProgram(program);
-        return 0;
-    }
-    return program;
-}
 
 /* --- a growable float array (doubles capacity on demand) --- */
 typedef struct { float *data; size_t count, capacity; } FloatArray;
@@ -198,33 +154,7 @@ static float *load_obj(const char *path, int *out_count) {
     return out.data;
 }
 
-/* Upload an interleaved pos+normal vertex array to a VAO/VBO. */
-static Mesh mesh_create(const float *verts, int vertex_count) {
-    Mesh mesh = { .vertex_count = vertex_count };
-
-    GLuint vbo;
-    glGenVertexArrays(1, &mesh.vao);
-    glGenBuffers(1, &vbo);
-
-    glBindVertexArray(mesh.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 (GLsizeiptr)(vertex_count * 6 * sizeof(float)),
-                 verts, GL_STATIC_DRAW);
-
-    /* position: slot 0, 3 floats, stride 6 floats, offset 0 */
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)0);
-    glEnableVertexAttribArray(0);
-    /* normal: slot 1, 3 floats, SAME stride, offset 3 floats in */
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
-                          (void *)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
-    return mesh;
-}
-
-/* One-time setup: load the mesh, build the program. Runs once, before the loop. */
+/* One-time setup: load the mesh, build the pipeline. Runs once, before the loop. */
 static int init_scene(AppState *state) {
     const char *model_path = "suzanne.obj";   /* swap to "cube.obj" to test the cube */
     int vertex_count = 0;
@@ -236,24 +166,25 @@ static int init_scene(AppState *state) {
     }
     printf("loaded %s: %d vertices\n", model_path, vertex_count);
 
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, VERTEX_SRC);
-    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, FRAGMENT_SRC);
-    if (!vs || !fs) { free(verts); return 0; }
+    RhiShader shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
+    if (!shader.id) { free(verts); return 0; }
 
-    state->program = link_program(vs, fs);
-    glDeleteShader(vs);   /* the program owns the compiled code now; */
-    glDeleteShader(fs);   /* the standalone shader objects can go    */
-    if (!state->program) { free(verts); return 0; }
+    RhiPipelineDesc desc = {
+        .shader = shader,
+        .attrs = {
+            { .location = 0, .format = RHI_FORMAT_FLOAT3, .offset = 0 },
+            { .location = 1, .format = RHI_FORMAT_FLOAT3, .offset = 3 * sizeof(float) },
+        },
+        .attr_count = 2,
+        .stride     = 6 * sizeof(float),
+        .depth_test = true,
+    };
+    state->pipeline = rhi_create_pipeline(&desc);
 
-    state->u_model_loc   = glGetUniformLocation(state->program, "uModel");
-    state->u_view_loc    = glGetUniformLocation(state->program, "uView");
-    state->u_proj_loc    = glGetUniformLocation(state->program, "uProj");
-    state->u_viewpos_loc = glGetUniformLocation(state->program, "uViewPos");
-
-    state->mesh = mesh_create(verts, vertex_count);
+    state->mesh.buffer       = rhi_create_buffer(RHI_BUFFER_VERTEX, verts,
+                                   (size_t)vertex_count * 6 * sizeof(float));
+    state->mesh.vertex_count = vertex_count;
     free(verts);   /* GPU has its own copy now — CPU array is done */
-
-    glEnable(GL_DEPTH_TEST);  /* nearer fragments win */
     return 1;
 }
 
@@ -262,9 +193,7 @@ static void update(AppState *state, double dt) {
 }
 
 static void render(const AppState *state) {
-    glViewport(0, 0, state->fb_width, state->fb_height);
-    glClearColor(0.10f, 0.12f, 0.15f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);   /* clear BOTH every frame */
+    rhi_begin_frame(state->fb_width, state->fb_height, 0.10f, 0.12f, 0.15f, 1.0f);
 
     float aspect = (state->fb_height > 0)
                  ? (float)state->fb_width / (float)state->fb_height
@@ -279,14 +208,14 @@ static void render(const AppState *state) {
                               vec3_make(0, 1, 0));   /* up is +Y              */
     mat4 proj  = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
 
-    glUseProgram(state->program);
-    glUniformMatrix4fv(state->u_model_loc, 1, GL_FALSE, model.m);
-    glUniformMatrix4fv(state->u_view_loc,  1, GL_FALSE, view.m);
-    glUniformMatrix4fv(state->u_proj_loc,  1, GL_FALSE, proj.m);
-    glUniform3f(state->u_viewpos_loc, eye.x, eye.y, eye.z);
+    rhi_set_pipeline(state->pipeline);
+    rhi_set_uniform_mat4("uModel",   model.m);
+    rhi_set_uniform_mat4("uView",    view.m);
+    rhi_set_uniform_mat4("uProj",    proj.m);
+    rhi_set_uniform_vec3("uViewPos", eye.x, eye.y, eye.z);
 
-    glBindVertexArray(state->mesh.vao);
-    glDrawArrays(GL_TRIANGLES, 0, state->mesh.vertex_count);
+    rhi_bind_vertex_buffer(state->mesh.buffer);
+    rhi_draw(0, state->mesh.vertex_count);
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -303,11 +232,7 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-    glfwWindowHint(GLFW_DEPTH_BITS, 24);   /* we depend on a depth buffer */
+    rhi_configure_window();   /* backend sets the API/context hints */
 
     GLFWwindow *window = glfwCreateWindow(960, 540, "solarium", NULL, NULL);
     if (!window) {
@@ -316,23 +241,19 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
-    glfwSetKeyCallback(window, on_key);
+    glfwSetKeyCallback(window, on_key);   /* platform: input */
 
-    printf("GL_VERSION : %s\n", glGetString(GL_VERSION));
-    printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
-
-    GLint profile = 0, flags = 0;
-    glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile);
-    glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
-    printf("CORE PROFILE  : %s\n", (profile & GL_CONTEXT_CORE_PROFILE_BIT) ? "yes" : "no");
-    printf("FWD COMPATIBLE: %s\n", (flags & GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) ? "yes" : "no");
+    if (!rhi_init(window)) {              /* backend: context + GL info */
+        fprintf(stderr, "rhi_init failed\n");
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
 
     AppState state = {0};
-
-    if (!init_scene(&state)) {              /* one-time setup */
+    if (!init_scene(&state)) {
         fprintf(stderr, "scene init failed\n");
+        rhi_shutdown();
         glfwDestroyWindow(window);
         glfwTerminate();
         return EXIT_FAILURE;
@@ -353,9 +274,10 @@ int main(void) {
         update(&state, dt);
         render(&state);
 
-        glfwSwapBuffers(window);
+        rhi_present();
     }
 
+    rhi_shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
     return EXIT_SUCCESS;
