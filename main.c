@@ -13,32 +13,36 @@
 static const char *VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
-    "layout (location = 1) in vec3 aColor;\n"
+    "layout (location = 1) in vec3 aNormal;\n"
     "uniform mat4 uModel;\n"
     "uniform mat4 uView;\n"
     "uniform mat4 uProj;\n"
-    "out vec3 vColor;\n"
+    "out vec3 vNormal;\n"
     "void main() {\n"
-    "    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);\n"  /* the pipeline */
-    "    vColor = aColor;\n"
+    "    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);\n"
+    "    vNormal = aNormal;\n"                /* object-space, for debug viz */
     "}\n";
 
 static const char *FRAGMENT_SRC =
     "#version 330 core\n"
-    "in vec3 vColor;\n"
+    "in vec3 vNormal;\n"
     "out vec4 FragColor;\n"
     "void main() {\n"
-    "    FragColor = vec4(vColor, 1.0);\n"
+    "    FragColor = vec4(vNormal * 0.5 + 0.5, 1.0);\n"   /* [-1,1] -> [0,1] RGB */
     "}\n";
+
+typedef struct {
+    GLuint  vao;
+    GLsizei vertex_count;
+} Mesh;
 
 typedef struct {
     int    fb_width;
     int    fb_height;
-    GLuint  program;      /* the linked shader logic */
-    GLuint  vao;          /* how to read the vertex data */
-    GLsizei index_count;  /* how many indices to draw */
-    GLint   u_model_loc, u_view_loc, u_proj_loc;
-    float   angle;        /* the simulation state update() advances */
+    GLuint program;
+    Mesh   cube;
+    GLint  u_model_loc, u_view_loc, u_proj_loc;
+    float  angle;
 } AppState;
 
 /* Compile one shader, and ACTUALLY CHECK it — silent failure otherwise */
@@ -78,66 +82,123 @@ static GLuint link_program(GLuint vs, GLuint fs) {
     return program;
 }
 
-/* One-time GPU setup: program + VBO + VAO. Runs once, before the loop. */
+/* --- a growable float array (doubles capacity on demand) --- */
+typedef struct { float *data; size_t count, capacity; } FloatArray;
+
+static void fa_push(FloatArray *a, float v) {
+    if (a->count == a->capacity) {
+        a->capacity = a->capacity ? a->capacity * 2 : 64;   /* double */
+        a->data = realloc(a->data, a->capacity * sizeof(float));
+    }
+    a->data[a->count++] = v;
+}
+
+/* Parse an OBJ into an interleaved [px,py,pz, nx,ny,nz] vertex array.
+   Returns a malloc'd array (caller frees), vertex count via out_count.
+   NULL on failure. Pure CPU — no GL here. */
+static float *load_obj(const char *path, int *out_count) {
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "load_obj: cannot open %s\n", path); return NULL; }
+
+    FloatArray positions = {0}, normals = {0}, out = {0};
+    char line[256];
+
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == 'v' && line[1] == ' ') {                 /* position */
+            float x, y, z;
+            sscanf(line, "v %f %f %f", &x, &y, &z);
+            fa_push(&positions, x); fa_push(&positions, y); fa_push(&positions, z);
+        } else if (line[0] == 'v' && line[1] == 'n') {          /* normal */
+            float x, y, z;
+            sscanf(line, "vn %f %f %f", &x, &y, &z);
+            fa_push(&normals, x); fa_push(&normals, y); fa_push(&normals, z);
+        } else if (line[0] == 'f' && line[1] == ' ') {          /* face (3 corners) */
+            char tok[3][64];
+            if (sscanf(line, "f %63s %63s %63s", tok[0], tok[1], tok[2]) != 3) continue;
+            for (int i = 0; i < 3; i++) {
+                int p = 0, t = 0, n = 0;
+                if      (sscanf(tok[i], "%d/%d/%d", &p, &t, &n) == 3) {}   /* p/t/n */
+                else if (sscanf(tok[i], "%d//%d",  &p, &n)      == 2) {}   /* p//n  */
+                else if (sscanf(tok[i], "%d/%d",   &p, &t)      == 2) {}   /* p/t   */
+                else     sscanf(tok[i], "%d", &p);                        /* p     */
+
+                int pi = (p - 1) * 3;                  /* 1-based -> 0-based */
+                fa_push(&out, positions.data[pi+0]);
+                fa_push(&out, positions.data[pi+1]);
+                fa_push(&out, positions.data[pi+2]);
+                if (n > 0) {
+                    int ni = (n - 1) * 3;
+                    fa_push(&out, normals.data[ni+0]);
+                    fa_push(&out, normals.data[ni+1]);
+                    fa_push(&out, normals.data[ni+2]);
+                } else {                               /* no normal -> zero */
+                    fa_push(&out, 0); fa_push(&out, 0); fa_push(&out, 0);
+                }
+            }
+        }
+        /* comments / blank / o,g,usemtl,s -> skipped */
+    }
+    fclose(f);
+
+    free(positions.data);   /* scaffolding — done with it */
+    free(normals.data);
+
+    *out_count = (int)(out.count / 6);   /* 6 floats per vertex */
+    return out.data;
+}
+
+/* Upload an interleaved pos+normal vertex array to a VAO/VBO. */
+static Mesh mesh_create(const float *verts, int vertex_count) {
+    Mesh mesh = { .vertex_count = vertex_count };
+
+    GLuint vbo;
+    glGenVertexArrays(1, &mesh.vao);
+    glGenBuffers(1, &vbo);
+
+    glBindVertexArray(mesh.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)(vertex_count * 6 * sizeof(float)),
+                 verts, GL_STATIC_DRAW);
+
+    /* position: slot 0, 3 floats, stride 6 floats, offset 0 */
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(0);
+    /* normal: slot 1, 3 floats, SAME stride, offset 3 floats in */
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          (void *)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+    return mesh;
+}
+
+/* One-time setup: load the mesh, build the program. Runs once, before the loop. */
 static int init_scene(AppState *state) {
-    /* 8 corners: x,y,z  then  r,g,b (color = position + 0.5 -> the RGB color cube) */
-    static const float vertices[] = {
-        -0.5f,-0.5f,-0.5f,  0,0,0,   /* 0 */
-         0.5f,-0.5f,-0.5f,  1,0,0,   /* 1 */
-         0.5f, 0.5f,-0.5f,  1,1,0,   /* 2 */
-        -0.5f, 0.5f,-0.5f,  0,1,0,   /* 3 */
-        -0.5f,-0.5f, 0.5f,  0,0,1,   /* 4 */
-         0.5f,-0.5f, 0.5f,  1,0,1,   /* 5 */
-         0.5f, 0.5f, 0.5f,  1,1,1,   /* 6 */
-        -0.5f, 0.5f, 0.5f,  0,1,1,   /* 7 */
-    };
-    /* 12 triangles (2 per face). 8 verts reused 36 times — the index payoff. */
-    static const unsigned int indices[] = {
-        0,1,2, 2,3,0,   /* back   */
-        4,5,6, 6,7,4,   /* front  */
-        0,3,7, 7,4,0,   /* left   */
-        1,5,6, 6,2,1,   /* right  */
-        0,4,5, 5,1,0,   /* bottom */
-        3,2,6, 6,7,3,   /* top    */
-    };
-    state->index_count = sizeof(indices) / sizeof(indices[0]);
+    int vertex_count = 0;
+    float *verts = load_obj("cube.obj", &vertex_count);
+    if (!verts || vertex_count == 0) {
+        fprintf(stderr, "init_scene: failed to load cube.obj\n");
+        free(verts);
+        return 0;
+    }
+    printf("loaded cube.obj: %d vertices\n", vertex_count);   /* expect 36 */
 
     GLuint vs = compile_shader(GL_VERTEX_SHADER, VERTEX_SRC);
     GLuint fs = compile_shader(GL_FRAGMENT_SHADER, FRAGMENT_SRC);
-    if (!vs || !fs) return 0;
+    if (!vs || !fs) { free(verts); return 0; }
 
     state->program = link_program(vs, fs);
     glDeleteShader(vs);   /* the program owns the compiled code now; */
     glDeleteShader(fs);   /* the standalone shader objects can go    */
-    if (!state->program) return 0;
+    if (!state->program) { free(verts); return 0; }
 
     state->u_model_loc = glGetUniformLocation(state->program, "uModel");
     state->u_view_loc  = glGetUniformLocation(state->program, "uView");
     state->u_proj_loc  = glGetUniformLocation(state->program, "uProj");
 
-    GLuint vbo, ebo;
-    glGenVertexArrays(1, &state->vao);
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
-
-    glBindVertexArray(state->vao);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-    /* the index buffer — bound while the VAO is bound, so the VAO records it */
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-
-    /* position: slot 0, 3 floats, stride 6 floats, offset 0 */
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)0);
-    glEnableVertexAttribArray(0);
-    /* color: slot 1, 3 floats, SAME stride, offset 3 floats in */
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
-                          (void *)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);   /* unbind VAO (NOT the EBO first — VAO has it recorded) */
+    state->cube = mesh_create(verts, vertex_count);
+    free(verts);   /* GPU has its own copy now — CPU array is done */
 
     glEnable(GL_DEPTH_TEST);  /* nearer fragments win */
     return 1;
@@ -168,8 +229,8 @@ static void render(const AppState *state) {
     glUniformMatrix4fv(state->u_view_loc,  1, GL_FALSE, view.m);
     glUniformMatrix4fv(state->u_proj_loc,  1, GL_FALSE, proj.m);
 
-    glBindVertexArray(state->vao);
-    glDrawElements(GL_TRIANGLES, state->index_count, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(state->cube.vao);
+    glDrawArrays(GL_TRIANGLES, 0, state->cube.vertex_count);
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -215,7 +276,7 @@ int main(void) {
     AppState state = {0};
 
     if (!init_scene(&state)) {              /* one-time setup */
-        fprintf(stderr, "triangle init failed\n");
+        fprintf(stderr, "scene init failed\n");
         glfwDestroyWindow(window);
         glfwTerminate();
         return EXIT_FAILURE;
