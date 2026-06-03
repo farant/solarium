@@ -51,7 +51,7 @@ static const char *FRAGMENT_SRC =
     "    FragColor = vec4(color, 1.0);\n"
     "}\n";
 
-typedef struct { RhiBuffer buffer; int vertex_count; } Mesh;
+typedef struct { RhiBuffer vbuffer; RhiBuffer ibuffer; int index_count; } Mesh;
 
 typedef struct {
     int         fb_width, fb_height;
@@ -164,6 +164,8 @@ static int init_scene(AppState *state) {
     const char *model_path = "suzanne.obj";   /* swap to "cube.obj" to test the cube */
     int vertex_count = 0;
     float *verts;
+    sol_u32 *indices;
+    int i;
     RhiShader shader;
     RhiPipelineDesc desc;
 
@@ -187,10 +189,18 @@ static int init_scene(AppState *state) {
     desc.depth_test = SOL_TRUE;
     state->pipeline = rhi_create_pipeline(&desc);
 
-    state->mesh.buffer       = rhi_create_buffer(RHI_BUFFER_VERTEX, verts,
-                                   (size_t)vertex_count * 6 * sizeof(float));
-    state->mesh.vertex_count = vertex_count;
+    state->mesh.vbuffer = rhi_create_buffer(RHI_BUFFER_VERTEX, verts,
+                              (size_t)vertex_count * 6 * sizeof(float));
     free(verts);   /* GPU has its own copy now — CPU array is done */
+
+    /* sequential index buffer (i -> i): exercises indexed drawing without
+       changing what is drawn, so Suzanne stays pixel-identical */
+    indices = malloc((size_t)vertex_count * sizeof(sol_u32));
+    for (i = 0; i < vertex_count; i++) indices[i] = (sol_u32)i;
+    state->mesh.ibuffer = rhi_create_buffer(RHI_BUFFER_INDEX, indices,
+                              (size_t)vertex_count * sizeof(sol_u32));
+    free(indices);
+    state->mesh.index_count = vertex_count;
     return 1;
 }
 
@@ -223,8 +233,9 @@ static void render(const AppState *state) {
     rhi_set_uniform_mat4("uProj",    proj.m);
     rhi_set_uniform_vec3("uViewPos", eye.x, eye.y, eye.z);
 
-    rhi_bind_vertex_buffer(state->mesh.buffer);
-    rhi_draw(0, state->mesh.vertex_count);
+    rhi_bind_vertex_buffer(state->mesh.vbuffer);
+    rhi_bind_index_buffer(state->mesh.ibuffer);
+    rhi_draw_indexed(0, state->mesh.index_count);
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -270,6 +281,20 @@ int main(void) {
         glfwTerminate();
         return EXIT_FAILURE;
     }
+
+#ifndef NDEBUG
+    /* teardown self-test (item 1 acceptance): create/destroy in a loop must be
+       ASan-clean and bounded — the free-list reuses one slot the whole time */
+    {
+        int n;
+        sol_f32 tmp = 0.0f;
+        for (n = 0; n < 5000; n++) {
+            RhiBuffer b = rhi_create_buffer(RHI_BUFFER_VERTEX, &tmp, sizeof tmp);
+            rhi_destroy_buffer(b);
+        }
+        printf("teardown selftest: 5000 create/destroy cycles ok\n");
+    }
+#endif
 
     last = glfwGetTime();
 

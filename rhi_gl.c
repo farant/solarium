@@ -1,4 +1,4 @@
-/* gl_backend.c — the OpenGL implementation of rhi.h.
+/* rhi_gl.c — the OpenGL implementation of rhi.h.
    This is the ONLY file that includes a GL header. All the GL state,
    the bind-to-edit dance, and the silent-failure traps live in here. */
 
@@ -35,6 +35,40 @@ static sol_u32    g_pipeline_count;
 
 static struct GLFWwindow *g_window;
 static const GlPipeline  *g_current;   /* pipeline bound by rhi_set_pipeline */
+
+/* ---- free-lists: reused slots so create/destroy loops stay bounded ---- */
+static sol_u32 g_buffer_free[MAX_BUFFERS];
+static sol_u32 g_buffer_free_count;
+static sol_u32 g_shader_free[MAX_SHADERS];
+static sol_u32 g_shader_free_count;
+static sol_u32 g_pipeline_free[MAX_PIPELINES];
+static sol_u32 g_pipeline_free_count;
+
+/* Reuse a freed slot if one exists, else extend the table. */
+static sol_u32 slot_alloc(sol_u32 *count, sol_u32 *free_list, sol_u32 *free_count) {
+    if (*free_count > 0) {
+        *free_count -= 1;
+        return free_list[*free_count];
+    }
+    return (*count)++;
+}
+
+static void slot_free(sol_u32 idx, sol_u32 *free_list, sol_u32 *free_count) {
+    free_list[*free_count] = idx;
+    *free_count += 1;
+}
+
+/* ---- debug GL error check: silent unless we introduce a real error ---- */
+#ifndef NDEBUG
+static void gl_check(const char *where) {
+    GLenum err;
+    while ((err = glGetError()) != GL_NO_ERROR) {
+        fprintf(stderr, "GL error 0x%04x at %s\n", (unsigned)err, where);
+    }
+}
+#else
+#define gl_check(where) ((void)0)
+#endif
 
 /* ---- shader compile/link (moved here from main.c — it's GL) ---- */
 static GLuint compile_shader(GLenum type, const char *src) {
@@ -106,18 +140,19 @@ void rhi_shutdown(void) {
 
 /* ---- resource creation ---- */
 RhiBuffer rhi_create_buffer(RhiBufferType type, const void *data, size_t size) {
-    GLenum target = (type == RHI_BUFFER_INDEX) ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER;
     GLuint vbo;
     sol_u32 idx;
     RhiBuffer h;
+    (void)type;   /* a GL buffer is typeless; the target matters at BIND time */
 
     glGenBuffers(1, &vbo);
-    glBindBuffer(target, vbo);
-    glBufferData(target, (GLsizeiptr)size, data, GL_STATIC_DRAW);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, vbo);   /* neutral: touches no VAO state */
+    glBufferData(GL_COPY_WRITE_BUFFER, (GLsizeiptr)size, data, GL_STATIC_DRAW);
 
-    idx = g_buffer_count++;
+    idx = slot_alloc(&g_buffer_count, g_buffer_free, &g_buffer_free_count);
     g_buffers[idx] = vbo;
     h.id = idx + 1;
+    gl_check("rhi_create_buffer");
     return h;
 }
 
@@ -136,7 +171,7 @@ RhiShader rhi_create_shader(const char *vertex_src, const char *fragment_src) {
     glDeleteShader(fs);
     if (!program) return h;
 
-    idx = g_shader_count++;
+    idx = slot_alloc(&g_shader_count, g_shader_free, &g_shader_free_count);
     g_shaders[idx] = program;
     h.id = idx + 1;
     return h;
@@ -148,7 +183,7 @@ RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
     sol_u32 idx;
     int i;
 
-    idx = g_pipeline_count++;
+    idx = slot_alloc(&g_pipeline_count, g_pipeline_free, &g_pipeline_free_count);
     p = &g_pipelines[idx];
 
     p->program    = g_shaders[desc->shader.id - 1];
@@ -197,6 +232,11 @@ void rhi_bind_vertex_buffer(RhiBuffer buffer) {
     }
 }
 
+void rhi_bind_index_buffer(RhiBuffer buffer) {
+    /* element-buffer binding is VAO state; the pipeline's VAO is current */
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_buffers[buffer.id - 1]);
+}
+
 void rhi_set_uniform_mat4(const char *name, const float *m) {
     GLint loc = glGetUniformLocation(g_current->program, name);
     glUniformMatrix4fv(loc, 1, GL_FALSE, m);
@@ -211,6 +251,42 @@ void rhi_draw(int first_vertex, int vertex_count) {
     glDrawArrays(GL_TRIANGLES, first_vertex, vertex_count);
 }
 
+void rhi_draw_indexed(int first_index, int index_count) {
+    const void *offset = (const void *)(first_index * sizeof(sol_u32));
+    glDrawElements(GL_TRIANGLES, index_count, GL_UNSIGNED_INT, offset);
+    gl_check("rhi_draw_indexed");
+}
+
 void rhi_present(void) {
     glfwSwapBuffers(g_window);
+}
+
+/* ---- resource teardown (free-list keeps create/destroy loops bounded) ---- */
+void rhi_destroy_buffer(RhiBuffer buffer) {
+    sol_u32 idx = buffer.id - 1;
+    glDeleteBuffers(1, &g_buffers[idx]);
+    g_buffers[idx] = 0;
+    slot_free(idx, g_buffer_free, &g_buffer_free_count);
+    gl_check("rhi_destroy_buffer");
+}
+
+void rhi_destroy_shader(RhiShader shader) {
+    sol_u32 idx = shader.id - 1;
+    glDeleteProgram(g_shaders[idx]);
+    g_shaders[idx] = 0;
+    slot_free(idx, g_shader_free, &g_shader_free_count);
+    gl_check("rhi_destroy_shader");
+}
+
+void rhi_destroy_pipeline(RhiPipeline pipeline) {
+    sol_u32 idx = pipeline.id - 1;
+    glDeleteVertexArrays(1, &g_pipelines[idx].vao);
+    g_pipelines[idx].vao = 0;
+    g_pipelines[idx].program = 0;   /* not owned here — the shader owns the program */
+    slot_free(idx, g_pipeline_free, &g_pipeline_free_count);
+    gl_check("rhi_destroy_pipeline");
+}
+
+void rhi_destroy_texture(RhiTexture texture) {
+    (void)texture;   /* textures aren't created until item 5; stub for now */
 }

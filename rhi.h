@@ -50,9 +50,17 @@ void rhi_begin_frame(int fb_width, int fb_height,
                      float r, float g, float b, float a);  /* viewport + clear color & depth */
 void rhi_set_pipeline(RhiPipeline pipeline);               /* binds shader + layout + state */
 void rhi_bind_vertex_buffer(RhiBuffer buffer);
+void rhi_bind_index_buffer(RhiBuffer buffer);
 void rhi_set_uniform_mat4(const char *name, const float *m);     /* on the bound pipeline */
 void rhi_set_uniform_vec3(const char *name, float x, float y, float z);
 void rhi_draw(int first_vertex, int vertex_count);
+void rhi_draw_indexed(int first_index, int index_count);
 void rhi_present(void);
+
+/* ---- resource teardown ---- */
+void rhi_destroy_buffer(RhiBuffer buffer);
+void rhi_destroy_shader(RhiShader shader);
+void rhi_destroy_pipeline(RhiPipeline pipeline);
+void rhi_destroy_texture(RhiTexture texture);
 
 #endif /* RHI_H */
