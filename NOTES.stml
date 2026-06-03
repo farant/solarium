@@ -1,0 +1,280 @@
+
+
+<log t="6.3.2026@1:06am" (>
+	Got step 1 working! It is printing out GL_VERSION and GL_RENDERER and
+	a dark blue / black window pops up. The window closes and app exits
+	when I click the close control on the window. Going to add .gitignore
+	and do first commit now.
+	
+
+<program-output t="6.3.2026@1:06am">
+	GL_VERSION : 4.1 Metal - 88.1
+	GL_RENDERER: Apple M2
+	</>
+
+
+<fix>
+	<problem (> GLFW is including old version of OpenGL
+	<solution (> #define GLFW_INCLUDE_NONE
+	</>
+	
+<fix>
+	<problem (> clangd is complaining about GLFW/glfw3.h
+	<solution (> Add a compile_commands.json 
+	</>
+	
+
+<talking-about subject="main.c">
+	
+	<questions>
+		<(> Why are update() and render() and on_key(), etc static?
+		<((> 
+			What does it mean to cast arguments to (void) in update? Why not 
+			empty?
+			<answer (>
+				It means they are intentionally unused to avoid warnings
+		</>
+
+
+	<code c>
+
+		#define GL_SILENCE_DEPRECATION
+
+		#include <stdio.h>
+		#include <stdlib.h>
+
+		#include <GLFW/glfw3.h>
+		#include <OpenGL/gl3.h>
+		
+
+		typedef struct {
+			int fp_width;
+			int fp_height;
+		} AppState;
+
+		static void update(AppState *state, double dt) {
+			(void)state;
+			(void)dt;
+		}
+
+		static void render(const AppState *state) {
+			glViewport(0, 0, state->fb_width, state->fb_height);
+			glClearColor(0.10f, 0.12f, 0.15f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+		}
+
+		static void on_key(
+			GLFWwindow *window,
+			int key,
+			int scancode,
+			int action,
+			int mods)
+		{
+			(void)scancode;
+			(void)mods;
+			if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+				glfwSetWindowShouldClose(window, GLFW_TRUE);
+			}
+		}
+
+		int main(void) {
+			if (!glfwInit()) {
+				fprintf(stderr, "glfwInit failed\n");
+				return EXIT_FAILURE;
+			}
+
+			glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+			glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+			glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+			glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+
+			GLFWwindow *window = glfwCreateWindow(
+															960, 540, "solarium", NULL, NULL);
+
+			if (!window) {
+				fprintf(stderr, "glfwCreateWindow failed\n");
+				glfwTerminate();
+				return EXIT_FAILURE;
+			}
+
+			glfwMakeContextCurrent(window);
+			glfwSwapInterval(1);
+			glfwSetKeyCallback(window, on_key);
+
+			printf("GL_VERSION : %s\n", glGetString(GL_VERSION));
+			printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
+
+			AppState state = {0};
+			double last = glfwGetTime();
+
+			while (!glfwWindowShouldClose(window)) {
+				glfwPollEvents();
+
+				double now = glfwGetTime();
+				double dt = now - last;
+				last = now;
+
+				glfwGetFramebufferSize(window, &state.fb_width, &state.fb_height);
+
+				update(&state, dt);
+				render(&state);
+
+				glfwSwapBuffers(window);
+			}
+
+			glfwDestroyWindow(window);
+			glfwTerminate();
+
+			return EXIT_SUCCESS;
+		}
+		</>
+
+	</>
+
+<talking-about subject="build.sh">
+
+	<decision (>
+		Do I include a release mode build in the script or just debug?
+
+	<decision made (>
+		Not including incremental compilation when it's a single .c file
+
+	
+	<shell-commands>
+		<(> set
+		<(> clang
+		<(> echo
+		<(> if
+		<(> then
+		<(> else
+		<(> fi
+		</>
+
+	<clang-flags>
+		<( meaning="disables optimizations"> -O0
+		<( meaning="emits debug symbols"> -g
+		<( meaning="standard switch to compile out assert()"> -DNDEBUG
+		<(> -O2
+		<(> -Wall
+		<(> -Wextra
+		<(> -framework
+		<(> -o
+		<(> -std
+		</>
+
+	<pkg-config-flags>
+		<(> --cflags
+		<(> --libs
+		</>
+
+	<code sh>
+		#!/bin/sh
+		set -eu
+
+		clang \
+			-std=c11 \
+			-g -O0 \
+			-Wall -Wextra \
+			main.c \
+			$(pkg-config --cflags glfw3) \
+			$(pkg-config --libs glfw3) \
+			-framework OpenGL \
+			-framework Cocoa \
+			-framework IOKit \
+			-o solarium
+
+		echo "built ./solarium"
+	</code>
+
+	</>
+
+
+<forms>
+	&OpenGL context;
+	&depth-testing;
+	&GPU driver;
+	&thread-local global;
+	&framebuffer;
+	&debug-output callbacks;
+	&GLSL shader;
+	&VAOs;
+	&GLUT;
+	&freeGLUT;
+	&GLFW;
+	&SDL;
+	&Zink;
+	&MoltenVK;
+	<tool-for-libraries>
+		&formal deprecation model;
+		</>
+	</>
+
+
+<function library="OpenGL">
+	<include header="OpenGL/gl3.h" />
+	<(>glClear()
+
+
+<function library="GLFW">
+	<include header="GLFW/glfw3.h" />
+	<(> glfwWindowHint()
+	<(> glfwDefaultWindowHints()
+	<(> glfwMakeContextCurrent()
+	<(> glfwCreateWindow()
+
+<constants library="GLFW">
+	<(> GLFW_OPENGL_CORE_PROFILE
+	<(> GLFW_OPENGL_FORWARD_COMPAT
+
+<talking-about Step-1>
+
+	<question (>
+		What is a VAO?
+
+	<question ((> 
+		What is a context? This sounds like a GL thing or a GLFW thing?
+		<answer (>
+			OpenGL context is the entire state of the GL machine
+			
+	<question ((>
+		What is a GLFW hint? Is that a global variable that comes from an 
+		include?
+		<answer (>
+			It's a sticky value you set using &glfwWindowHint();
+
+	<questions>
+		<(> Are we using OpenGL 3.3?
+		<(> Why aren't we using OpenGL 4.1?
+		<(> Should we try to use OpenGL 4.1?
+		<(> 
+			Are there any other good events to know about, history of graphics 
+			libraries on macOS, OpenGL, GLFW, etc that are relevant to what we 
+			are currently doing or particularly educational?
+
+
+	<notes>
+		<(> Cocoa is used internally by GLFW
+		<(> IOKit is used internally by GLFW
+		<(> Maximum available version of OpenGL available on MacOS is 4.1 core
+
+	<event year="1992" (> OpenGL 1.0 released
+	<event year="2004" (> OpenGL 2.0 released with GLSL shaders
+	<event year="2008" (> OpenGL 3.0 released with VAOs
+	<event year="2014" (> Metal announced
+	<event year="2016" (> Vulkan released 
+	<event year="2018" (> Apple deprecated OpenGL and OpenCL
+
+	<tools-mentioned>
+		<(> clang 16
+		<(> GNU Make
+		<(> pkg-config
+		<(> Xcode CLT
+		</>
+
+	<frameworks>
+		<(> OpenGL
+		<(> Cocoa
+		<(> IOKit
+		</>
+
+	</>

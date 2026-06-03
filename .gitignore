@@ -1,0 +1,8 @@
+# Build artifacts
+/solarium
+*.o
+*.dSYM/
+
+# Editor / tooling
+compile_commands.json
+.cache/
