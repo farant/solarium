@@ -49,6 +49,7 @@ static const char *FRAGMENT_SRC =
     "    vec3 color = baseColor * ambient\n"
     "               + baseColor * lightColor * diff\n"
     "               + lightColor * spec;\n"                    /* Blinn-Phong highlight */
+    "    color = pow(color, vec3(1.0 / 2.2));\n"              /* linear -> sRGB for display */
     "    FragColor = vec4(color, 1.0);\n"
     "}\n";
 
