@@ -7,39 +7,38 @@
 #include <GLFW/glfw3.h>
 #include <OpenGL/gl3.h>
 
+#include "sol_math.h"
+
 /* --- shaders: plain text, compiled at runtime by the driver --- */
 static const char *VERTEX_SRC =
     "#version 330 core\n"
-    "layout (location = 0) in vec3 aPos;\n"   /* input slot 0: a vec3 position */
-    "layout (location = 1) in vec2 aUV;\n"    /* input slot 1: texture coords */
-    "uniform float u_angle;\n"                /* per-draw constant, set each frame */
-    "out vec2 vUV;\n"                         /* hand UV to the fragment stage */
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 1) in vec3 aColor;\n"
+    "uniform mat4 uModel;\n"
+    "uniform mat4 uView;\n"
+    "uniform mat4 uProj;\n"
+    "out vec3 vColor;\n"
     "void main() {\n"
-    "    float c = cos(u_angle);\n"
-    "    float s = sin(u_angle);\n"
-    "    vec2 r = vec2(aPos.x * c - aPos.y * s,\n"   /* 2D rotation, hand-rolled */
-    "                  aPos.x * s + aPos.y * c);\n"
-    "    gl_Position = vec4(r, aPos.z, 1.0);\n"      /* still NDC — no matrices yet */
-    "    vUV = aUV;\n"                               /* rasterizer interpolates this */
+    "    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);\n"  /* the pipeline */
+    "    vColor = aColor;\n"
     "}\n";
 
 static const char *FRAGMENT_SRC =
     "#version 330 core\n"
-    "in vec2 vUV;\n"                          /* interpolated UV for this pixel */
+    "in vec3 vColor;\n"
     "out vec4 FragColor;\n"
-    "uniform sampler2D uTex;\n"               /* holds a texture UNIT number */
     "void main() {\n"
-    "    FragColor = texture(uTex, vUV);\n"   /* fetch the texel at this UV */
+    "    FragColor = vec4(vColor, 1.0);\n"
     "}\n";
 
 typedef struct {
     int    fb_width;
     int    fb_height;
-    GLuint program;       /* the linked shader logic */
-    GLuint vao;           /* how to read the vertex data */
-    GLuint tex;           /* the checker texture, bound to unit 0 */
-    GLint  u_angle_loc;   /* where u_angle lives in the program (queried once) */
-    float  angle;         /* the simulation state update() advances */
+    GLuint  program;      /* the linked shader logic */
+    GLuint  vao;          /* how to read the vertex data */
+    GLsizei index_count;  /* how many indices to draw */
+    GLint   u_model_loc, u_view_loc, u_proj_loc;
+    float   angle;        /* the simulation state update() advances */
 } AppState;
 
 /* Compile one shader, and ACTUALLY CHECK it — silent failure otherwise */
@@ -81,22 +80,27 @@ static GLuint link_program(GLuint vs, GLuint fs) {
 
 /* One-time GPU setup: program + VBO + VAO. Runs once, before the loop. */
 static int init_scene(AppState *state) {
-    /* interleaved: x, y, z, u, v  — a quad = two triangles = 6 vertices */
+    /* 8 corners: x,y,z  then  r,g,b (color = position + 0.5 -> the RGB color cube) */
     static const float vertices[] = {
-        -0.5f, -0.5f, 0.0f,   0.0f, 0.0f,   /* tri 1 */
-         0.5f, -0.5f, 0.0f,   1.0f, 0.0f,
-         0.5f,  0.5f, 0.0f,   1.0f, 1.0f,
-
-        -0.5f, -0.5f, 0.0f,   0.0f, 0.0f,   /* tri 2 — 2 verts are DUPLICATES */
-         0.5f,  0.5f, 0.0f,   1.0f, 1.0f,
-        -0.5f,  0.5f, 0.0f,   0.0f, 1.0f,
+        -0.5f,-0.5f,-0.5f,  0,0,0,   /* 0 */
+         0.5f,-0.5f,-0.5f,  1,0,0,   /* 1 */
+         0.5f, 0.5f,-0.5f,  1,1,0,   /* 2 */
+        -0.5f, 0.5f,-0.5f,  0,1,0,   /* 3 */
+        -0.5f,-0.5f, 0.5f,  0,0,1,   /* 4 */
+         0.5f,-0.5f, 0.5f,  1,0,1,   /* 5 */
+         0.5f, 0.5f, 0.5f,  1,1,1,   /* 6 */
+        -0.5f, 0.5f, 0.5f,  0,1,1,   /* 7 */
     };
-
-    /* a 2x2 RGB checker, four distinct colors so the mapping is legible */
-    static const unsigned char pixels[] = {
-        255,  80,  80,    80, 255,  80,   /* row 0: red,   green  */
-         80,  80, 255,   240, 240,  80,   /* row 1: blue,  yellow */
+    /* 12 triangles (2 per face). 8 verts reused 36 times — the index payoff. */
+    static const unsigned int indices[] = {
+        0,1,2, 2,3,0,   /* back   */
+        4,5,6, 6,7,4,   /* front  */
+        0,3,7, 7,4,0,   /* left   */
+        1,5,6, 6,2,1,   /* right  */
+        0,4,5, 5,1,0,   /* bottom */
+        3,2,6, 6,7,3,   /* top    */
     };
+    state->index_count = sizeof(indices) / sizeof(indices[0]);
 
     GLuint vs = compile_shader(GL_VERTEX_SHADER, VERTEX_SRC);
     GLuint fs = compile_shader(GL_FRAGMENT_SHADER, FRAGMENT_SRC);
@@ -107,63 +111,65 @@ static int init_scene(AppState *state) {
     glDeleteShader(fs);   /* the standalone shader objects can go    */
     if (!state->program) return 0;
 
-    state->u_angle_loc = glGetUniformLocation(state->program, "u_angle");
-    if (state->u_angle_loc == -1) {
-        fprintf(stderr, "warning: u_angle not found (optimized out?)\n");
-    }
+    state->u_model_loc = glGetUniformLocation(state->program, "uModel");
+    state->u_view_loc  = glGetUniformLocation(state->program, "uView");
+    state->u_proj_loc  = glGetUniformLocation(state->program, "uProj");
 
-    /* --- geometry: VBO + VAO with TWO interleaved attributes --- */
-    GLuint vbo;
+    GLuint vbo, ebo;
     glGenVertexArrays(1, &state->vao);
     glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
 
     glBindVertexArray(state->vao);
+
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
-    /* position: slot 0, 3 floats, stride 5 floats, offset 0 */
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
+    /* the index buffer — bound while the VAO is bound, so the VAO records it */
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+    /* position: slot 0, 3 floats, stride 6 floats, offset 0 */
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)0);
     glEnableVertexAttribArray(0);
-    /* uv: slot 1, 2 floats, SAME stride, offset 3 floats in */
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
+    /* color: slot 1, 3 floats, SAME stride, offset 3 floats in */
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
                           (void *)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
-    glBindVertexArray(0);
+    glBindVertexArray(0);   /* unbind VAO (NOT the EBO first — VAO has it recorded) */
 
-    /* --- texture: hardcoded pixels, unit 0 --- */
-    glGenTextures(1, &state->tex);
-    glActiveTexture(GL_TEXTURE0);                 /* select unit 0 */
-    glBindTexture(GL_TEXTURE_2D, state->tex);     /* bind our texture into it */
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);        /* rows are 6 bytes, not a mult of 4 */
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);  /* blocky */
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    /* tell the sampler to read from unit 0 (set once; program must be bound) */
-    glUseProgram(state->program);
-    glUniform1i(glGetUniformLocation(state->program, "uTex"), 0);
-
+    glEnable(GL_DEPTH_TEST);  /* nearer fragments win */
     return 1;
 }
 
 static void update(AppState *state, double dt) {
-    state->angle += (float)dt * 1.5f;   /* radians/sec; tweak to taste */
+    state->angle += (float)dt * 0.8f;   /* radians/sec; tweak to taste */
 }
 
 static void render(const AppState *state) {
     glViewport(0, 0, state->fb_width, state->fb_height);
     glClearColor(0.10f, 0.12f, 0.15f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);   /* clear BOTH every frame */
 
-    glUseProgram(state->program);                      /* bind FIRST...       */
-    glUniform1f(state->u_angle_loc, state->angle);     /* ...then set uniform */
-    glBindVertexArray(state->vao);                     /* feed it this data   */
-    glDrawArrays(GL_TRIANGLES, 0, 6);                  /* 6 verts = 2 tris = 1 quad */
+    float aspect = (state->fb_height > 0)
+                 ? (float)state->fb_width / (float)state->fb_height
+                 : 1.0f;
+
+    mat4 model = mat4_mul(mat4_rotate_y(state->angle),
+                          mat4_rotate_x(state->angle * 0.5f));
+    mat4 view  = mat4_look_at(vec3_make(0, 0, 3),    /* camera pushed back on +Z */
+                              vec3_make(0, 0, 0),    /* looking at the origin     */
+                              vec3_make(0, 1, 0));   /* up is +Y                  */
+    mat4 proj  = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
+
+    glUseProgram(state->program);
+    glUniformMatrix4fv(state->u_model_loc, 1, GL_FALSE, model.m);
+    glUniformMatrix4fv(state->u_view_loc,  1, GL_FALSE, view.m);
+    glUniformMatrix4fv(state->u_proj_loc,  1, GL_FALSE, proj.m);
+
+    glBindVertexArray(state->vao);
+    glDrawElements(GL_TRIANGLES, state->index_count, GL_UNSIGNED_INT, 0);
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -184,6 +190,7 @@ int main(void) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+    glfwWindowHint(GLFW_DEPTH_BITS, 24);   /* we depend on a depth buffer */
 
     GLFWwindow *window = glfwCreateWindow(960, 540, "solarium", NULL, NULL);
     if (!window) {
