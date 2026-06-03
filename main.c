@@ -57,7 +57,8 @@ static const char *FRAGMENT_SRC =
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
-    Mesh        mesh;
+    Mesh        box;
+    Mesh        floor;
     float       angle;
 } AppState;
 
@@ -67,12 +68,10 @@ static int init_scene(AppState *state) {
     RhiShader shader;
     RhiPipelineDesc desc;
 
-    mb_init(&mb);
-    make_box(&mb, 1.0f, 1.0f, 1.0f);
-
     shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
-    if (!shader.id) { mb_free(&mb); return 0; }
+    if (!shader.id) return 0;
 
+    /* one pipeline, shared by both meshes (same 8-float layout) */
     desc.shader = shader;
     desc.attrs[0].location = 0; desc.attrs[0].format = RHI_FORMAT_FLOAT3; desc.attrs[0].offset = 0;
     desc.attrs[1].location = 1; desc.attrs[1].format = RHI_FORMAT_FLOAT3;
@@ -84,10 +83,22 @@ static int init_scene(AppState *state) {
     desc.depth_test = SOL_TRUE;
     state->pipeline = rhi_create_pipeline(&desc);
 
-    state->mesh = mesh_from_builder(&mb);
-    printf("box: %u vertices, %u indices\n",
+    /* box */
+    mb_init(&mb);
+    make_box(&mb, 1.0f, 1.0f, 1.0f);
+    state->box = mesh_from_builder(&mb);
+    printf("box:   %u vertices, %u indices\n",
            (unsigned)mb.vertex_count, (unsigned)mb.index_count);
     mb_free(&mb);
+
+    /* floor */
+    mb_init(&mb);
+    make_grid(&mb, 6.0f, 6.0f, 8);
+    state->floor = mesh_from_builder(&mb);
+    printf("floor: %u vertices, %u indices\n",
+           (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+    mb_free(&mb);
+
     return 1;
 }
 
@@ -95,34 +106,43 @@ static void update(AppState *state, double dt) {
     state->angle += (float)dt * 0.8f;   /* radians/sec; tweak to taste */
 }
 
+static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
+                      mat4 view, mat4 proj, vec3 eye) {
+    rhi_set_pipeline(state->pipeline);
+    rhi_set_uniform_mat4("uModel",   model.m);
+    rhi_set_uniform_mat4("uView",    view.m);
+    rhi_set_uniform_mat4("uProj",    proj.m);
+    rhi_set_uniform_vec3("uViewPos", eye.x, eye.y, eye.z);
+    rhi_bind_vertex_buffer(mesh.vbuffer);
+    rhi_bind_index_buffer(mesh.ibuffer);
+    rhi_draw_indexed(0, mesh.index_count);
+}
+
 static void render(const AppState *state) {
     float aspect;
-    vec3 eye;
-    mat4 model, view, proj;
+    vec3  eye;
+    mat4  view, proj, box_model, floor_model;
 
     rhi_begin_frame(state->fb_width, state->fb_height, 0.10f, 0.12f, 0.15f, 1.0f);
 
     aspect = (state->fb_height > 0)
            ? (float)state->fb_width / (float)state->fb_height
            : 1.0f;
-    eye = vec3_make(0.0f, 0.0f, 3.0f);
+    eye  = vec3_make(0.0f, 2.5f, 5.0f);   /* raised + back to see the floor */
+    view = mat4_look_at(eye,
+                        vec3_make(0.0f, 0.5f, 0.0f),    /* look at the box */
+                        vec3_make(0.0f, 1.0f, 0.0f));   /* up is +Y        */
+    proj = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
 
-    model = mat4_mul(mat4_rotate_y(state->angle),
-                     mat4_rotate_x(state->angle * 0.5f));
-    view  = mat4_look_at(eye,
-                         vec3_make(0.0f, 0.0f, 0.0f),    /* looking at the origin */
-                         vec3_make(0.0f, 1.0f, 0.0f));   /* up is +Y              */
-    proj  = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
+    /* box: tumbling, hovering above the floor */
+    box_model = mat4_mul(mat4_translate(vec3_make(0.0f, 1.0f, 0.0f)),
+                         mat4_mul(mat4_rotate_y(state->angle),
+                                  mat4_rotate_x(state->angle * 0.5f)));
+    draw_mesh(state, state->box, box_model, view, proj, eye);
 
-    rhi_set_pipeline(state->pipeline);
-    rhi_set_uniform_mat4("uModel",   model.m);
-    rhi_set_uniform_mat4("uView",    view.m);
-    rhi_set_uniform_mat4("uProj",    proj.m);
-    rhi_set_uniform_vec3("uViewPos", eye.x, eye.y, eye.z);
-
-    rhi_bind_vertex_buffer(state->mesh.vbuffer);
-    rhi_bind_index_buffer(state->mesh.ibuffer);
-    rhi_draw_indexed(0, state->mesh.index_count);
+    /* floor: static grid at y = 0 */
+    floor_model = mat4_identity();
+    draw_mesh(state, state->floor, floor_model, view, proj, eye);
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {

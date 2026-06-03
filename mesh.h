@@ -23,6 +23,8 @@ void    mb_push_triangle(MeshBuilder *b, sol_u32 a, sol_u32 i, sol_u32 c);
 
 /* primitive emitters (more to come: cylinder, arch, ...) */
 void    make_box(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 d);
+void    make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d);
+void    make_grid(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_u32 subdiv);
 
 /* upload a finished builder to GPU buffers (uses the RHI, never GL) */
 Mesh    mesh_from_builder(const MeshBuilder *b);

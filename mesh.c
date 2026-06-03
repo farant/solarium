@@ -73,6 +73,39 @@ void make_box(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 d) {
     push_quad(b, c[0], c[1], c[5], c[4],  0.0f,-1.0f,  0.0f);   /* -Y */
 }
 
+void make_grid(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_u32 subdiv) {
+    sol_u32 stride = subdiv + 1;              /* fencepost: N segments, N+1 verts */
+    sol_u32 base   = b->vertex_count;         /* so it composes onto existing geometry */
+    sol_u32 row, col;
+    sol_f32 inv = 1.0f / (sol_f32)subdiv;     /* float division — int would truncate to 0 */
+
+    /* (subdiv+1)^2 vertices, shared across cells (one up-normal, no seams) */
+    for (row = 0; row <= subdiv; row++) {
+        for (col = 0; col <= subdiv; col++) {
+            sol_f32 u = (sol_f32)col * inv;
+            sol_f32 v = (sol_f32)row * inv;
+            mb_push_vertex(b, (u - 0.5f) * w, 0.0f, (v - 0.5f) * d,   /* XZ plane, y=0 */
+                           0.0f, 1.0f, 0.0f,                          /* normal: up */
+                           u, v);                                     /* planar UV */
+        }
+    }
+    /* two triangles per cell, CCW seen from above (+Y) */
+    for (row = 0; row < subdiv; row++) {
+        for (col = 0; col < subdiv; col++) {
+            sol_u32 bl = base + row * stride + col;
+            sol_u32 br = bl + 1;
+            sol_u32 tl = bl + stride;
+            sol_u32 tr = tl + 1;
+            mb_push_triangle(b, bl, tr, br);
+            mb_push_triangle(b, bl, tl, tr);
+        }
+    }
+}
+
+void make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d) {
+    make_grid(b, w, d, 1);   /* the degenerate grid: a single quad */
+}
+
 Mesh mesh_from_builder(const MeshBuilder *b) {
     Mesh m;
     m.vbuffer = rhi_create_buffer(RHI_BUFFER_VERTEX, b->vertices,

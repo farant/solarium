@@ -71,6 +71,14 @@ static mat4 mat4_mul(mat4 a, mat4 b) {
 }
 
 /* ---- mat4 model transforms ---- */
+static mat4 mat4_translate(vec3 t) {
+    mat4 r = mat4_identity();
+    r.m[12] = t.x;  /* translation in the last column (column-major) */
+    r.m[13] = t.y;
+    r.m[14] = t.z;
+    return r;
+}
+
 static mat4 mat4_rotate_x(float a) {
     float c = cosf(a), s = sinf(a);
     mat4 r = mat4_identity();
