@@ -11,20 +11,25 @@
 static const char *VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"   /* input slot 0: a vec3 position */
+    "layout (location = 1) in vec2 aUV;\n"    /* input slot 1: texture coords */
     "uniform float u_angle;\n"                /* per-draw constant, set each frame */
+    "out vec2 vUV;\n"                         /* hand UV to the fragment stage */
     "void main() {\n"
     "    float c = cos(u_angle);\n"
     "    float s = sin(u_angle);\n"
     "    vec2 r = vec2(aPos.x * c - aPos.y * s,\n"   /* 2D rotation, hand-rolled */
     "                  aPos.x * s + aPos.y * c);\n"
     "    gl_Position = vec4(r, aPos.z, 1.0);\n"      /* still NDC — no matrices yet */
+    "    vUV = aUV;\n"                               /* rasterizer interpolates this */
     "}\n";
 
 static const char *FRAGMENT_SRC =
     "#version 330 core\n"
+    "in vec2 vUV;\n"                          /* interpolated UV for this pixel */
     "out vec4 FragColor;\n"
+    "uniform sampler2D uTex;\n"               /* holds a texture UNIT number */
     "void main() {\n"
-    "    FragColor = vec4(1.0, 0.5, 0.2, 1.0);\n"  /* one constant warm orange */
+    "    FragColor = texture(uTex, vUV);\n"   /* fetch the texel at this UV */
     "}\n";
 
 typedef struct {
@@ -32,6 +37,7 @@ typedef struct {
     int    fb_height;
     GLuint program;       /* the linked shader logic */
     GLuint vao;           /* how to read the vertex data */
+    GLuint tex;           /* the checker texture, bound to unit 0 */
     GLint  u_angle_loc;   /* where u_angle lives in the program (queried once) */
     float  angle;         /* the simulation state update() advances */
 } AppState;
@@ -74,11 +80,22 @@ static GLuint link_program(GLuint vs, GLuint fs) {
 }
 
 /* One-time GPU setup: program + VBO + VAO. Runs once, before the loop. */
-static int init_triangle(AppState *state) {
+static int init_scene(AppState *state) {
+    /* interleaved: x, y, z, u, v  — a quad = two triangles = 6 vertices */
     static const float vertices[] = {
-        -0.5f, -0.5f, 0.0f,   /* bottom-left  */
-         0.5f, -0.5f, 0.0f,   /* bottom-right */
-         0.0f,  0.5f, 0.0f,   /* top          */
+        -0.5f, -0.5f, 0.0f,   0.0f, 0.0f,   /* tri 1 */
+         0.5f, -0.5f, 0.0f,   1.0f, 0.0f,
+         0.5f,  0.5f, 0.0f,   1.0f, 1.0f,
+
+        -0.5f, -0.5f, 0.0f,   0.0f, 0.0f,   /* tri 2 — 2 verts are DUPLICATES */
+         0.5f,  0.5f, 0.0f,   1.0f, 1.0f,
+        -0.5f,  0.5f, 0.0f,   0.0f, 1.0f,
+    };
+
+    /* a 2x2 RGB checker, four distinct colors so the mapping is legible */
+    static const unsigned char pixels[] = {
+        255,  80,  80,    80, 255,  80,   /* row 0: red,   green  */
+         80,  80, 255,   240, 240,  80,   /* row 1: blue,  yellow */
     };
 
     GLuint vs = compile_shader(GL_VERTEX_SHADER, VERTEX_SRC);
@@ -95,20 +112,42 @@ static int init_triangle(AppState *state) {
         fprintf(stderr, "warning: u_angle not found (optimized out?)\n");
     }
 
+    /* --- geometry: VBO + VAO with TWO interleaved attributes --- */
     GLuint vbo;
     glGenVertexArrays(1, &state->vao);
     glGenBuffers(1, &vbo);
 
-    glBindVertexArray(state->vao);              /* record into THIS vao... */
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);         /* ...the data lives here... */
+    glBindVertexArray(state->vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
-    /* ...and THIS is how to read it: slot 0, 3 floats, stride 12, offset 0 */
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
+    /* position: slot 0, 3 floats, stride 5 floats, offset 0 */
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
     glEnableVertexAttribArray(0);
+    /* uv: slot 1, 2 floats, SAME stride, offset 3 floats in */
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
+                          (void *)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
 
-    glBindVertexArray(0);                        /* done recording */
+    glBindVertexArray(0);
+
+    /* --- texture: hardcoded pixels, unit 0 --- */
+    glGenTextures(1, &state->tex);
+    glActiveTexture(GL_TEXTURE0);                 /* select unit 0 */
+    glBindTexture(GL_TEXTURE_2D, state->tex);     /* bind our texture into it */
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);        /* rows are 6 bytes, not a mult of 4 */
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 2, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);  /* blocky */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    /* tell the sampler to read from unit 0 (set once; program must be bound) */
+    glUseProgram(state->program);
+    glUniform1i(glGetUniformLocation(state->program, "uTex"), 0);
+
     return 1;
 }
 
@@ -124,7 +163,7 @@ static void render(const AppState *state) {
     glUseProgram(state->program);                      /* bind FIRST...       */
     glUniform1f(state->u_angle_loc, state->angle);     /* ...then set uniform */
     glBindVertexArray(state->vao);                     /* feed it this data   */
-    glDrawArrays(GL_TRIANGLES, 0, 3);                  /* pull the trigger    */
+    glDrawArrays(GL_TRIANGLES, 0, 6);                  /* 6 verts = 2 tris = 1 quad */
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -168,7 +207,7 @@ int main(void) {
 
     AppState state = {0};
 
-    if (!init_triangle(&state)) {           /* one-time setup */
+    if (!init_scene(&state)) {              /* one-time setup */
         fprintf(stderr, "triangle init failed\n");
         glfwDestroyWindow(window);
         glfwTerminate();
