@@ -20,7 +20,7 @@ static const char *VERTEX_SRC =
     "out vec3 vNormal;\n"
     "void main() {\n"
     "    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);\n"
-    "    vNormal = aNormal;\n"                /* object-space, for debug viz */
+    "    vNormal = mat3(uModel) * aNormal;\n"   /* rotate normal into world space */
     "}\n";
 
 static const char *FRAGMENT_SRC =
@@ -28,7 +28,15 @@ static const char *FRAGMENT_SRC =
     "in vec3 vNormal;\n"
     "out vec4 FragColor;\n"
     "void main() {\n"
-    "    FragColor = vec4(vNormal * 0.5 + 0.5, 1.0);\n"   /* [-1,1] -> [0,1] RGB */
+    "    vec3 N = normalize(vNormal);\n"                       /* renormalize after interp */
+    "    vec3 L = normalize(vec3(0.4, 1.0, 0.6));\n"           /* direction TO the light */
+    "    vec3 lightColor = vec3(1.0, 0.98, 0.92);\n"
+    "    vec3 baseColor  = vec3(0.85, 0.45, 0.35);\n"          /* the object's color */
+    "    float ambient   = 0.15;\n"
+    "\n"
+    "    float diff = max(dot(N, L), 0.0);\n"                  /* Lambert */
+    "    vec3 color = baseColor * ambient + baseColor * lightColor * diff;\n"
+    "    FragColor = vec4(color, 1.0);\n"
     "}\n";
 
 typedef struct {
