@@ -11,8 +11,13 @@
 static const char *VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"   /* input slot 0: a vec3 position */
+    "uniform float u_angle;\n"                /* per-draw constant, set each frame */
     "void main() {\n"
-    "    gl_Position = vec4(aPos, 1.0);\n"     /* already in NDC — no matrices */
+    "    float c = cos(u_angle);\n"
+    "    float s = sin(u_angle);\n"
+    "    vec2 r = vec2(aPos.x * c - aPos.y * s,\n"   /* 2D rotation, hand-rolled */
+    "                  aPos.x * s + aPos.y * c);\n"
+    "    gl_Position = vec4(r, aPos.z, 1.0);\n"      /* still NDC — no matrices yet */
     "}\n";
 
 static const char *FRAGMENT_SRC =
@@ -25,8 +30,10 @@ static const char *FRAGMENT_SRC =
 typedef struct {
     int    fb_width;
     int    fb_height;
-    GLuint program;   /* the linked shader logic */
-    GLuint vao;       /* how to read the vertex data */
+    GLuint program;       /* the linked shader logic */
+    GLuint vao;           /* how to read the vertex data */
+    GLint  u_angle_loc;   /* where u_angle lives in the program (queried once) */
+    float  angle;         /* the simulation state update() advances */
 } AppState;
 
 /* Compile one shader, and ACTUALLY CHECK it — silent failure otherwise */
@@ -83,6 +90,11 @@ static int init_triangle(AppState *state) {
     glDeleteShader(fs);   /* the standalone shader objects can go    */
     if (!state->program) return 0;
 
+    state->u_angle_loc = glGetUniformLocation(state->program, "u_angle");
+    if (state->u_angle_loc == -1) {
+        fprintf(stderr, "warning: u_angle not found (optimized out?)\n");
+    }
+
     GLuint vbo;
     glGenVertexArrays(1, &state->vao);
     glGenBuffers(1, &vbo);
@@ -101,8 +113,7 @@ static int init_triangle(AppState *state) {
 }
 
 static void update(AppState *state, double dt) {
-    (void)state;
-    (void)dt;
+    state->angle += (float)dt * 1.5f;   /* radians/sec; tweak to taste */
 }
 
 static void render(const AppState *state) {
@@ -110,9 +121,10 @@ static void render(const AppState *state) {
     glClearColor(0.10f, 0.12f, 0.15f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    glUseProgram(state->program);          /* use this logic     */
-    glBindVertexArray(state->vao);         /* feed it this data  */
-    glDrawArrays(GL_TRIANGLES, 0, 3);      /* pull the trigger   */
+    glUseProgram(state->program);                      /* bind FIRST...       */
+    glUniform1f(state->u_angle_loc, state->angle);     /* ...then set uniform */
+    glBindVertexArray(state->vao);                     /* feed it this data   */
+    glDrawArrays(GL_TRIANGLES, 0, 3);                  /* pull the trigger    */
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -171,6 +183,7 @@ int main(void) {
         double now = glfwGetTime();
         double dt  = now - last;
         last = now;
+        if (dt > 0.1) dt = 0.1;   /* clamp: a long stall pauses motion, never lurches */
 
         glfwGetFramebufferSize(window, &state.fb_width, &state.fb_height);
 

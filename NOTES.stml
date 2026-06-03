@@ -1,5 +1,320 @@
 
 
+
+<talking-about subject="main.c" focus="a spinning traingle">
+
+	<code c>
+
+		static const char *VERTEX_SRC =
+			"#version 330 core\n"
+			"layout (location = 0) in vec3 aPost;\n"
+			"uniform float u_angle;\n"
+			"void main() {\n"
+			"  float c = cos(u_angle);\n"
+			"  float s = sin(u_angle);\n"
+			"  vec2 r = vec2(aPos.x * c - aPos.y * s, \n"
+			"                aPos.X * s + aPos.y * c);\n"
+			"gl_Position = vec4(r, aPos.z, 1.0);\n"
+			"}\n";
+
+		// ...
+
+		typedef struct {
+			int    fb_width;
+			int    fb_height;
+			GLuint program;
+			GLuint vao;
+			GLint  u_angle_loc;
+			float  angle;
+		} AppState;
+
+		// ...
+
+		state->u_angle_loc = glGetUniformLocation(state->program, "u_angle");
+		if (state->u_angle_loc == -1) {
+			fprintf(stderr, "warning: u_angle not found (optimized out?)\n");
+		}
+
+		// ...
+
+		static void update(AppState *state, double dt) {
+			state->angle += (float)dt * 1.5f;
+		}
+
+		// ...
+
+		static void render (const AppState *state) {
+			glViewport(0, 0, state->fb_width, state->fb_height);
+			glClearCoor(0.10f, 0.12f, 0.15f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+
+			glUseProgram(state->program);
+
+			glUniform1f(state->u_angle_loc, state->angle);
+
+			glBindVertexArray(state->vao);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+		}
+		</>
+
+	</>
+
+
+<reference-games>
+	<(> Tiny Glade
+	<(> World Builder engine
+	<(> Myst
+	<(> The Witness
+	<(> Eastshade
+	<(> Minecraft
+	<(> Return of the Obra Dinn
+	<(> Skyrim
+	<(> Dreams
+	<(> Librarian: Tidy Up the Arcane Library!
+	<(> Valheim
+	</>
+
+<talking-about subject="main.c" focus="drawing triangle">
+	
+	<code c>
+	#define GL_SILENCE_DEPRECATION
+
+	#include <stdio.h>
+	#include <stdlib.h>
+
+	#define GLFW_INCLUDE_NONE
+	#include <GLFW/glfw3.h>
+	#include <OpenGL/gl3.h>
+
+	static const char *VERTEX_SRC =
+		"#version 330 core\n"
+		"layout (location = 0) in vec3 aPos;\n"
+		"void main() {\n"
+		"  gl_Position = vec4(aPos, 1.0);\n"
+		"}\n";
+	
+	static const char *FRAGMENT_SRC =
+		"#version 330 core\n"
+		"out vec4 FragColor;\n"
+		"void main() {\n"
+		"  FragColor = vec4(1.0, 0.5, 0.2, 1.0);\n"
+		"}\n";
+
+	typedef struct {
+		int fb_width;
+		int fb_height;
+		GLuint program;
+		GLuint vao;
+	} AppState;
+
+	static GLuint compile_shader(GLenum type, const char *src) {
+		GLuint shader = glCreateShader(type);
+		glShaderSource(shader, 1, &src, NULL);
+		glCompileShader(shader);
+
+		GLint ok = 0;
+		glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+		if (!ok) {
+			char log[1024];
+			glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+			fprintf(stderr, "shader compile failed:\n%s\n", log);
+			glDeleteShader(shader);
+			return 0;
+		}
+
+		return shader;
+	}
+
+	static GLuint link_program(GLuint vs, GLuint fs) {
+		GLuint program = glCreateProgram();
+		glAttachShader(program, vs);
+		glAttachShader(program, fs);
+		glLinkProgram(program);
+
+		GLint ok = 0;
+		glGetProgramiv(program, GL_LINK_STATUS, &ok);
+		if (!ok) {
+			char log[1024];
+			glGetProgramInfoLog(program, sizeof(log), NULL, log);
+			fprintf(stderr, "program link failed:\n%s\n", log);
+			glDeleteProgram(program);
+			return 0;
+		}
+		return program;
+	}
+
+	static int init_triangle(AppState *state) {
+		static const float vertices[] = {
+			-0.5f, -0.5f, 0.0f,
+			 0.5f, -0.5f, 0.0f,
+			 0.0f,  0.5f, 0.0f,
+		};
+
+		GLuint vs = compile_shader(GL_VERTEX_SHADER, VERTEX_SRC);
+		GLuint fs = compile_shader(GL_FRAGMENT_SHADER, FRAGMENT_SRC);
+		if (!vs || !fs) return 0;
+
+		state->program = link_program(vs, fs);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		if (!state->program) return 0;
+
+		GLuint vbo;
+		glGenVertexArrays(1, &state->vao);
+		glGenBuffers(1, &vbo);
+
+		glBindVertexArray(state->vao);
+
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+		glBufferData(
+			GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+		glVertexAttribPointer(
+			0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+		glEnableVertexAttrbiArray(0);
+
+		glBindVertexArray(0);
+
+		return 1;
+	}
+
+	static void update(AppState *state, double dt) {
+		(void)state;
+		(void)dt;
+	}
+
+	static void render(const AppState *state) {
+		glViewport(0, 0, state->fb_width, state->fb_height);
+		glClearColor(0.10f, 0.12f, 0.15f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+
+		glUseProgram(state->program);
+		glBindVertexArray(state->vao);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
+
+	static void on_key(
+		GLFWwindow *window, int key, int scancode, int action, int mods) {
+		(void)scancode;
+		(void)mods;
+		if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+			glfwSetWindowShouldClose(window, GLFW_TRUE);
+		}
+	}
+
+	int main(void) {
+		if (!glfwInit()) {
+			fprintf(stderr, "glfwInit failed\n");
+			return EXIT_FAILURE;
+		}
+
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+		glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+
+		GLFWwindow *window = glfwCreateWindow(
+														960, 540, "solarium", NULL, NULL);
+
+		if (!window) {
+			fprintf(stderr, "glfwCreateWindow failed\n");
+			glfwTerminate();
+			return EXIT_FAILURE;
+		}
+
+		glfwMakeContextCurrent(window);
+		glfwSwapInterval(1);
+		glfwSetKeyCallback(window, on_key);
+
+		printf("GL_VERSION : %s\n", glGetString(GL_VERSION));
+		printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
+
+		GLint profile = 0, flags = 0;
+		glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile);
+		glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
+		printf("CORE PROFILE  : %s\n",
+			(profile & GL_CONTEXT_CORE_PROFILE_BIT) ? "yes" : "no");
+		printf("FWD COMPATIBLE: %s\n",
+			(flags & GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) ? "yes" : "no");
+
+		AppState state = {0}
+
+		if (!init_triangle(&state)) {
+			fprintf(stderr, "triangle init failed\n");
+			glfwDestroyWindow(window);
+			glfwTerminate();
+			return EXIT_FAILURE;
+		}
+
+		double last = glfwGetTime();
+
+		while (!flgwWindowShouldClose(window)) {
+			glfwPollEvents();
+
+			double now = glfwGetTime();
+			double dt  = now - last;
+			last = now;
+
+			glfwGetFramebufferSize(window, &state.fb_width, &state.fb_height);
+
+			update(&state, dt);
+			render(&state);
+
+			glfwSwapBuffers(window);
+		}
+
+		glfwDestroyWindow(window);
+		glfwTerminate();
+		return EXIT_SUCCESS;
+	}
+
+		</>
+	</>
+
+<forms>
+	&Vertex Buffer Object (VBO);
+	&Vertex Array Object (VAO);
+	&Shader program;
+	&Normalized Device Coordinates;
+	&Uniform;
+	&Attribute;
+	&texture;
+	&UV coordinate;
+	&texture unit number;
+	&texture unit;
+	&rasterizer;
+
+	</>
+
+<fix subject="frame stutter">
+	<problem (>
+		Spinning triangle shows mild frame stutter. Not aliasing (edges) —
+		it's temporal. Guessed vsync/double-buffering first; both already
+		handled in our code, so that was wrong.
+	<investigation (>
+		Instrumented the loop: split each frame into render-submit time vs
+		swap/present block time, printed once per second.
+		- render (our GL submission): avg ~0.08ms, dead flat  -> NOT us
+		- swap (vsync/present block):  avg ~10ms, max pegged ~17.00ms
+		120Hz panel: 8.33ms = 1 refresh, 16.67ms = 2 refreshes. swap is
+		bimodal between 1 and 2 intervals -> uneven present cadence.
+		Also saw 447-499 fps bursts at startup = impossible under real
+		vsync, so vsync isn't cleanly capping either.
+	<root-cause (>
+		Presentation/vsync cadence on the deprecated macOS GL-on-Metal path
+		is irregular. NOT our code, NOT performance, NOT the dt math. Known
+		limitation of legacy OpenGL on Apple Silicon.
+	<solution (>
+		Option 1 (accept for now): keep &glfwSwapInterval(1);, add a dt
+		clamp (if dt > 0.1, dt = 0.1) so a long stall pauses motion instead
+		of lurching. Residual micro-stutter is a platform artifact.
+	<not-the-fix (>
+		"Fix Your Timestep" (fixed timestep + interpolation) addresses
+		simulation/variable-dt judder, NOT presentation jitter — wouldn't
+		help this symptom.
+	</>
+
 <log t="6.3.2026@1:06am" (>
 	Got step 1 working! It is printing out GL_VERSION and GL_RENDERER and
 	a dark blue / black window pops up. The window closes and app exits
