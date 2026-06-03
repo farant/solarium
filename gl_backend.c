@@ -23,15 +23,15 @@ typedef struct {
     RhiVertexAttr attrs[RHI_MAX_ATTRS];
     int           attr_count;
     GLsizei       stride;
-    bool          depth_test;
+    int           depth_test;
 } GlPipeline;
 
-static GLuint     g_buffers[MAX_BUFFERS];
-static uint32_t   g_buffer_count;
-static GLuint     g_shaders[MAX_SHADERS];
-static uint32_t   g_shader_count;
-static GlPipeline g_pipelines[MAX_PIPELINES];
-static uint32_t   g_pipeline_count;
+static GLuint       g_buffers[MAX_BUFFERS];
+static unsigned int g_buffer_count;
+static GLuint       g_shaders[MAX_SHADERS];
+static unsigned int g_shader_count;
+static GlPipeline   g_pipelines[MAX_PIPELINES];
+static unsigned int g_pipeline_count;
 
 static struct GLFWwindow *g_window;
 static const GlPipeline  *g_current;   /* pipeline bound by rhi_set_pipeline */
@@ -39,10 +39,9 @@ static const GlPipeline  *g_current;   /* pipeline bound by rhi_set_pipeline */
 /* ---- shader compile/link (moved here from main.c — it's GL) ---- */
 static GLuint compile_shader(GLenum type, const char *src) {
     GLuint shader = glCreateShader(type);
+    GLint ok = 0;
     glShaderSource(shader, 1, &src, NULL);
     glCompileShader(shader);
-
-    GLint ok = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
     if (!ok) {
         char log[1024];
@@ -56,11 +55,10 @@ static GLuint compile_shader(GLenum type, const char *src) {
 
 static GLuint link_program(GLuint vs, GLuint fs) {
     GLuint program = glCreateProgram();
+    GLint ok = 0;
     glAttachShader(program, vs);
     glAttachShader(program, fs);
     glLinkProgram(program);
-
-    GLint ok = 0;
     glGetProgramiv(program, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[1024];
@@ -85,7 +83,8 @@ void rhi_configure_window(void) {
     glfwWindowHint(GLFW_DEPTH_BITS, 24);
 }
 
-bool rhi_init(struct GLFWwindow *window) {
+int rhi_init(struct GLFWwindow *window) {
+    GLint profile = 0, flags = 0;
     g_window = window;
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
@@ -93,12 +92,11 @@ bool rhi_init(struct GLFWwindow *window) {
     printf("GL_VERSION : %s\n", glGetString(GL_VERSION));
     printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
 
-    GLint profile = 0, flags = 0;
     glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile);
     glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
     printf("CORE PROFILE  : %s\n", (profile & GL_CONTEXT_CORE_PROFILE_BIT) ? "yes" : "no");
     printf("FWD COMPATIBLE: %s\n", (flags & GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) ? "yes" : "no");
-    return true;
+    return 1;
 }
 
 void rhi_shutdown(void) {
@@ -110,46 +108,58 @@ void rhi_shutdown(void) {
 RhiBuffer rhi_create_buffer(RhiBufferType type, const void *data, size_t size) {
     GLenum target = (type == RHI_BUFFER_INDEX) ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER;
     GLuint vbo;
+    unsigned int idx;
+    RhiBuffer h;
+
     glGenBuffers(1, &vbo);
     glBindBuffer(target, vbo);
     glBufferData(target, (GLsizeiptr)size, data, GL_STATIC_DRAW);
 
-    uint32_t idx = g_buffer_count++;
+    idx = g_buffer_count++;
     g_buffers[idx] = vbo;
-    RhiBuffer h = { .id = idx + 1 };
+    h.id = idx + 1;
     return h;
 }
 
 RhiShader rhi_create_shader(const char *vertex_src, const char *fragment_src) {
-    RhiShader h = { .id = 0 };
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, vertex_src);
-    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragment_src);
+    RhiShader h;
+    GLuint vs, fs, program;
+    unsigned int idx;
+
+    h.id = 0;
+    vs = compile_shader(GL_VERTEX_SHADER, vertex_src);
+    fs = compile_shader(GL_FRAGMENT_SHADER, fragment_src);
     if (!vs || !fs) return h;
 
-    GLuint program = link_program(vs, fs);
+    program = link_program(vs, fs);
     glDeleteShader(vs);
     glDeleteShader(fs);
     if (!program) return h;
 
-    uint32_t idx = g_shader_count++;
+    idx = g_shader_count++;
     g_shaders[idx] = program;
     h.id = idx + 1;
     return h;
 }
 
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
-    uint32_t idx = g_pipeline_count++;
-    GlPipeline *p = &g_pipelines[idx];
+    RhiPipeline h;
+    GlPipeline *p;
+    unsigned int idx;
+    int i;
+
+    idx = g_pipeline_count++;
+    p = &g_pipelines[idx];
 
     p->program    = g_shaders[desc->shader.id - 1];
     p->attr_count = desc->attr_count;
-    for (int i = 0; i < desc->attr_count; i++) p->attrs[i] = desc->attrs[i];
+    for (i = 0; i < desc->attr_count; i++) p->attrs[i] = desc->attrs[i];
     p->stride     = (GLsizei)desc->stride;
     p->depth_test = desc->depth_test;
 
     glGenVertexArrays(1, &p->vao);   /* attribs are bound when a buffer is set */
 
-    RhiPipeline h = { .id = idx + 1 };
+    h.id = idx + 1;
     return h;
 }
 
@@ -172,12 +182,14 @@ void rhi_set_pipeline(RhiPipeline pipeline) {
 
 void rhi_bind_vertex_buffer(RhiBuffer buffer) {
     const GlPipeline *p = g_current;
+    int i;
+
     glBindBuffer(GL_ARRAY_BUFFER, g_buffers[buffer.id - 1]);
 
     /* GL 4.1: the VAO bundles format + buffer, so (re)specify the pipeline's
        layout against the just-bound buffer. This is the VAO fiction the
        interface papers over — set_pipeline + bind_buffer being separate. */
-    for (int i = 0; i < p->attr_count; i++) {
+    for (i = 0; i < p->attr_count; i++) {
         const RhiVertexAttr *a = &p->attrs[i];
         glVertexAttribPointer(a->location, format_components(a->format),
                               GL_FLOAT, GL_FALSE, p->stride, (const void *)a->offset);

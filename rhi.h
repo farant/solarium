@@ -1,19 +1,17 @@
 #ifndef RHI_H
 #define RHI_H
 
-#include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
+#include <stddef.h>   /* size_t, NULL */
 
 /* The platform window, owned by the app (GLFW), not by the RHI.
    Forward-declared so rhi.h pulls in neither GLFW nor any GL header. */
 struct GLFWwindow;
 
 /* ---- opaque resource handles (id 0 == invalid) ---- */
-typedef struct { uint32_t id; } RhiBuffer;
-typedef struct { uint32_t id; } RhiShader;
-typedef struct { uint32_t id; } RhiPipeline;
-typedef struct { uint32_t id; } RhiTexture;   /* stubbed — for when step-3 textures return */
+typedef struct { unsigned int id; } RhiBuffer;
+typedef struct { unsigned int id; } RhiShader;
+typedef struct { unsigned int id; } RhiPipeline;
+typedef struct { unsigned int id; } RhiTexture;   /* stubbed — for when step-3 textures return */
 
 /* ---- enums ---- */
 typedef enum { RHI_BUFFER_VERTEX, RHI_BUFFER_INDEX } RhiBufferType;
@@ -33,12 +31,12 @@ typedef struct {
     RhiVertexAttr attrs[RHI_MAX_ATTRS];
     int           attr_count;
     size_t        stride;        /* bytes per vertex */
-    bool          depth_test;    /* render state, bundled into the pipeline */
+    int           depth_test;    /* render state, bundled into the pipeline (0/1) */
 } RhiPipelineDesc;
 
 /* ---- lifecycle (this is where the window/context split lives) ---- */
 void rhi_configure_window(void);          /* BEFORE glfwCreateWindow: set API/context hints */
-bool rhi_init(struct GLFWwindow *window); /* AFTER: make context/device + swapchain current */
+int  rhi_init(struct GLFWwindow *window); /* AFTER: make context/device current; 0 on failure */
 void rhi_shutdown(void);
 
 /* ---- resource creation (up front) ---- */

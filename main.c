@@ -93,10 +93,10 @@ static void push_vertex(FloatArray *out, const FloatArray *pos, const FloatArray
    NULL on failure. Pure CPU — no GL here. */
 static float *load_obj(const char *path, int *out_count) {
     FILE *f = fopen(path, "r");
-    if (!f) { fprintf(stderr, "load_obj: cannot open %s\n", path); return NULL; }
-
     FloatArray positions = {0}, normals = {0}, out = {0};
     char line[256];
+
+    if (!f) { fprintf(stderr, "load_obj: cannot open %s\n", path); return NULL; }
 
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == 'v' && line[1] == ' ') {                 /* position */
@@ -110,6 +110,7 @@ static float *load_obj(const char *path, int *out_count) {
         } else if (line[0] == 'f' && line[1] == ' ') {   /* face: tri / quad / n-gon */
             int cp[16], cn[16], nc = 0;                  /* per-corner pos/normal idx */
             char *tok = strtok(line + 1, " \t\r\n");
+            int i;
             while (tok && nc < 16) {
                 int p = 0, t = 0, n = 0;
                 if      (sscanf(tok, "%d/%d/%d", &p, &t, &n) == 3) {}   /* p/t/n */
@@ -120,7 +121,7 @@ static float *load_obj(const char *path, int *out_count) {
                 tok = strtok(NULL, " \t\r\n");
             }
             /* fan-triangulate: (0,1,2), (0,2,3), ... handles tris and quads */
-            for (int i = 2; i < nc; i++) {
+            for (i = 2; i < nc; i++) {
                 push_vertex(&out, &positions, &normals, cp[0],   cn[0]);
                 push_vertex(&out, &positions, &normals, cp[i-1], cn[i-1]);
                 push_vertex(&out, &positions, &normals, cp[i],   cn[i]);
@@ -136,18 +137,22 @@ static float *load_obj(const char *path, int *out_count) {
     /* recenter on the bounding-box center so the mesh rotates in place,
        regardless of where it was authored in model space */
     if (out.count >= 6) {
-        float lo[3], hi[3];
-        for (int k = 0; k < 3; k++) lo[k] = hi[k] = out.data[k];
-        for (size_t v = 0; v < out.count; v += 6) {     /* positions are first 3 of 6 */
-            for (int k = 0; k < 3; k++) {
+        float lo[3], hi[3], center[3];
+        size_t v;
+        int k;
+        for (k = 0; k < 3; k++) { lo[k] = out.data[k]; hi[k] = out.data[k]; }
+        for (v = 0; v < out.count; v += 6) {     /* positions are first 3 of 6 */
+            for (k = 0; k < 3; k++) {
                 float c = out.data[v + k];
                 if (c < lo[k]) lo[k] = c;
                 if (c > hi[k]) hi[k] = c;
             }
         }
-        float center[3] = { (lo[0]+hi[0])*0.5f, (lo[1]+hi[1])*0.5f, (lo[2]+hi[2])*0.5f };
-        for (size_t v = 0; v < out.count; v += 6)
-            for (int k = 0; k < 3; k++) out.data[v + k] -= center[k];
+        center[0] = (lo[0]+hi[0])*0.5f;
+        center[1] = (lo[1]+hi[1])*0.5f;
+        center[2] = (lo[2]+hi[2])*0.5f;
+        for (v = 0; v < out.count; v += 6)
+            for (k = 0; k < 3; k++) out.data[v + k] -= center[k];
     }
 
     *out_count = (int)(out.count / 6);   /* 6 floats per vertex */
@@ -158,7 +163,11 @@ static float *load_obj(const char *path, int *out_count) {
 static int init_scene(AppState *state) {
     const char *model_path = "suzanne.obj";   /* swap to "cube.obj" to test the cube */
     int vertex_count = 0;
-    float *verts = load_obj(model_path, &vertex_count);
+    float *verts;
+    RhiShader shader;
+    RhiPipelineDesc desc;
+
+    verts = load_obj(model_path, &vertex_count);
     if (!verts || vertex_count == 0) {
         fprintf(stderr, "init_scene: failed to load %s\n", model_path);
         free(verts);
@@ -166,19 +175,16 @@ static int init_scene(AppState *state) {
     }
     printf("loaded %s: %d vertices\n", model_path, vertex_count);
 
-    RhiShader shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
+    shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
     if (!shader.id) { free(verts); return 0; }
 
-    RhiPipelineDesc desc = {
-        .shader = shader,
-        .attrs = {
-            { .location = 0, .format = RHI_FORMAT_FLOAT3, .offset = 0 },
-            { .location = 1, .format = RHI_FORMAT_FLOAT3, .offset = 3 * sizeof(float) },
-        },
-        .attr_count = 2,
-        .stride     = 6 * sizeof(float),
-        .depth_test = true,
-    };
+    desc.shader = shader;
+    desc.attrs[0].location = 0; desc.attrs[0].format = RHI_FORMAT_FLOAT3; desc.attrs[0].offset = 0;
+    desc.attrs[1].location = 1; desc.attrs[1].format = RHI_FORMAT_FLOAT3;
+    desc.attrs[1].offset = 3 * sizeof(float);
+    desc.attr_count = 2;
+    desc.stride     = 6 * sizeof(float);
+    desc.depth_test = 1;
     state->pipeline = rhi_create_pipeline(&desc);
 
     state->mesh.buffer       = rhi_create_buffer(RHI_BUFFER_VERTEX, verts,
@@ -193,20 +199,23 @@ static void update(AppState *state, double dt) {
 }
 
 static void render(const AppState *state) {
+    float aspect;
+    vec3 eye;
+    mat4 model, view, proj;
+
     rhi_begin_frame(state->fb_width, state->fb_height, 0.10f, 0.12f, 0.15f, 1.0f);
 
-    float aspect = (state->fb_height > 0)
-                 ? (float)state->fb_width / (float)state->fb_height
-                 : 1.0f;
+    aspect = (state->fb_height > 0)
+           ? (float)state->fb_width / (float)state->fb_height
+           : 1.0f;
+    eye = vec3_make(0.0f, 0.0f, 5.0f);   /* pushed back to fit Suzanne while tumbling */
 
-    vec3 eye = vec3_make(0, 0, 5);   /* pushed back to fit Suzanne while tumbling */
-
-    mat4 model = mat4_mul(mat4_rotate_y(state->angle),
-                          mat4_rotate_x(state->angle * 0.5f));
-    mat4 view  = mat4_look_at(eye,
-                              vec3_make(0, 0, 0),    /* looking at the origin */
-                              vec3_make(0, 1, 0));   /* up is +Y              */
-    mat4 proj  = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
+    model = mat4_mul(mat4_rotate_y(state->angle),
+                     mat4_rotate_x(state->angle * 0.5f));
+    view  = mat4_look_at(eye,
+                         vec3_make(0.0f, 0.0f, 0.0f),    /* looking at the origin */
+                         vec3_make(0.0f, 1.0f, 0.0f));   /* up is +Y              */
+    proj  = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
 
     rhi_set_pipeline(state->pipeline);
     rhi_set_uniform_mat4("uModel",   model.m);
@@ -227,6 +236,10 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
 }
 
 int main(void) {
+    GLFWwindow *window;
+    AppState state = {0};
+    double last;
+
     if (!glfwInit()) {
         fprintf(stderr, "glfwInit failed\n");
         return EXIT_FAILURE;
@@ -234,7 +247,7 @@ int main(void) {
 
     rhi_configure_window();   /* backend sets the API/context hints */
 
-    GLFWwindow *window = glfwCreateWindow(960, 540, "solarium", NULL, NULL);
+    window = glfwCreateWindow(960, 540, "solarium", NULL, NULL);
     if (!window) {
         fprintf(stderr, "glfwCreateWindow failed\n");
         glfwTerminate();
@@ -250,7 +263,6 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    AppState state = {0};
     if (!init_scene(&state)) {
         fprintf(stderr, "scene init failed\n");
         rhi_shutdown();
@@ -259,13 +271,14 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    double last = glfwGetTime();
+    last = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
+        double now, dt;
         glfwPollEvents();
 
-        double now = glfwGetTime();
-        double dt  = now - last;
+        now = glfwGetTime();
+        dt  = now - last;
         last = now;
         if (dt > 0.1) dt = 0.1;   /* clamp: a long stall pauses motion, never lurches */
 
