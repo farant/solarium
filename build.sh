@@ -12,9 +12,24 @@ if [ "$MODE" = "c89check" ]; then
     # literals, but every real compiler supports far longer. Our GLSL shader
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
-    clang -std=c89 -pedantic -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c gl_backend.c
-    echo "c89check: PASS — main.c + gl_backend.c are C89-pedantic clean"
+    clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c
+    echo "c89check: PASS — main.c + rhi_gl.c are C89-pedantic clean"
+    exit 0
+fi
+
+# Build with AddressSanitizer + UndefinedBehaviorSanitizer for the §1.7
+# definition-of-done. Debug-only; ~2x slower. Run ./solarium-asan; the
+# sanitizers report any memory/UB error on stderr and abort.
+if [ "$MODE" = "asan" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        main.c rhi_gl.c \
+        $(pkg-config --cflags --libs glfw3) \
+        -framework OpenGL -framework Cocoa -framework IOKit \
+        -o solarium-asan
+    echo "built ./solarium-asan (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
 
@@ -25,7 +40,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c gl_backend.c \
+    main.c rhi_gl.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit \
     -o solarium

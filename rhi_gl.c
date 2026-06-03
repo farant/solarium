@@ -23,15 +23,15 @@ typedef struct {
     RhiVertexAttr attrs[RHI_MAX_ATTRS];
     int           attr_count;
     GLsizei       stride;
-    int           depth_test;
+    sol_bool      depth_test;
 } GlPipeline;
 
-static GLuint       g_buffers[MAX_BUFFERS];
-static unsigned int g_buffer_count;
-static GLuint       g_shaders[MAX_SHADERS];
-static unsigned int g_shader_count;
-static GlPipeline   g_pipelines[MAX_PIPELINES];
-static unsigned int g_pipeline_count;
+static GLuint     g_buffers[MAX_BUFFERS];
+static sol_u32    g_buffer_count;
+static GLuint     g_shaders[MAX_SHADERS];
+static sol_u32    g_shader_count;
+static GlPipeline g_pipelines[MAX_PIPELINES];
+static sol_u32    g_pipeline_count;
 
 static struct GLFWwindow *g_window;
 static const GlPipeline  *g_current;   /* pipeline bound by rhi_set_pipeline */
@@ -83,7 +83,7 @@ void rhi_configure_window(void) {
     glfwWindowHint(GLFW_DEPTH_BITS, 24);
 }
 
-int rhi_init(struct GLFWwindow *window) {
+sol_bool rhi_init(struct GLFWwindow *window) {
     GLint profile = 0, flags = 0;
     g_window = window;
     glfwMakeContextCurrent(window);
@@ -96,7 +96,7 @@ int rhi_init(struct GLFWwindow *window) {
     glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
     printf("CORE PROFILE  : %s\n", (profile & GL_CONTEXT_CORE_PROFILE_BIT) ? "yes" : "no");
     printf("FWD COMPATIBLE: %s\n", (flags & GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) ? "yes" : "no");
-    return 1;
+    return SOL_TRUE;
 }
 
 void rhi_shutdown(void) {
@@ -108,7 +108,7 @@ void rhi_shutdown(void) {
 RhiBuffer rhi_create_buffer(RhiBufferType type, const void *data, size_t size) {
     GLenum target = (type == RHI_BUFFER_INDEX) ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER;
     GLuint vbo;
-    unsigned int idx;
+    sol_u32 idx;
     RhiBuffer h;
 
     glGenBuffers(1, &vbo);
@@ -124,7 +124,7 @@ RhiBuffer rhi_create_buffer(RhiBufferType type, const void *data, size_t size) {
 RhiShader rhi_create_shader(const char *vertex_src, const char *fragment_src) {
     RhiShader h;
     GLuint vs, fs, program;
-    unsigned int idx;
+    sol_u32 idx;
 
     h.id = 0;
     vs = compile_shader(GL_VERTEX_SHADER, vertex_src);
@@ -145,7 +145,7 @@ RhiShader rhi_create_shader(const char *vertex_src, const char *fragment_src) {
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
     RhiPipeline h;
     GlPipeline *p;
-    unsigned int idx;
+    sol_u32 idx;
     int i;
 
     idx = g_pipeline_count++;

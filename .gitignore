@@ -1,5 +1,6 @@
 # Build artifacts
 /solarium
+/solarium-asan
 *.o
 *.dSYM/
 

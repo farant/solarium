@@ -184,7 +184,7 @@ static int init_scene(AppState *state) {
     desc.attrs[1].offset = 3 * sizeof(float);
     desc.attr_count = 2;
     desc.stride     = 6 * sizeof(float);
-    desc.depth_test = 1;
+    desc.depth_test = SOL_TRUE;
     state->pipeline = rhi_create_pipeline(&desc);
 
     state->mesh.buffer       = rhi_create_buffer(RHI_BUFFER_VERTEX, verts,
