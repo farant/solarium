@@ -2,6 +2,7 @@
 /solarium
 /solarium-asan
 /stml_test
+/nid_test
 *.o
 *.dSYM/
 

@@ -58,6 +58,21 @@ pattern):
 - **Runtime identity** (in memory): a `sol_u32` index/handle for O(1) lookup,
   **mapped from the `nid` on load** and reassigned fresh each session.
 
+The C89 generator (`nid.c`) emits 26 Crockford-Base32 chars in three fixed-width
+fields, so plain `strcmp` sorts chronologically:
+
+```
+TTTTTTTTTT CCCCCC RRRRRRRRRR
+ timestamp counter  random
+   (10)      (6)     (10)
+```
+
+- **timestamp** — 32-bit `time()` seconds, big-endian, zero-padded (seconds, not
+  ms — see the caveat below).
+- **counter** — a per-run monotonic tie-breaker, so ids minted in the *same*
+  second are still strictly ordered and never collide within a run.
+- **random** — `rand()` bits for cross-process/device collision resistance.
+
 Consequences:
 - **No next-ID counter is persisted.** (ULIDs are self-unique; the brief's
   counter requirement applied to monotonic integer IDs.)
