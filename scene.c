@@ -2,6 +2,7 @@
    Mesh (RHI handles), never GL. */
 
 #include "scene.h"
+#include "nid.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,8 @@ static void scene_object_free(SceneObject *o) {
     for (i = 0; i < o->rel_count; i++) { free(o->relations[i].type); }
     free(o->relations);
     free(o->content);
+    free(o->nid);
+    free(o->mesh_ref);
 }
 
 void scene_free(Scene *s) {
@@ -49,10 +52,13 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     o = &s->objects[s->count++];
     o->handle = s->next_handle++;   /* monotonic; decoupled from array index */
     o->parent = parent;
+    o->nid = (char *)malloc(NID_LEN + 1);
+    if (o->nid) nid_generate(o->nid);   /* identity born here; stable across re-saves */
     o->pos = pos;
     o->rot = rot;
     o->scale = scale;
     o->mesh = mesh;
+    o->mesh_ref = NULL;
     o->meta = NULL; o->meta_count = 0; o->meta_cap = 0;
     o->relations = NULL; o->rel_count = 0; o->rel_cap = 0;
     o->content = NULL;
@@ -117,4 +123,11 @@ void scene_content_set(Scene *s, sol_u32 handle, const char *path) {
     if (!o) return;
     free(o->content);          /* free(NULL) is safe */
     o->content = sol_strdup(path);
+}
+
+void scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name) {
+    SceneObject *o = scene_get(s, handle);
+    if (!o) return;
+    free(o->mesh_ref);
+    o->mesh_ref = sol_strdup(name);
 }

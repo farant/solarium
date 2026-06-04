@@ -11,12 +11,14 @@ typedef struct { char *type; sol_u32 target; } Relation;
 /* One object in the scene. Identity is the stable `handle`, NOT the array
    index — that decoupling survives deletion/reload. */
 typedef struct {
-    sol_u32 handle;    /* stable, monotonic, never reused; not the index */
+    sol_u32 handle;    /* runtime identity: stable, monotonic, never reused; not the index */
     sol_u32 parent;    /* parent handle; 0 = root */
+    char   *nid;       /* persistent identity (ULID-style); minted in scene_add */
     vec3    pos;
     quat    rot;
     vec3    scale;
     Mesh    mesh;      /* shared reference; a zero Mesh (index_count 0) = empty */
+    char   *mesh_ref;  /* asset name for geometry-by-reference; NULL = none/empty */
 
     /* overbuilt slots — mostly empty this phase, serialized in 2.5 */
     MetaEntry *meta;       sol_u32 meta_count;  sol_u32 meta_cap;   /* string->string */
@@ -41,5 +43,9 @@ void        scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char
 const char *scene_meta_get(Scene *s, sol_u32 handle, const char *key);   /* NULL if none */
 void        scene_rel_add(Scene *s, sol_u32 handle, const char *type, sol_u32 target);
 void        scene_content_set(Scene *s, sol_u32 handle, const char *path);
+void        scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name);
+
+/* serialization — defined in scene_io.c */
+sol_bool    scene_save(Scene *s, const char *path);   /* SOL_FALSE if the file won't open */
 
 #endif /* SCENE_H */

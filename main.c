@@ -71,7 +71,7 @@ static int init_scene(AppState *state) {
     RhiPipelineDesc desc;
     Mesh box_mesh, floor_mesh;
     Mesh empty = {0};            /* zero mesh -> an empty (transform-only) */
-    sol_u32 anchor;
+    sol_u32 anchor, floor;
 
     shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
     if (!shader.id) return 0;
@@ -102,7 +102,7 @@ static int init_scene(AppState *state) {
     /* scene: floor (root), an empty anchor (root), and the box as the
        anchor's child — so spinning the anchor makes the box orbit it */
     scene_init(&state->scene);
-    scene_add(&state->scene, 0, floor_mesh,
+    floor = scene_add(&state->scene, 0, floor_mesh,
               vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     anchor = scene_add(&state->scene, 0, empty,
               vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
@@ -110,11 +110,19 @@ static int init_scene(AppState *state) {
     state->box_handle = scene_add(&state->scene, anchor, box_mesh,
               vec3_make(1.5f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
 
+    /* geometry by reference: the asset name regenerates the mesh on load */
+    scene_mesh_ref_set(&state->scene, floor, "grid");
+    scene_mesh_ref_set(&state->scene, state->box_handle, "box");
+
     /* overbuilt slots demo (mostly empty this phase) */
     scene_meta_set(&state->scene, state->box_handle, "title",  "Test Box");
     scene_meta_set(&state->scene, state->box_handle, "author", "Solarium");
     scene_rel_add(&state->scene, state->box_handle, "orbits", state->anchor_handle);
     scene_content_set(&state->scene, state->box_handle, "notes/box.txt");
+
+    /* persist the room once at startup (item 2.5c) — inspect ./scene.stml */
+    if (scene_save(&state->scene, "scene.stml"))
+        printf("saved scene -> scene.stml\n");
 
     printf("scene: %u objects (1 empty anchor)\n", (unsigned)state->scene.count);
     printf("box meta: title=\"%s\", author=\"%s\"; %u relations\n",

@@ -13,7 +13,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c obj.c scene.c stml.c nid.c
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c stml.c nid.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     exit 0
 fi
@@ -41,6 +41,18 @@ if [ "$MODE" = "nidtest" ]; then
     exit 0
 fi
 
+# Build + run the headless scene serialization test under the sanitizers. Links
+# only scene.c + scene_io.c + nid.c (no GL): it builds empties and saves them.
+if [ "$MODE" = "iotest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        scene.c scene_io.c nid.c scene_io_test.c \
+        -o scene_io_test
+    echo "built ./scene_io_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
 # Build with AddressSanitizer + UndefinedBehaviorSanitizer for the §1.7
 # definition-of-done. Debug-only; ~2x slower. Run ./solarium-asan; the
 # sanitizers report any memory/UB error on stderr and abort.
@@ -48,7 +60,7 @@ if [ "$MODE" = "asan" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c obj.c scene.c \
+        main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit \
         -o solarium-asan
@@ -63,7 +75,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c obj.c scene.c \
+    main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit \
     -o solarium

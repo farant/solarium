@@ -3,6 +3,9 @@
 /solarium-asan
 /stml_test
 /nid_test
+/scene_io_test
+/scene.stml
+/scene_io_test.stml
 *.o
 *.dSYM/
 
