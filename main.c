@@ -59,7 +59,8 @@ typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
     Scene       scene;
-    sol_u32     box_handle;   /* so update() can animate the box object */
+    sol_u32     box_handle;     /* so update() can animate the box object */
+    sol_u32     anchor_handle;  /* the empty the box is parented to */
     float       angle;
 } AppState;
 
@@ -69,6 +70,8 @@ static int init_scene(AppState *state) {
     RhiShader shader;
     RhiPipelineDesc desc;
     Mesh box_mesh, floor_mesh;
+    Mesh empty = {0};            /* zero mesh -> an empty (transform-only) */
+    sol_u32 anchor;
 
     shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
     if (!shader.id) return 0;
@@ -96,30 +99,36 @@ static int init_scene(AppState *state) {
     floor_mesh = mesh_from_builder(&mb);
     mb_free(&mb);
 
-    /* scene: a floor at the origin and a box hovering above it */
+    /* scene: floor (root), an empty anchor (root), and the box as the
+       anchor's child — so spinning the anchor makes the box orbit it */
     scene_init(&state->scene);
-    scene_add(&state->scene, floor_mesh,
+    scene_add(&state->scene, 0, floor_mesh,
               vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-    state->box_handle = scene_add(&state->scene, box_mesh,
-              vec3_make(0.0f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+    anchor = scene_add(&state->scene, 0, empty,
+              vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+    state->anchor_handle = anchor;
+    state->box_handle = scene_add(&state->scene, anchor, box_mesh,
+              vec3_make(1.5f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
 
-    printf("scene: %u objects; scene_get(1) resolves: %s\n",
-           (unsigned)state->scene.count,
-           scene_get(&state->scene, 1) ? "yes" : "no");
+    printf("scene: %u objects (1 empty anchor)\n", (unsigned)state->scene.count);
     return 1;
 }
 
 static void update(AppState *state, double dt) {
-    SceneObject *box;
+    SceneObject *box, *anchor;
     quat qy, qx;
 
     state->angle += (float)dt * 0.8f;
 
-    /* animate the box THROUGH its object (the scene is the source of truth) */
+    /* spin the anchor -> its child (the box) orbits the origin */
+    anchor = scene_get(&state->scene, state->anchor_handle);
+    if (anchor) anchor->rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle);
+
+    /* the box's OWN tumble (local rotation), faster than the orbit */
     box = scene_get(&state->scene, state->box_handle);
     if (box) {
-        qy = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle);
-        qx = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), state->angle * 0.5f);
+        qy = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle * 1.5f);
+        qx = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), state->angle * 0.75f);
         box->rot = quat_normalize(quat_mul(qy, qx));
     }
 }
@@ -136,7 +145,23 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     rhi_draw_indexed(0, mesh.index_count);
 }
 
-static void render(const AppState *state) {
+/* world matrix, by walking up the parent chain: parent.world * ... * local.
+   Iterative (no recursion), capped against cycles, NULL-guarded. */
+static mat4 object_world_matrix(Scene *scene, const SceneObject *o) {
+    mat4    world = mat4_from_trs(o->pos, o->rot, o->scale);
+    sol_u32 p     = o->parent;
+    int     depth = 0;
+    while (p != 0 && depth < 64) {
+        SceneObject *par = scene_get(scene, p);
+        if (!par) break;                                   /* dangling parent -> stop */
+        world = mat4_mul(mat4_from_trs(par->pos, par->rot, par->scale), world);
+        p     = par->parent;                               /* climb */
+        depth++;                                           /* cycle guard */
+    }
+    return world;
+}
+
+static void render(AppState *state) {
     float   aspect;
     vec3    eye;
     mat4    view, proj;
@@ -147,16 +172,18 @@ static void render(const AppState *state) {
     aspect = (state->fb_height > 0)
            ? (float)state->fb_width / (float)state->fb_height
            : 1.0f;
-    eye  = vec3_make(0.0f, 2.5f, 5.0f);   /* raised + back to see the floor */
+    eye  = vec3_make(0.0f, 2.5f, 5.0f);   /* raised + back to see the scene */
     view = mat4_look_at(eye,
-                        vec3_make(0.0f, 0.5f, 0.0f),    /* look at the box */
-                        vec3_make(0.0f, 1.0f, 0.0f));   /* up is +Y        */
+                        vec3_make(0.0f, 0.5f, 0.0f),    /* look at the scene */
+                        vec3_make(0.0f, 1.0f, 0.0f));   /* up is +Y          */
     proj = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
 
-    /* iterate the scene — each object's model matrix comes from its TRS */
+    /* iterate the scene — each object's WORLD matrix (parent * local) */
     for (i = 0; i < state->scene.count; i++) {
         const SceneObject *o = &state->scene.objects[i];
-        mat4 model = mat4_from_trs(o->pos, o->rot, o->scale);
+        mat4 model;
+        if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
+        model = object_world_matrix(&state->scene, o);
         draw_mesh(state, o->mesh, model, view, proj, eye);
     }
 }

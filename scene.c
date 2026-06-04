@@ -19,7 +19,7 @@ void scene_free(Scene *s) {
     s->capacity = 0;
 }
 
-sol_u32 scene_add(Scene *s, Mesh mesh, vec3 pos, quat rot, vec3 scale) {
+sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 scale) {
     SceneObject *o;
     if (s->count == s->capacity) {
         s->capacity = s->capacity ? s->capacity * 2 : 16;
@@ -27,6 +27,7 @@ sol_u32 scene_add(Scene *s, Mesh mesh, vec3 pos, quat rot, vec3 scale) {
     }
     o = &s->objects[s->count++];
     o->handle = s->next_handle++;   /* monotonic; decoupled from array index */
+    o->parent = parent;
     o->pos = pos;
     o->rot = rot;
     o->scale = scale;

@@ -11,10 +11,11 @@
    arrive in later checkpoints; 2.2 keeps the core. */
 typedef struct {
     sol_u32 handle;    /* stable, monotonic, never reused; not the index */
+    sol_u32 parent;    /* parent handle; 0 = root */
     vec3    pos;
     quat    rot;
     vec3    scale;
-    Mesh    mesh;      /* shared reference (RHI buffer handles) */
+    Mesh    mesh;      /* shared reference; a zero Mesh (index_count 0) = empty */
 } SceneObject;
 
 typedef struct {
@@ -26,7 +27,7 @@ typedef struct {
 
 void         scene_init(Scene *s);
 void         scene_free(Scene *s);
-sol_u32      scene_add(Scene *s, Mesh mesh, vec3 pos, quat rot, vec3 scale);
+sol_u32      scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 scale);
 SceneObject *scene_get(Scene *s, sol_u32 handle);  /* NULL if none; valid until next scene_add */
 
 #endif /* SCENE_H */
