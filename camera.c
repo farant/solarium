@@ -102,3 +102,20 @@ mat4 camera_view(const Camera *c) {
 mat4 camera_proj(const Camera *c, float aspect) {
     return mat4_perspective(c->fov, aspect, 0.1f, 100.0f);
 }
+
+/* Picking ray for a screen point in NDC ([-1,1], y up). Analytic from the
+   frustum: shoot from the eye through that spot on the near plane. Exact for our
+   symmetric perspective camera (the Ray interface isolates this if we ever need
+   the general inverse-projection unproject). ndc (0,0) -> straight ahead. */
+Ray camera_ray(const Camera *c, float ndc_x, float ndc_y, float aspect) {
+    vec3  fwd   = camera_forward(c);
+    vec3  right = vec3_normalize(vec3_cross(fwd, WORLD_UP));
+    vec3  up    = vec3_cross(right, fwd);
+    float th    = tanf(c->fov * 0.5f);
+    Ray   r;
+    r.origin = c->pos;
+    r.dir = vec3_normalize(vec3_add(vec3_add(fwd,
+                vec3_scale(right, ndc_x * th * aspect)),
+                vec3_scale(up,    ndc_y * th)));
+    return r;
+}

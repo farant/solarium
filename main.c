@@ -73,7 +73,33 @@ typedef struct {
     int         mouse_skip;        /* swallow N frames of delta after a cursor-mode change */
     sol_bool    tab_was_down;
     double      scroll_accum;      /* scroll events accumulate here, drained per frame */
+    /* picking / selection (item 4) */
+    sol_u32     selected_handle;   /* 0 = none */
+    sol_bool    lmb_was_down;
+    double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
 } AppState;
+
+/* Cast a pick ray through a screen point (NDC) and select the nearest object,
+   reporting its stable handle + nid. */
+static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
+    int     ww, wh;
+    float   aspect, t;
+    Ray     ray;
+    sol_u32 hit;
+
+    glfwGetWindowSize(w, &ww, &wh);                 /* cursor is in window coords */
+    aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
+    ray = camera_ray(&st->camera, ndc_x, ndc_y, aspect);
+    hit = scene_pick(&st->scene, ray, &t);
+    st->selected_handle = hit;
+    if (hit) {
+        SceneObject *o = scene_get(&st->scene, hit);
+        printf("picked: handle %u, nid %s, t=%.2f\n",
+               (unsigned)hit, (o && o->nid) ? o->nid : "?", t);
+    } else {
+        printf("picked: nothing\n");
+    }
+}
 
 /* Scroll arrives only as events (no poll), so it needs a callback; the window
    user-pointer bridges back to our state. read_input drains scroll_accum. */
@@ -145,6 +171,30 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     /* scroll: drain the accumulator into this frame (orbit dolly) */
     in->zoom = (float)st->scroll_accum;
     st->scroll_accum = 0.0;
+
+    /* left button -> pick. FP: a press picks through screen center. Orbit: a
+       tap (release with little movement) picks at the cursor; a drag rotates. */
+    {
+        sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        if (fp) {
+            if (lmb && !st->lmb_was_down) do_pick(st, w, 0.0f, 0.0f);
+        } else {
+            if (lmb && !st->lmb_was_down) {
+                st->press_x = mx;
+                st->press_y = my;
+            } else if (!lmb && st->lmb_was_down) {
+                double ddx = mx - st->press_x;
+                double ddy = my - st->press_y;
+                if (ddx*ddx + ddy*ddy < 25.0) {         /* moved < 5px -> a tap */
+                    int ww, wh;
+                    glfwGetWindowSize(w, &ww, &wh);
+                    do_pick(st, w, 2.0f*(float)mx/(float)ww - 1.0f,
+                                   1.0f - 2.0f*(float)my/(float)wh);
+                }
+            }
+        }
+        st->lmb_was_down = lmb;
+    }
 
     /* F toggles walk/fly in first person (edge) */
     f_now = glfwGetKey(w, GLFW_KEY_F) == GLFW_PRESS;

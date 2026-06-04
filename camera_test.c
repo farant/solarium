@@ -75,6 +75,18 @@ int main(void) {
     printf("orbit dist after zoom = %.3f\n", c.distance);
     if (!(c.distance < 5.0f)) { printf("FAIL: scroll did not dolly in\n"); return 1; }
 
+    /* camera_ray through screen center (ndc 0,0) points straight ahead = forward */
+    camera_init(&c, vec3_make(0.0f, 0.0f, 5.0f), sol_radians(-90.0f), 0.0f);
+    {
+        Ray  ray = camera_ray(&c, 0.0f, 0.0f, 1.777f);
+        vec3 f   = camera_forward(&c);
+        printf("center ray dir=(%.3f, %.3f, %.3f)\n", ray.dir.x, ray.dir.y, ray.dir.z);
+        if (!approx(ray.dir.x, f.x) || !approx(ray.dir.y, f.y) || !approx(ray.dir.z, f.z)) {
+            printf("FAIL: center ray should equal forward\n");
+            return 1;
+        }
+    }
+
     printf("camera_test: OK\n");
     return 0;
 }

@@ -41,6 +41,7 @@ void camera_update(Camera *c, const CameraInput *in, float dt);
 vec3 camera_forward(const Camera *c);            /* full-3D unit look direction */
 mat4 camera_view(const Camera *c);
 mat4 camera_proj(const Camera *c, float aspect);
+Ray  camera_ray(const Camera *c, float ndc_x, float ndc_y, float aspect);  /* picking ray through a screen point */
 
 /* mode transitions (kept continuous so the view never jumps) */
 void camera_enter_orbit(Camera *c, vec3 target);   /* aim at target, remember radius */
