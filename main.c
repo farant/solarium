@@ -8,6 +8,9 @@
 #include "mesh.h"
 #include "scene.h"
 #include "sol_math.h"
+#include "camera.h"
+
+#define LOOK_SPEED 1.5f          /* radians/sec for keyboard look */
 
 /* --- shaders: GLSL source handed to the backend (still app-authored) --- */
 static const char *VERTEX_SRC =
@@ -62,7 +65,35 @@ typedef struct {
     sol_u32     box_handle;     /* so update() can animate the box object */
     sol_u32     anchor_handle;  /* the empty the box is parented to */
     float       angle;
+    Camera      camera;
+    sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
 } AppState;
+
+/* Poll GLFW into a CameraInput (the platform layer; camera.c stays GLFW-free).
+   Movement/look are level-triggered (held keys); the mode toggle is edge-
+   triggered so it fires once per press. */
+static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
+    float    look = (float)dt * LOOK_SPEED;
+    sol_bool f_now;
+
+    in->forward = glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS;
+    in->back    = glfwGetKey(w, GLFW_KEY_S) == GLFW_PRESS;
+    in->left    = glfwGetKey(w, GLFW_KEY_A) == GLFW_PRESS;
+    in->right   = glfwGetKey(w, GLFW_KEY_D) == GLFW_PRESS;
+    in->up      = glfwGetKey(w, GLFW_KEY_SPACE)        == GLFW_PRESS;
+    in->down    = glfwGetKey(w, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS;
+
+    in->look_dx = 0.0f;
+    in->look_dy = 0.0f;
+    if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
+    if (glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) in->look_dx -= look;
+    if (glfwGetKey(w, GLFW_KEY_UP)    == GLFW_PRESS) in->look_dy += look;
+    if (glfwGetKey(w, GLFW_KEY_DOWN)  == GLFW_PRESS) in->look_dy -= look;
+
+    f_now = glfwGetKey(w, GLFW_KEY_F) == GLFW_PRESS;
+    in->toggle_mode = (f_now && !st->f_was_down);   /* fire once per press */
+    st->f_was_down  = f_now;
+}
 
 /* One-time setup: build the pipeline + meshes, populate the scene. */
 static int init_scene(AppState *state) {
@@ -123,6 +154,12 @@ static int init_scene(AppState *state) {
     /* persist the room once at startup (item 2.5c) — inspect ./scene.stml */
     if (scene_save(&state->scene, "scene.stml"))
         printf("saved scene -> scene.stml\n");
+
+    /* place the camera where the old fixed view sat: back + raised, facing the
+       scene (-Z) with a slight downward tilt (item 3b) */
+    camera_init(&state->camera, vec3_make(0.0f, 2.5f, 5.0f),
+                sol_radians(-90.0f), sol_radians(-20.0f));
+    state->f_was_down = SOL_FALSE;
 
     printf("scene: %u objects (1 empty anchor)\n", (unsigned)state->scene.count);
     printf("box meta: title=\"%s\", author=\"%s\"; %u relations\n",
@@ -190,11 +227,9 @@ static void render(AppState *state) {
     aspect = (state->fb_height > 0)
            ? (float)state->fb_width / (float)state->fb_height
            : 1.0f;
-    eye  = vec3_make(0.0f, 2.5f, 5.0f);   /* raised + back to see the scene */
-    view = mat4_look_at(eye,
-                        vec3_make(0.0f, 0.5f, 0.0f),    /* look at the scene */
-                        vec3_make(0.0f, 1.0f, 0.0f));   /* up is +Y          */
-    proj = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
+    eye  = state->camera.pos;                       /* camera drives the view now */
+    view = camera_view(&state->camera);
+    proj = camera_proj(&state->camera, aspect);
 
     /* iterate the scene — each object's WORLD matrix (parent * local) */
     for (i = 0; i < state->scene.count; i++) {
@@ -267,7 +302,8 @@ int main(void) {
     last = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
-        double now, dt;
+        double      now, dt;
+        CameraInput in;
         glfwPollEvents();
 
         now = glfwGetTime();
@@ -277,7 +313,9 @@ int main(void) {
 
         glfwGetFramebufferSize(window, &state.fb_width, &state.fb_height);
 
-        update(&state, dt);
+        read_input(window, &in, dt, &state);          /* poll GLFW -> CameraInput */
+        camera_update(&state.camera, &in, (float)dt);
+        update(&state, dt);                           /* animate the scene */
         render(&state);
 
         rhi_present();

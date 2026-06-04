@@ -14,9 +14,21 @@ vec3 vec3_make(float x, float y, float z) {
     return r;
 }
 
+vec3 vec3_add(vec3 a, vec3 b) {
+    vec3 r;
+    r.x = a.x + b.x; r.y = a.y + b.y; r.z = a.z + b.z;
+    return r;
+}
+
 vec3 vec3_sub(vec3 a, vec3 b) {
     vec3 r;
     r.x = a.x - b.x; r.y = a.y - b.y; r.z = a.z - b.z;
+    return r;
+}
+
+vec3 vec3_scale(vec3 v, float s) {
+    vec3 r;
+    r.x = v.x * s; r.y = v.y * s; r.z = v.z * s;
     return r;
 }
 
