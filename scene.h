@@ -37,6 +37,7 @@ void         scene_init(Scene *s);
 void         scene_free(Scene *s);
 sol_u32      scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 scale);
 SceneObject *scene_get(Scene *s, sol_u32 handle);  /* NULL if none; valid until next scene_add */
+sol_u32      scene_handle_for_nid(Scene *s, const char *nid);  /* 0 if none — the nid->handle map */
 
 /* slot operations — handle-based (resolve internally, immune to stale pointers) */
 void        scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char *value);
@@ -47,5 +48,6 @@ void        scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name);
 
 /* serialization — defined in scene_io.c */
 sol_bool    scene_save(Scene *s, const char *path);   /* SOL_FALSE if the file won't open */
+sol_bool    scene_load(Scene *s, const char *path);   /* inits s; SOL_FALSE on open/parse error */
 
 #endif /* SCENE_H */

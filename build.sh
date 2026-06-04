@@ -47,7 +47,7 @@ if [ "$MODE" = "iotest" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        scene.c scene_io.c nid.c scene_io_test.c \
+        scene.c scene_io.c nid.c stml.c scene_io_test.c \
         -o scene_io_test
     echo "built ./scene_io_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
@@ -60,7 +60,7 @@ if [ "$MODE" = "asan" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c \
+        main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c stml.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit \
         -o solarium-asan
@@ -75,7 +75,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c \
+    main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c stml.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit \
     -o solarium

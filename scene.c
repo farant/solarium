@@ -76,6 +76,17 @@ SceneObject *scene_get(Scene *s, sol_u32 handle) {
     return NULL;
 }
 
+/* The nid -> runtime handle map (linear scan). The loader uses it to translate
+   persistent references (parent, rel target) back into runtime handles. */
+sol_u32 scene_handle_for_nid(Scene *s, const char *nid) {
+    sol_u32 i;
+    if (!nid) return 0;
+    for (i = 0; i < s->count; i++) {
+        if (s->objects[i].nid && strcmp(s->objects[i].nid, nid) == 0) return s->objects[i].handle;
+    }
+    return 0;
+}
+
 void scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char *value) {
     SceneObject *o = scene_get(s, handle);
     sol_u32 i;

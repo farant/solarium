@@ -8,8 +8,10 @@
    trip -Wunused-function. scene.h (via sol_types.h) gives us the plain types. */
 
 #include "scene.h"
+#include "nid.h"     /* NID_LEN — for stack buffers holding a copied nid */
 
 #include <stdio.h>
+#include <string.h>
 
 static vec3 v3(float x, float y, float z) {
     vec3 v; v.x = x; v.y = y; v.z = z; return v;
@@ -25,6 +27,22 @@ static void dump_file(const char *path) {
     if (!f) { printf("(could not reopen %s)\n", path); return; }
     while ((c = fgetc(f)) != EOF) putchar(c);
     fclose(f);
+}
+
+/* Byte-for-byte file comparison. */
+static int files_equal(const char *a, const char *b) {
+    FILE *fa = fopen(a, "rb");
+    FILE *fb = fopen(b, "rb");
+    int   ca, cb, same = 1;
+    if (!fa || !fb) { if (fa) fclose(fa); if (fb) fclose(fb); return 0; }
+    do {
+        ca = fgetc(fa);
+        cb = fgetc(fb);
+        if (ca != cb) { same = 0; break; }
+    } while (ca != EOF);
+    fclose(fa);
+    fclose(fb);
+    return same;
 }
 
 int main(void) {
@@ -72,6 +90,51 @@ int main(void) {
         }
         printf("box.nid    = %s\n", box->nid);
         printf("anchor.nid = %s  (box's parent should reference this)\n", anchor->nid);
+    }
+
+    /* round-trip: load what we saved, re-save, and the two files must match. If
+       load dropped, reordered, or mangled anything, the second file differs. */
+    {
+        const char *path2 = "scene_io_test_2.stml";
+        Scene       b;
+        char        a_box_nid[NID_LEN + 1];
+        char        a_anchor_nid[NID_LEN + 1];
+
+        /* remember A's minted ids so we can find the same objects in B */
+        strcpy(a_box_nid,    scene_get(&scene, box_h)->nid);
+        strcpy(a_anchor_nid, scene_get(&scene, anchor_h)->nid);
+
+        if (!scene_load(&b, path)) {
+            printf("FAIL: scene_load(%s)\n", path);
+            scene_free(&scene);
+            return 1;
+        }
+        if (!scene_save(&b, path2)) {
+            printf("FAIL: re-save to %s\n", path2);
+            scene_free(&b); scene_free(&scene);
+            return 1;
+        }
+        if (!files_equal(path, path2)) {
+            printf("FAIL: round-trip save->load->save is NOT byte-identical\n");
+            scene_free(&b); scene_free(&scene);
+            return 1;
+        }
+        printf("round-trip save->load->save is byte-identical: ok\n");
+
+        /* identity + hierarchy survived: B's box (found by A's nid) must have a
+           parent whose nid is A's anchor nid */
+        {
+            sol_u32      bbox_h = scene_handle_for_nid(&b, a_box_nid);
+            SceneObject *bbox   = scene_get(&b, bbox_h);
+            SceneObject *bpar   = bbox ? scene_get(&b, bbox->parent) : (SceneObject *)0;
+            if (!bbox || !bpar || !bpar->nid || strcmp(bpar->nid, a_anchor_nid) != 0) {
+                printf("FAIL: identity/hierarchy not preserved across load\n");
+                scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            printf("loaded box keeps its nid and its parent resolves to the anchor: ok\n");
+        }
+        scene_free(&b);
     }
 
     scene_free(&scene);
