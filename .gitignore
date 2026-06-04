@@ -16,3 +16,4 @@
 # Editor / tooling
 compile_commands.json
 .cache/
+.DS_Store

@@ -12,11 +12,16 @@ struct GLFWwindow;
 typedef struct { sol_u32 id; } RhiBuffer;
 typedef struct { sol_u32 id; } RhiShader;
 typedef struct { sol_u32 id; } RhiPipeline;
-typedef struct { sol_u32 id; } RhiTexture;   /* stubbed — for when step-3 textures return */
+typedef struct { sol_u32 id; } RhiTexture;
 
 /* ---- enums ---- */
 typedef enum { RHI_BUFFER_VERTEX, RHI_BUFFER_INDEX } RhiBufferType;
 typedef enum { RHI_FORMAT_FLOAT2, RHI_FORMAT_FLOAT3 } RhiVertexFormat;
+
+/* Color space is part of a texture's identity (decided at creation, per §1.5):
+   SRGB8 for color/albedo/page images (GPU converts sRGB->linear on sample);
+   RGBA8 for linear data maps (normal/roughness/masks; sampled raw). */
+typedef enum { RHI_TEX_SRGB8, RHI_TEX_RGBA8 } RhiTextureFormat;
 
 /* ---- vertex layout + pipeline description ---- */
 typedef struct {
@@ -44,6 +49,7 @@ void rhi_shutdown(void);
 RhiBuffer   rhi_create_buffer(RhiBufferType type, const void *data, size_t size);
 RhiShader   rhi_create_shader(const char *vertex_src, const char *fragment_src);
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc);
+RhiTexture  rhi_create_texture(const void *pixels, int width, int height, RhiTextureFormat fmt);  /* RGBA8 source */
 
 /* ---- per frame ---- */
 void rhi_begin_frame(int fb_width, int fb_height,
@@ -51,9 +57,11 @@ void rhi_begin_frame(int fb_width, int fb_height,
 void rhi_set_pipeline(RhiPipeline pipeline);               /* binds shader + layout + state */
 void rhi_bind_vertex_buffer(RhiBuffer buffer);
 void rhi_bind_index_buffer(RhiBuffer buffer);
+void rhi_bind_texture(RhiTexture texture, int slot);            /* to texture unit `slot` */
 void rhi_set_uniform_mat4(const char *name, const float *m);     /* on the bound pipeline */
 void rhi_set_uniform_vec3(const char *name, float x, float y, float z);
 void rhi_set_uniform_float(const char *name, float v);
+void rhi_set_uniform_int(const char *name, int v);               /* e.g. a sampler's texture unit */
 void rhi_draw(int first_vertex, int vertex_count);
 void rhi_draw_indexed(int first_index, int index_count);
 void rhi_present(void);

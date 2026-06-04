@@ -16,6 +16,7 @@
 #define MAX_BUFFERS   256
 #define MAX_SHADERS    64
 #define MAX_PIPELINES  64
+#define MAX_TEXTURES   64
 
 typedef struct {
     GLuint        program;
@@ -32,6 +33,8 @@ static GLuint     g_shaders[MAX_SHADERS];
 static sol_u32    g_shader_count;
 static GlPipeline g_pipelines[MAX_PIPELINES];
 static sol_u32    g_pipeline_count;
+static GLuint     g_textures[MAX_TEXTURES];
+static sol_u32    g_texture_count;
 
 static struct GLFWwindow *g_window;
 static const GlPipeline  *g_current;   /* pipeline bound by rhi_set_pipeline */
@@ -43,6 +46,8 @@ static sol_u32 g_shader_free[MAX_SHADERS];
 static sol_u32 g_shader_free_count;
 static sol_u32 g_pipeline_free[MAX_PIPELINES];
 static sol_u32 g_pipeline_free_count;
+static sol_u32 g_texture_free[MAX_TEXTURES];
+static sol_u32 g_texture_free_count;
 
 /* Reuse a freed slot if one exists, else extend the table. */
 static sol_u32 slot_alloc(sol_u32 *count, sol_u32 *free_list, sol_u32 *free_count) {
@@ -198,6 +203,34 @@ RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
     return h;
 }
 
+RhiTexture rhi_create_texture(const void *pixels, int width, int height, RhiTextureFormat fmt) {
+    GLuint     tex;
+    sol_u32    idx;
+    RhiTexture h;
+    GLint      internal = (fmt == RHI_TEX_SRGB8) ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, internal, (GLsizei)width, (GLsizei)height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);     /* source bytes are RGBA8 */
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    g_textures[idx] = tex;
+    h.id = idx + 1;
+    gl_check("rhi_create_texture");
+    return h;
+}
+
+void rhi_bind_texture(RhiTexture texture, int slot) {
+    glActiveTexture((GLenum)(GL_TEXTURE0 + slot));
+    glBindTexture(GL_TEXTURE_2D, texture.id ? g_textures[texture.id - 1] : 0);
+}
+
 /* ---- per frame ---- */
 void rhi_begin_frame(int fb_width, int fb_height, float r, float g, float b, float a) {
     glViewport(0, 0, fb_width, fb_height);
@@ -252,6 +285,11 @@ void rhi_set_uniform_float(const char *name, float v) {
     glUniform1f(loc, v);
 }
 
+void rhi_set_uniform_int(const char *name, int v) {
+    GLint loc = glGetUniformLocation(g_current->program, name);
+    glUniform1i(loc, v);
+}
+
 void rhi_draw(int first_vertex, int vertex_count) {
     glDrawArrays(GL_TRIANGLES, first_vertex, vertex_count);
 }
@@ -293,5 +331,10 @@ void rhi_destroy_pipeline(RhiPipeline pipeline) {
 }
 
 void rhi_destroy_texture(RhiTexture texture) {
-    (void)texture;   /* textures aren't created until item 5; stub for now */
+    sol_u32 idx;
+    if (!texture.id) return;
+    idx = texture.id - 1;
+    glDeleteTextures(1, &g_textures[idx]);
+    slot_free(idx, g_texture_free, &g_texture_free_count);
+    gl_check("rhi_destroy_texture");
 }

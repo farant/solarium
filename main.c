@@ -37,8 +37,11 @@ static const char *FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec3 vNormal;\n"
     "in vec3 vWorldPos;\n"
+    "in vec2 vUV;\n"
     "uniform vec3 uViewPos;\n"
     "uniform float uHighlight;\n"                            /* 0 = normal, 1 = selected */
+    "uniform sampler2D uTexture;\n"
+    "uniform float uUseTexture;\n"                           /* 0 = base color, 1 = sample uTexture */
     "out vec4 FragColor;\n"
     "void main() {\n"
     "    vec3 N = normalize(vNormal);\n"                       /* renormalize after interp */
@@ -48,13 +51,16 @@ static const char *FRAGMENT_SRC =
     "\n"
     "    vec3 lightColor = vec3(1.0, 0.98, 0.92);\n"
     "    vec3 baseColor  = vec3(0.85, 0.45, 0.35);\n"          /* the object's color */
+    "    vec3 albedo = (uUseTexture > 0.5)\n"
+    "                ? texture(uTexture, vUV).rgb\n"           /* sRGB tex -> linear on sample */
+    "                : baseColor;\n"
     "    float ambient   = 0.15;\n"
     "    float shininess = 48.0;\n"
     "\n"
     "    float diff = max(dot(N, L), 0.0);\n"                  /* Lambert diffuse */
     "    float spec = (diff > 0.0) ? pow(max(dot(N, H), 0.0), shininess) : 0.0;\n"
-    "    vec3 color = baseColor * ambient\n"
-    "               + baseColor * lightColor * diff\n"
+    "    vec3 color = albedo * ambient\n"
+    "               + albedo * lightColor * diff\n"
     "               + lightColor * spec;\n"                    /* Blinn-Phong highlight */
     "    color = pow(color, vec3(1.0 / 2.2));\n"              /* linear -> sRGB for display */
     "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* gold when selected */
@@ -64,6 +70,7 @@ static const char *FRAGMENT_SRC =
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
+    RhiTexture  checker_tex;    /* procedural test texture (item 5a) */
     Scene       scene;
     sol_u32     box_handle;     /* so update() can animate the box object */
     sol_u32     anchor_handle;  /* the empty the box is parented to */
@@ -218,6 +225,24 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     st->f_was_down = f_now;
 }
 
+/* A procedural warm/cool checker, built on the CPU (above the seam) and uploaded
+   as an sRGB texture. Proves the create->bind->sample path + UV mapping. */
+static RhiTexture make_checker(void) {
+    enum { N = 64 };
+    unsigned char px[N * N * 4];
+    int x, y;
+    for (y = 0; y < N; y++) {
+        for (x = 0; x < N; x++) {
+            unsigned char *p = &px[(y * N + x) * 4];
+            int c = ((x >> 3) ^ (y >> 3)) & 1;        /* 8px cells */
+            if (c) { p[0] = 220; p[1] = 180; p[2] = 120; }   /* warm */
+            else   { p[0] = 60;  p[1] = 80;  p[2] = 110; }   /* cool */
+            p[3] = 255;
+        }
+    }
+    return rhi_create_texture(px, N, N, RHI_TEX_SRGB8);
+}
+
 /* One-time setup: build the pipeline + meshes, populate the scene. */
 static int init_scene(AppState *state) {
     MeshBuilder mb;
@@ -241,6 +266,8 @@ static int init_scene(AppState *state) {
     desc.stride     = 8 * sizeof(float);
     desc.depth_test = SOL_TRUE;
     state->pipeline = rhi_create_pipeline(&desc);
+
+    state->checker_tex = make_checker();   /* item 5a: a texture to prove the sampler path */
 
     /* meshes (shared assets the scene objects reference) */
     mb_init(&mb);
@@ -312,13 +339,19 @@ static void update(AppState *state, double dt) {
 }
 
 static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
-                      mat4 view, mat4 proj, vec3 eye, float highlight) {
+                      mat4 view, mat4 proj, vec3 eye, float highlight,
+                      RhiTexture tex, float use_texture) {
     rhi_set_pipeline(state->pipeline);
-    rhi_set_uniform_mat4("uModel",     model.m);
-    rhi_set_uniform_mat4("uView",      view.m);
-    rhi_set_uniform_mat4("uProj",      proj.m);
-    rhi_set_uniform_vec3("uViewPos",   eye.x, eye.y, eye.z);
-    rhi_set_uniform_float("uHighlight", highlight);
+    rhi_set_uniform_mat4("uModel",      model.m);
+    rhi_set_uniform_mat4("uView",       view.m);
+    rhi_set_uniform_mat4("uProj",       proj.m);
+    rhi_set_uniform_vec3("uViewPos",    eye.x, eye.y, eye.z);
+    rhi_set_uniform_float("uHighlight",  highlight);
+    rhi_set_uniform_float("uUseTexture", use_texture);
+    if (use_texture > 0.5f) {
+        rhi_bind_texture(tex, 0);
+        rhi_set_uniform_int("uTexture", 0);     /* sampler -> texture unit 0 */
+    }
     rhi_bind_vertex_buffer(mesh.vbuffer);
     rhi_bind_index_buffer(mesh.ibuffer);
     rhi_draw_indexed(0, mesh.index_count);
@@ -342,12 +375,18 @@ static void render(AppState *state) {
     /* iterate the scene — each object's WORLD matrix (parent * local) */
     for (i = 0; i < state->scene.count; i++) {
         const SceneObject *o = &state->scene.objects[i];
-        mat4  model;
-        float hl;
+        mat4       model;
+        float      hl, use;
+        RhiTexture tex;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         model = scene_world_matrix(&state->scene, o);
         hl    = (o->handle == state->selected_handle) ? 1.0f : 0.0f;
-        draw_mesh(state, o->mesh, model, view, proj, eye, hl);
+        if (o->handle == state->box_handle) {     /* item 5a: only the box is textured for now */
+            tex = state->checker_tex; use = 1.0f;
+        } else {
+            tex.id = 0; use = 0.0f;
+        }
+        draw_mesh(state, o->mesh, model, view, proj, eye, hl, tex, use);
     }
 }
 
