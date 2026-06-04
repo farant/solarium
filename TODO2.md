@@ -455,9 +455,21 @@ otherwise:
 6. **Tonemap operator:** ACES filmic. [item 7]
 
 **Progress:** Item 0 (C89 conformance) and Item 1 (RHI gaps + MeshBuilder + box/plane/grid)
-complete. Item 2 in progress: 2.1 quaternion/TRS, 2.2 Scene + stable IDs, 2.3 hierarchy, 2.4
-overbuilt slots — done; **2.5 STML serialization is next** (sub-steps: stml.c DOM → ULID nid →
-scene_save → scene_load + round-trip → delete-keeps-IDs). See SCENE_FORMAT.md and git history.
+complete. **Item 2 complete** — the persistent, identified object graph: 2.1 quaternion/TRS,
+2.2 Scene + stable IDs, 2.3 hierarchy, 2.4 overbuilt slots, and 2.5 STML serialization
+(2.5a stml.c DOM parser → 2.5b ULID nid generator → 2.5c scene_save → 2.5d scene_load +
+byte-identical round-trip → 2.5e keystone proof: identity survives deletion and reload).
+See SCENE_FORMAT.md and git history. **Next: Item 3.**
+
+Known boundaries deferred out of Item 2 (not bugs — scoped follow-ups):
+- `scene_load` restores `mesh_ref` (the name) but not GL geometry; wiring ref→generator
+  needs a small asset registry before a loaded scene can render. Until then load is
+  exercised headlessly, not called from `main.c`.
+- STML raw `!`-capture is recognized (sets `node->raw`) but capture text always runs to the
+  next `<`; the line-counted raw variant (text containing `<`) is future, for the item-5
+  content model.
+- `scene_remove` leaves references to the removed object dangling (handled gracefully); a
+  cascade/reparent delete policy is a later editor concern.
 
 ---
 
