@@ -247,6 +247,11 @@ void rhi_set_uniform_vec3(const char *name, float x, float y, float z) {
     glUniform3f(loc, x, y, z);
 }
 
+void rhi_set_uniform_float(const char *name, float v) {
+    GLint loc = glGetUniformLocation(g_current->program, name);
+    glUniform1f(loc, v);
+}
+
 void rhi_draw(int first_vertex, int vertex_count) {
     glDrawArrays(GL_TRIANGLES, first_vertex, vertex_count);
 }

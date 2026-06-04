@@ -53,6 +53,7 @@ void rhi_bind_vertex_buffer(RhiBuffer buffer);
 void rhi_bind_index_buffer(RhiBuffer buffer);
 void rhi_set_uniform_mat4(const char *name, const float *m);     /* on the bound pipeline */
 void rhi_set_uniform_vec3(const char *name, float x, float y, float z);
+void rhi_set_uniform_float(const char *name, float v);
 void rhi_draw(int first_vertex, int vertex_count);
 void rhi_draw_indexed(int first_index, int index_count);
 void rhi_present(void);

@@ -38,6 +38,7 @@ static const char *FRAGMENT_SRC =
     "in vec3 vNormal;\n"
     "in vec3 vWorldPos;\n"
     "uniform vec3 uViewPos;\n"
+    "uniform float uHighlight;\n"                            /* 0 = normal, 1 = selected */
     "out vec4 FragColor;\n"
     "void main() {\n"
     "    vec3 N = normalize(vNormal);\n"                       /* renormalize after interp */
@@ -56,6 +57,7 @@ static const char *FRAGMENT_SRC =
     "               + baseColor * lightColor * diff\n"
     "               + lightColor * spec;\n"                    /* Blinn-Phong highlight */
     "    color = pow(color, vec3(1.0 / 2.2));\n"              /* linear -> sRGB for display */
+    "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* gold when selected */
     "    FragColor = vec4(color, 1.0);\n"
     "}\n";
 
@@ -79,8 +81,19 @@ typedef struct {
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
 } AppState;
 
+/* World-space position of an object (its world matrix's translation column),
+   falling back to the scene focus if the handle is gone. */
+static vec3 object_world_pos(Scene *s, sol_u32 handle) {
+    SceneObject *o = scene_get(s, handle);
+    if (o) {
+        mat4 w = scene_world_matrix(s, o);
+        return vec3_make(w.m[12], w.m[13], w.m[14]);
+    }
+    return vec3_make(0.0f, 0.5f, 0.0f);
+}
+
 /* Cast a pick ray through a screen point (NDC) and select the nearest object,
-   reporting its stable handle + nid. */
+   reporting its stable handle + nid. In orbit, a hit re-targets the pivot. */
 static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
     int     ww, wh;
     float   aspect, t;
@@ -96,6 +109,8 @@ static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
         SceneObject *o = scene_get(&st->scene, hit);
         printf("picked: handle %u, nid %s, t=%.2f\n",
                (unsigned)hit, (o && o->nid) ? o->nid : "?", t);
+        if (st->camera.mode == CAMERA_ORBIT)            /* "click a shelf to zoom" */
+            camera_enter_orbit(&st->camera, object_world_pos(&st->scene, hit));
     } else {
         printf("picked: nothing\n");
     }
@@ -142,7 +157,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             camera_enter_fp(&st->camera);
             glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         } else {
-            camera_enter_orbit(&st->camera, vec3_make(0.0f, 0.5f, 0.0f));  /* fixed target until Item 4 */
+            camera_enter_orbit(&st->camera, object_world_pos(&st->scene, st->selected_handle));  /* pivot on the selection (fallback to scene focus) */
             glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         }
         st->mouse_skip = 2;                         /* cursor pos is discontinuous across the switch */
@@ -297,12 +312,13 @@ static void update(AppState *state, double dt) {
 }
 
 static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
-                      mat4 view, mat4 proj, vec3 eye) {
+                      mat4 view, mat4 proj, vec3 eye, float highlight) {
     rhi_set_pipeline(state->pipeline);
-    rhi_set_uniform_mat4("uModel",   model.m);
-    rhi_set_uniform_mat4("uView",    view.m);
-    rhi_set_uniform_mat4("uProj",    proj.m);
-    rhi_set_uniform_vec3("uViewPos", eye.x, eye.y, eye.z);
+    rhi_set_uniform_mat4("uModel",     model.m);
+    rhi_set_uniform_mat4("uView",      view.m);
+    rhi_set_uniform_mat4("uProj",      proj.m);
+    rhi_set_uniform_vec3("uViewPos",   eye.x, eye.y, eye.z);
+    rhi_set_uniform_float("uHighlight", highlight);
     rhi_bind_vertex_buffer(mesh.vbuffer);
     rhi_bind_index_buffer(mesh.ibuffer);
     rhi_draw_indexed(0, mesh.index_count);
@@ -326,10 +342,12 @@ static void render(AppState *state) {
     /* iterate the scene — each object's WORLD matrix (parent * local) */
     for (i = 0; i < state->scene.count; i++) {
         const SceneObject *o = &state->scene.objects[i];
-        mat4 model;
+        mat4  model;
+        float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         model = scene_world_matrix(&state->scene, o);
-        draw_mesh(state, o->mesh, model, view, proj, eye);
+        hl    = (o->handle == state->selected_handle) ? 1.0f : 0.0f;
+        draw_mesh(state, o->mesh, model, view, proj, eye, hl);
     }
 }
 
