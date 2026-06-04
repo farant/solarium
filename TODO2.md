@@ -442,11 +442,22 @@ otherwise:
 
 1. **Image decoding:** hand-rolled TGA (not `stb_image`). [§1.3, item 5]
 2. **glTF loading:** hand-rolled `.glb` (not `cgltf`/`assimp`). [§1.3, item 6]
-3. **Object ID width:** `sol_u32` (≈4.3B objects). Use `sol_u64`-equivalent if you expect more. [item 2]
-4. **Transform storage:** TRS components (not a bare `mat4`). [item 2]
-5. **Serialization format:** human-readable, entity-graph-shaped, text. (A concrete format —
-   a small custom text format vs. a constrained JSON-like — is still open; the *shape* is fixed.) [item 2]
+3. **Object identity:** **DECIDED** — persistent ID is a **ULID-style `nid`** (timestamp+random
+   base32: globally unique, mergeable, time-sortable, weak-RNG-tolerant); runtime ID is a
+   `sol_u32` handle **mapped from the nid on load** (the Unity-style persistent/runtime split).
+   Supersedes the earlier plain-`sol_u32` default. [item 2; see SCENE_FORMAT.md]
+4. **Transform storage:** TRS components (not a bare `mat4`). [item 2 — done in 2.1]
+5. **Serialization format:** **DECIDED** — **STML** (the project's own tag markup), restricted to
+   a small C89 "data profile" subset (elements, attrs incl. boolean, nesting, `</>`, restricted
+   `<tag (>` text-capture, `!` raw, comments; no capture-operators/transclusion/selectors).
+   Human-readable, entity-graph-shaped, text — as required. Reusable `stml.c` DOM; the future
+   document/content model is its second client. [item 2; full spec in SCENE_FORMAT.md]
 6. **Tonemap operator:** ACES filmic. [item 7]
+
+**Progress:** Item 0 (C89 conformance) and Item 1 (RHI gaps + MeshBuilder + box/plane/grid)
+complete. Item 2 in progress: 2.1 quaternion/TRS, 2.2 Scene + stable IDs, 2.3 hierarchy, 2.4
+overbuilt slots — done; **2.5 STML serialization is next** (sub-steps: stml.c DOM → ULID nid →
+scene_save → scene_load + round-trip → delete-keeps-IDs). See SCENE_FORMAT.md and git history.
 
 ---
 
