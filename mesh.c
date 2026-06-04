@@ -113,5 +113,25 @@ Mesh mesh_from_builder(const MeshBuilder *b) {
     m.ibuffer = rhi_create_buffer(RHI_BUFFER_INDEX, b->indices,
                     (size_t)b->index_count * sizeof(sol_u32));
     m.index_count = (int)b->index_count;
+
+    /* local-space AABB over the vertex positions (floats [i*8 + 0..2]) */
+    if (b->vertex_count == 0) {
+        m.bounds.min.x = m.bounds.min.y = m.bounds.min.z = 0.0f;
+        m.bounds.max = m.bounds.min;
+    } else {
+        sol_f32 minx, miny, minz, maxx, maxy, maxz;
+        sol_u32 i;
+        minx = maxx = b->vertices[0];
+        miny = maxy = b->vertices[1];
+        minz = maxz = b->vertices[2];
+        for (i = 1; i < b->vertex_count; i++) {
+            sol_f32 x = b->vertices[i*8+0], y = b->vertices[i*8+1], z = b->vertices[i*8+2];
+            if (x < minx) minx = x;  if (x > maxx) maxx = x;
+            if (y < miny) miny = y;  if (y > maxy) maxy = y;
+            if (z < minz) minz = z;  if (z > maxz) maxz = z;
+        }
+        m.bounds.min.x = minx; m.bounds.min.y = miny; m.bounds.min.z = minz;
+        m.bounds.max.x = maxx; m.bounds.max.y = maxy; m.bounds.max.z = maxz;
+    }
     return m;
 }

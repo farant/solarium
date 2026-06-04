@@ -14,4 +14,7 @@ typedef struct { float m[16]; } mat4;
 
 typedef struct { float x, y, z, w; } quat;   /* unit quaternion = a rotation */
 
+typedef struct { vec3 origin, dir; } Ray;    /* dir kept unit in practice */
+typedef struct { vec3 min, max;    } Aabb;   /* axis-aligned bounding box */
+
 #endif /* SOL_TYPES_H */

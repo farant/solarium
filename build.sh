@@ -47,7 +47,7 @@ if [ "$MODE" = "iotest" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        scene.c scene_io.c nid.c stml.c scene_io_test.c \
+        scene.c scene_io.c nid.c stml.c sol_math.c scene_io_test.c \
         -o scene_io_test
     echo "built ./scene_io_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
@@ -62,6 +62,18 @@ if [ "$MODE" = "camtest" ]; then
         camera.c sol_math.c camera_test.c \
         -o camera_test
     echo "built ./camera_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
+# Build + run the headless picking-math test under the sanitizers. 4a links only
+# sol_math.c (ray_vs_aabb); 4b will add scene.c + nid.c for scene_pick.
+if [ "$MODE" = "picktest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        sol_math.c pick_test.c \
+        -o pick_test
+    echo "built ./pick_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
 

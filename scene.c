@@ -3,6 +3,7 @@
 
 #include "scene.h"
 #include "nid.h"
+#include "sol_math.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -105,6 +106,23 @@ sol_u32 scene_handle_for_nid(Scene *s, const char *nid) {
         if (s->objects[i].nid && strcmp(s->objects[i].nid, nid) == 0) return s->objects[i].handle;
     }
     return 0;
+}
+
+/* World matrix by walking up the parent chain: parent.world * ... * local.
+   Iterative (no recursion), depth-capped against cycles, NULL-guarded against a
+   dangling parent. Shared by render and the item-4 picker. */
+mat4 scene_world_matrix(Scene *s, const SceneObject *o) {
+    mat4    world = mat4_from_trs(o->pos, o->rot, o->scale);
+    sol_u32 p     = o->parent;
+    int     depth = 0;
+    while (p != 0 && depth < 64) {
+        SceneObject *par = scene_get(s, p);
+        if (!par) break;                                   /* dangling parent -> stop */
+        world = mat4_mul(mat4_from_trs(par->pos, par->rot, par->scale), world);
+        p     = par->parent;                               /* climb */
+        depth++;                                           /* cycle guard */
+    }
+    return world;
 }
 
 void scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char *value) {

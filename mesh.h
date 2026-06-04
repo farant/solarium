@@ -2,10 +2,12 @@
 #define MESH_H
 
 #include "sol_base.h"
+#include "sol_types.h"
 #include "rhi.h"
 
-/* a GPU mesh: vertex buffer + index buffer + index count */
-typedef struct { RhiBuffer vbuffer; RhiBuffer ibuffer; int index_count; } Mesh;
+/* a GPU mesh: vertex/index buffers, index count, and a local-space AABB (for
+   the item-4 picker; computed at build time since CPU verts are freed after) */
+typedef struct { RhiBuffer vbuffer; RhiBuffer ibuffer; int index_count; Aabb bounds; } Mesh;
 
 /* CPU-side builder — generalizes the FloatArray idiom into vertices (8 floats
    each, the canonical pos+normal+uv layout) plus sol_u32 indices. The seed of

@@ -55,6 +55,8 @@ int main(void) {
     empty.vbuffer.id = 0;     /* a zero Mesh -> transform-only; no GL involved */
     empty.ibuffer.id = 0;
     empty.index_count = 0;
+    empty.bounds.min = v3(0.0f, 0.0f, 0.0f);
+    empty.bounds.max = v3(0.0f, 0.0f, 0.0f);
 
     scene_init(&scene);
 

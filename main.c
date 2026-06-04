@@ -258,22 +258,6 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     rhi_draw_indexed(0, mesh.index_count);
 }
 
-/* world matrix, by walking up the parent chain: parent.world * ... * local.
-   Iterative (no recursion), capped against cycles, NULL-guarded. */
-static mat4 object_world_matrix(Scene *scene, const SceneObject *o) {
-    mat4    world = mat4_from_trs(o->pos, o->rot, o->scale);
-    sol_u32 p     = o->parent;
-    int     depth = 0;
-    while (p != 0 && depth < 64) {
-        SceneObject *par = scene_get(scene, p);
-        if (!par) break;                                   /* dangling parent -> stop */
-        world = mat4_mul(mat4_from_trs(par->pos, par->rot, par->scale), world);
-        p     = par->parent;                               /* climb */
-        depth++;                                           /* cycle guard */
-    }
-    return world;
-}
-
 static void render(AppState *state) {
     float   aspect;
     vec3    eye;
@@ -294,7 +278,7 @@ static void render(AppState *state) {
         const SceneObject *o = &state->scene.objects[i];
         mat4 model;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
-        model = object_world_matrix(&state->scene, o);
+        model = scene_world_matrix(&state->scene, o);
         draw_mesh(state, o->mesh, model, view, proj, eye);
     }
 }

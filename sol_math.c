@@ -177,3 +177,36 @@ mat4 mat4_from_trs(vec3 pos, quat rot, vec3 scale) {
     mat4 s = mat4_scale(scale);
     return mat4_mul(t, mat4_mul(r, s));
 }
+
+/* Ray vs AABB by the slab method: intersect the ray with each axis-aligned slab
+   and keep the running overlap [tmin, tmax]. A hit needs tmin <= tmax with the
+   box not entirely behind the origin. tmin starts at 0 so an origin inside the
+   box reports t = 0. The vec3s are copied into float[3] so we can loop the axes
+   without punning a struct as an array. */
+sol_bool ray_vs_aabb(Ray ray, Aabb box, float *t_out) {
+    float o[3], d[3], lo[3], hi[3];
+    float tmin = 0.0f;
+    float tmax = 1e30f;
+    int   i;
+
+    o[0]=ray.origin.x; o[1]=ray.origin.y; o[2]=ray.origin.z;
+    d[0]=ray.dir.x;    d[1]=ray.dir.y;    d[2]=ray.dir.z;
+    lo[0]=box.min.x;   lo[1]=box.min.y;   lo[2]=box.min.z;
+    hi[0]=box.max.x;   hi[1]=box.max.y;   hi[2]=box.max.z;
+
+    for (i = 0; i < 3; i++) {
+        if (fabsf(d[i]) < 1e-8f) {                 /* ray parallel to this slab */
+            if (o[i] < lo[i] || o[i] > hi[i]) return SOL_FALSE;   /* outside it -> miss */
+        } else {
+            float inv = 1.0f / d[i];
+            float t1  = (lo[i] - o[i]) * inv;
+            float t2  = (hi[i] - o[i]) * inv;
+            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }   /* enter <= exit */
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) return SOL_FALSE;     /* slabs don't overlap (incl. behind) */
+        }
+    }
+    if (t_out) *t_out = tmin;
+    return SOL_TRUE;
+}

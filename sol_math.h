@@ -1,7 +1,8 @@
 #ifndef SOL_MATH_H
 #define SOL_MATH_H
 
-#include "sol_types.h"   /* vec3, vec4, mat4, quat */
+#include "sol_base.h"    /* sol_bool */
+#include "sol_types.h"   /* vec3, vec4, mat4, quat, Ray, Aabb */
 
 /* Column-major math layer. These are external functions defined in sol_math.c,
    so any module can include this header and use only what it needs — no
@@ -41,5 +42,8 @@ mat4  quat_to_mat4(quat q);
 
 /* compose a TRS transform: M = T * R * S (vertex order: scale, rotate, translate) */
 mat4  mat4_from_trs(vec3 pos, quat rot, vec3 scale);
+
+/* ---- ray casting (item 4 picking) ---- */
+sol_bool ray_vs_aabb(Ray ray, Aabb box, float *t_out);  /* slab test; *t_out = entry distance */
 
 #endif /* SOL_MATH_H */

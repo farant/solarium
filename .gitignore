@@ -5,6 +5,7 @@
 /nid_test
 /scene_io_test
 /camera_test
+/pick_test
 /scene.stml
 /scene_io_test.stml
 /scene_io_test_2.stml
