@@ -14,6 +14,8 @@ typedef struct { float x, y, z, w; } vec4;
    which is exactly how OpenGL wants it, so upload is transpose=GL_FALSE. */
 typedef struct { float m[16]; } mat4;
 
+typedef struct { float x, y, z, w; } quat;   /* unit quaternion = a rotation */
+
 /* ---- vec3 ---- */
 static vec3 vec3_make(float x, float y, float z) {
     vec3 r;
@@ -79,19 +81,11 @@ static mat4 mat4_translate(vec3 t) {
     return r;
 }
 
-static mat4 mat4_rotate_x(float a) {
-    float c = cosf(a), s = sinf(a);
+static mat4 mat4_scale(vec3 s) {
     mat4 r = mat4_identity();
-    r.m[5] = c;  r.m[9]  = -s;
-    r.m[6] = s;  r.m[10] =  c;
-    return r;
-}
-
-static mat4 mat4_rotate_y(float a) {
-    float c = cosf(a), s = sinf(a);
-    mat4 r = mat4_identity();
-    r.m[0] = c;  r.m[8]  =  s;
-    r.m[2] = -s; r.m[10] =  c;
+    r.m[0]  = s.x;       /* scale on the diagonal */
+    r.m[5]  = s.y;
+    r.m[10] = s.z;
     return r;
 }
 
@@ -120,6 +114,65 @@ static mat4 mat4_perspective(float fovy, float aspect, float near, float far) {
     r.m[11] = -1.0f;                           /* feeds -z into w -> perspective */
     r.m[14] = (2.0f * far * near) / (near - far);
     return r;
+}
+
+/* ---- quaternions (unit quaternion = a rotation) ---- */
+static quat quat_identity(void) {
+    quat q;
+    q.x = 0.0f; q.y = 0.0f; q.z = 0.0f; q.w = 1.0f;   /* no rotation */
+    return q;
+}
+
+/* rotation of `angle` radians about `axis`: (axis*sin(t/2), cos(t/2)) */
+static quat quat_from_axis_angle(vec3 axis, float angle) {
+    vec3  a = vec3_normalize(axis);
+    float h = angle * 0.5f;                 /* the half-angle is the quaternion trick */
+    float s = sinf(h);
+    quat  q;
+    q.x = a.x * s;
+    q.y = a.y * s;
+    q.z = a.z * s;
+    q.w = cosf(h);
+    return q;
+}
+
+/* Hamilton product. quat_mul(a, b) applied to a vector = apply b, then a. */
+static quat quat_mul(quat a, quat b) {
+    quat q;
+    q.w = a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z;
+    q.x = a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y;
+    q.y = a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x;
+    q.z = a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w;
+    return q;
+}
+
+static quat quat_normalize(quat q) {
+    float len = sqrtf(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+    quat  r;
+    if (len == 0.0f) return quat_identity();
+    r.x = q.x / len; r.y = q.y / len; r.z = q.z / len; r.w = q.w / len;
+    return r;
+}
+
+/* unit quaternion -> column-major rotation matrix */
+static mat4 quat_to_mat4(quat q) {
+    float xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
+    float xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
+    float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
+    mat4 r = mat4_identity();
+    r.m[0] = 1.0f - 2.0f*(yy+zz);  r.m[4] = 2.0f*(xy-wz);         r.m[8]  = 2.0f*(xz+wy);
+    r.m[1] = 2.0f*(xy+wz);         r.m[5] = 1.0f - 2.0f*(xx+zz);  r.m[9]  = 2.0f*(yz-wx);
+    r.m[2] = 2.0f*(xz-wy);         r.m[6] = 2.0f*(yz+wx);         r.m[10] = 1.0f - 2.0f*(xx+yy);
+    return r;
+}
+
+/* compose a TRS transform into a model matrix: M = T * R * S
+   (applied to a vertex, right-to-left: scale, then rotate, then translate) */
+static mat4 mat4_from_trs(vec3 pos, quat rot, vec3 scale) {
+    mat4 t = mat4_translate(pos);
+    mat4 r = quat_to_mat4(rot);
+    mat4 s = mat4_scale(scale);
+    return mat4_mul(t, mat4_mul(r, s));
 }
 
 #endif /* SOL_MATH_H */

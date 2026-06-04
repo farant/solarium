@@ -122,6 +122,7 @@ static void render(const AppState *state) {
     float aspect;
     vec3  eye;
     mat4  view, proj, box_model, floor_model;
+    quat  qy, qx, rot;
 
     rhi_begin_frame(state->fb_width, state->fb_height, 0.10f, 0.12f, 0.15f, 1.0f);
 
@@ -134,14 +135,16 @@ static void render(const AppState *state) {
                         vec3_make(0.0f, 1.0f, 0.0f));   /* up is +Y        */
     proj = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
 
-    /* box: tumbling, hovering above the floor */
-    box_model = mat4_mul(mat4_translate(vec3_make(0.0f, 1.0f, 0.0f)),
-                         mat4_mul(mat4_rotate_y(state->angle),
-                                  mat4_rotate_x(state->angle * 0.5f)));
+    /* box: tumbling, hovering above the floor — quaternion TRS */
+    qy  = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle);
+    qx  = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), state->angle * 0.5f);
+    rot = quat_normalize(quat_mul(qy, qx));
+    box_model = mat4_from_trs(vec3_make(0.0f, 1.0f, 0.0f), rot, vec3_make(1.0f, 1.0f, 1.0f));
     draw_mesh(state, state->box, box_model, view, proj, eye);
 
-    /* floor: static grid at y = 0 */
-    floor_model = mat4_identity();
+    /* floor: static grid at y = 0 (identity rotation) */
+    floor_model = mat4_from_trs(vec3_make(0.0f, 0.0f, 0.0f),
+                                quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     draw_mesh(state, state->floor, floor_model, view, proj, eye);
 }
 
