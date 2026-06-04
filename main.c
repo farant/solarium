@@ -68,22 +68,32 @@ typedef struct {
     float       angle;
     Camera      camera;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
-    /* mouse-look / cursor state (item 3c) */
+    /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
-    sol_bool    mouse_have_last;   /* first-frame guard */
-    sol_bool    cursor_captured;
+    int         mouse_skip;        /* swallow N frames of delta after a cursor-mode change */
     sol_bool    tab_was_down;
+    double      scroll_accum;      /* scroll events accumulate here, drained per frame */
 } AppState;
+
+/* Scroll arrives only as events (no poll), so it needs a callback; the window
+   user-pointer bridges back to our state. read_input drains scroll_accum. */
+static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
+    AppState *st = (AppState *)glfwGetWindowUserPointer(w);
+    (void)xoff;
+    if (st) st->scroll_accum += yoff;
+}
 
 /* Poll GLFW into a CameraInput (the platform layer; camera.c stays GLFW-free).
    Movement/look are level-triggered (held keys); the mode toggle is edge-
    triggered so it fires once per press. */
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool f_now, tab_now;
+    sol_bool f_now, tab_now, dragging, fp;
     double   mx, my;
 
-    /* movement (held) */
+    fp = (st->camera.mode != CAMERA_ORBIT);
+
+    /* movement (held; ignored by the camera in orbit) */
     in->forward = glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS;
     in->back    = glfwGetKey(w, GLFW_KEY_S) == GLFW_PRESS;
     in->left    = glfwGetKey(w, GLFW_KEY_A) == GLFW_PRESS;
@@ -99,34 +109,48 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     if (glfwGetKey(w, GLFW_KEY_UP)    == GLFW_PRESS) in->look_dy += look;
     if (glfwGetKey(w, GLFW_KEY_DOWN)  == GLFW_PRESS) in->look_dy -= look;
 
-    /* Tab toggles cursor capture (edge-triggered) */
+    /* Tab toggles first-person <-> orbit (edge); cursor mode follows */
     tab_now = glfwGetKey(w, GLFW_KEY_TAB) == GLFW_PRESS;
     if (tab_now && !st->tab_was_down) {
-        st->cursor_captured = !st->cursor_captured;
-        glfwSetInputMode(w, GLFW_CURSOR,
-                         st->cursor_captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
-        st->mouse_have_last = SOL_FALSE;            /* reseed -> no jump on re-capture */
+        if (st->camera.mode == CAMERA_ORBIT) {
+            camera_enter_fp(&st->camera);
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        } else {
+            camera_enter_orbit(&st->camera, vec3_make(0.0f, 0.5f, 0.0f));  /* fixed target until Item 4 */
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+        st->mouse_skip = 2;                         /* cursor pos is discontinuous across the switch */
+        fp = (st->camera.mode != CAMERA_ORBIT);
     }
     st->tab_was_down = tab_now;
 
-    /* mouse look (a displacement -> sensitivity-scaled, NOT dt-scaled) */
+    /* mouse look (displacement -> sensitivity-scaled, NOT dt-scaled). Always
+       track the last position so a drag never starts with a jump; apply the
+       delta in first-person (captured) or while left-dragging in orbit — but
+       swallow a couple of frames after a cursor-mode change, since GLFW's
+       virtual cursor position jumps (one frame later) when the mode flips. */
     glfwGetCursorPos(w, &mx, &my);
-    if (st->cursor_captured) {
-        if (st->mouse_have_last) {                  /* skip the garbage first delta */
-            float dx = (float)(mx - st->mouse_last_x);
-            float dy = (float)(my - st->mouse_last_y);
-            in->look_dx += dx * MOUSE_SENSITIVITY;
-            in->look_dy -= dy * MOUSE_SENSITIVITY;  /* screen-y grows down -> negate */
-        }
-        st->mouse_last_x    = mx;
-        st->mouse_last_y    = my;
-        st->mouse_have_last = SOL_TRUE;
+    dragging = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (st->mouse_skip > 0) {
+        st->mouse_skip--;                           /* reseed only; don't apply the delta */
+    } else if (fp || dragging) {
+        float dx = (float)(mx - st->mouse_last_x);
+        float dy = (float)(my - st->mouse_last_y);
+        in->look_dx += dx * MOUSE_SENSITIVITY;
+        in->look_dy -= dy * MOUSE_SENSITIVITY;      /* screen-y grows down -> negate */
     }
+    st->mouse_last_x = mx;
+    st->mouse_last_y = my;
 
-    /* F toggles walk/fly (edge-triggered) */
+    /* scroll: drain the accumulator into this frame (orbit dolly) */
+    in->zoom = (float)st->scroll_accum;
+    st->scroll_accum = 0.0;
+
+    /* F toggles walk/fly in first person (edge) */
     f_now = glfwGetKey(w, GLFW_KEY_F) == GLFW_PRESS;
-    in->toggle_mode = (f_now && !st->f_was_down);   /* fire once per press */
-    st->f_was_down  = f_now;
+    if (f_now && !st->f_was_down && st->camera.mode != CAMERA_ORBIT)
+        st->camera.mode = (st->camera.mode == CAMERA_WALK) ? CAMERA_FLY : CAMERA_WALK;
+    st->f_was_down = f_now;
 }
 
 /* One-time setup: build the pipeline + meshes, populate the scene. */
@@ -302,9 +326,11 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    glfwSetKeyCallback(window, on_key);   /* platform: input */
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);  /* capture for mouse-look */
-    state.cursor_captured = SOL_TRUE;
+    glfwSetWindowUserPointer(window, &state);   /* bridge callbacks -> state */
+    glfwSetKeyCallback(window, on_key);         /* platform: input */
+    glfwSetScrollCallback(window, on_scroll);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);  /* first-person: capture */
+    state.mouse_skip = 2;                /* swallow the first deltas (no baseline yet) */
 
     if (!rhi_init(window)) {              /* backend: context + GL info */
         fprintf(stderr, "rhi_init failed\n");

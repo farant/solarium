@@ -15,7 +15,7 @@ static void clear_input(CameraInput *in) {
     in->forward = in->back = in->left = in->right = SOL_FALSE;
     in->up = in->down = SOL_FALSE;
     in->look_dx = in->look_dy = 0.0f;
-    in->toggle_mode = SOL_FALSE;
+    in->zoom = 0.0f;
 }
 
 int main(void) {
@@ -58,6 +58,22 @@ int main(void) {
     camera_update(&c, &in, 1.0f);
     printf("pitch after huge look_dy = %.2f deg\n", c.pitch * (180.0f / SOL_PI));
     if (c.pitch > sol_radians(89.0f) + 0.001f) { printf("FAIL: pitch not clamped\n"); return 1; }
+
+    /* ORBIT: entering keeps the eye in place; the eye sits at target-forward*dist */
+    camera_init(&c, vec3_make(0.0f, 0.0f, 5.0f), sol_radians(-90.0f), 0.0f);
+    camera_enter_orbit(&c, vec3_make(0.0f, 0.0f, 0.0f));
+    clear_input(&in);
+    camera_update(&c, &in, 1.0f);
+    printf("orbit eye=(%.3f, %.3f, %.3f) dist=%.3f\n", c.pos.x, c.pos.y, c.pos.z, c.distance);
+    if (!approx(c.distance, 5.0f)) { printf("FAIL: orbit distance wrong\n"); return 1; }
+    if (!approx(c.pos.z, 5.0f))   { printf("FAIL: entering orbit moved the eye\n"); return 1; }
+
+    /* scrolling in reduces the orbit radius */
+    clear_input(&in);
+    in.zoom = 2.0f;                           /* scroll up = zoom in */
+    camera_update(&c, &in, 1.0f);
+    printf("orbit dist after zoom = %.3f\n", c.distance);
+    if (!(c.distance < 5.0f)) { printf("FAIL: scroll did not dolly in\n"); return 1; }
 
     printf("camera_test: OK\n");
     return 0;
