@@ -125,6 +125,29 @@ mat4 scene_world_matrix(Scene *s, const SceneObject *o) {
     return world;
 }
 
+/* CPU ray-cast against object AABBs; returns the nearest hit's stable handle
+   (0 = none). Empties (no mesh) aren't pickable. Broad-phase only — AABB is
+   exact for boxes; a triangle test would need retained CPU geometry (future). */
+sol_u32 scene_pick(Scene *s, Ray ray, float *out_t) {
+    sol_u32 i, best = 0;
+    float   best_t = 1e30f;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        mat4  world;
+        Aabb  wbox;
+        float t;
+        if (o->mesh.index_count == 0) continue;            /* empties aren't pickable */
+        world = scene_world_matrix(s, o);
+        wbox  = aabb_transform(world, o->mesh.bounds);     /* local AABB -> world */
+        if (ray_vs_aabb(ray, wbox, &t) && t < best_t) {    /* keep the nearest */
+            best_t = t;
+            best   = o->handle;
+        }
+    }
+    if (out_t) *out_t = (best != 0) ? best_t : 0.0f;
+    return best;
+}
+
 void scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char *value) {
     SceneObject *o = scene_get(s, handle);
     sol_u32 i;

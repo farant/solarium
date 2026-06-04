@@ -40,6 +40,7 @@ void         scene_remove(Scene *s, sol_u32 handle);  /* no-op if absent; invali
 SceneObject *scene_get(Scene *s, sol_u32 handle);  /* NULL if none; valid until next scene_add */
 sol_u32      scene_handle_for_nid(Scene *s, const char *nid);  /* 0 if none — the nid->handle map */
 mat4         scene_world_matrix(Scene *s, const SceneObject *o);  /* parent-chain * local */
+sol_u32      scene_pick(Scene *s, Ray ray, float *out_t);  /* nearest AABB hit's handle; 0 = none */
 
 /* slot operations — handle-based (resolve internally, immune to stale pointers) */
 void        scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char *value);

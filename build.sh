@@ -71,7 +71,7 @@ if [ "$MODE" = "picktest" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        sol_math.c pick_test.c \
+        scene.c nid.c sol_math.c pick_test.c \
         -o pick_test
     echo "built ./pick_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0

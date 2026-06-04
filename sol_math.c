@@ -178,6 +178,44 @@ mat4 mat4_from_trs(vec3 pos, quat rot, vec3 scale) {
     return mat4_mul(t, mat4_mul(r, s));
 }
 
+/* Affine transform of a point (implicit w=1): includes the translation column.
+   No perspective divide — model/world matrices keep w=1. */
+vec3 mat4_mul_point(mat4 m, vec3 p) {
+    vec3 r;
+    r.x = m.m[0]*p.x + m.m[4]*p.y + m.m[8]*p.z  + m.m[12];
+    r.y = m.m[1]*p.x + m.m[5]*p.y + m.m[9]*p.z  + m.m[13];
+    r.z = m.m[2]*p.x + m.m[6]*p.y + m.m[10]*p.z + m.m[14];
+    return r;
+}
+
+/* Transform an AABB: take the AABB of its 8 transformed corners. For a rotated
+   box this is the (slightly loose) enclosing axis-aligned box — fine as a pick
+   broad phase, and exact for axis-aligned boxes. */
+Aabb aabb_transform(mat4 m, Aabb box) {
+    float cx[2], cy[2], cz[2];
+    Aabb  out;
+    int   i;
+
+    cx[0]=box.min.x; cx[1]=box.max.x;
+    cy[0]=box.min.y; cy[1]=box.max.y;
+    cz[0]=box.min.z; cz[1]=box.max.z;
+    out.min = vec3_make(0.0f, 0.0f, 0.0f);   /* set on i==0 below */
+    out.max = out.min;
+
+    for (i = 0; i < 8; i++) {
+        vec3 w = mat4_mul_point(m, vec3_make(cx[i & 1], cy[(i>>1) & 1], cz[(i>>2) & 1]));
+        if (i == 0) {
+            out.min = w;
+            out.max = w;
+        } else {
+            if (w.x < out.min.x) out.min.x = w.x;  if (w.x > out.max.x) out.max.x = w.x;
+            if (w.y < out.min.y) out.min.y = w.y;  if (w.y > out.max.y) out.max.y = w.y;
+            if (w.z < out.min.z) out.min.z = w.z;  if (w.z > out.max.z) out.max.z = w.z;
+        }
+    }
+    return out;
+}
+
 /* Ray vs AABB by the slab method: intersect the ray with each axis-aligned slab
    and keep the running overlap [tmin, tmax]. A hit needs tmin <= tmax with the
    box not entirely behind the origin. tmin starts at 0 so an origin inside the
