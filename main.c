@@ -6,6 +6,7 @@
 
 #include "rhi.h"                 /* the graphics seam — no GL above here */
 #include "mesh.h"
+#include "scene.h"
 #include "sol_math.h"
 
 /* --- shaders: GLSL source handed to the backend (still app-authored) --- */
@@ -57,21 +58,22 @@ static const char *FRAGMENT_SRC =
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
-    Mesh        box;
-    Mesh        floor;
+    Scene       scene;
+    sol_u32     box_handle;   /* so update() can animate the box object */
     float       angle;
 } AppState;
 
-/* One-time setup: build the geometry + pipeline. Runs once, before the loop. */
+/* One-time setup: build the pipeline + meshes, populate the scene. */
 static int init_scene(AppState *state) {
     MeshBuilder mb;
     RhiShader shader;
     RhiPipelineDesc desc;
+    Mesh box_mesh, floor_mesh;
 
     shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
     if (!shader.id) return 0;
 
-    /* one pipeline, shared by both meshes (same 8-float layout) */
+    /* one pipeline, shared by all objects (same 8-float layout) */
     desc.shader = shader;
     desc.attrs[0].location = 0; desc.attrs[0].format = RHI_FORMAT_FLOAT3; desc.attrs[0].offset = 0;
     desc.attrs[1].location = 1; desc.attrs[1].format = RHI_FORMAT_FLOAT3;
@@ -83,27 +85,43 @@ static int init_scene(AppState *state) {
     desc.depth_test = SOL_TRUE;
     state->pipeline = rhi_create_pipeline(&desc);
 
-    /* box */
+    /* meshes (shared assets the scene objects reference) */
     mb_init(&mb);
     make_box(&mb, 1.0f, 1.0f, 1.0f);
-    state->box = mesh_from_builder(&mb);
-    printf("box:   %u vertices, %u indices\n",
-           (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+    box_mesh = mesh_from_builder(&mb);
     mb_free(&mb);
 
-    /* floor */
     mb_init(&mb);
     make_grid(&mb, 6.0f, 6.0f, 8);
-    state->floor = mesh_from_builder(&mb);
-    printf("floor: %u vertices, %u indices\n",
-           (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+    floor_mesh = mesh_from_builder(&mb);
     mb_free(&mb);
 
+    /* scene: a floor at the origin and a box hovering above it */
+    scene_init(&state->scene);
+    scene_add(&state->scene, floor_mesh,
+              vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+    state->box_handle = scene_add(&state->scene, box_mesh,
+              vec3_make(0.0f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+
+    printf("scene: %u objects; scene_get(1) resolves: %s\n",
+           (unsigned)state->scene.count,
+           scene_get(&state->scene, 1) ? "yes" : "no");
     return 1;
 }
 
 static void update(AppState *state, double dt) {
-    state->angle += (float)dt * 0.8f;   /* radians/sec; tweak to taste */
+    SceneObject *box;
+    quat qy, qx;
+
+    state->angle += (float)dt * 0.8f;
+
+    /* animate the box THROUGH its object (the scene is the source of truth) */
+    box = scene_get(&state->scene, state->box_handle);
+    if (box) {
+        qy = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle);
+        qx = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), state->angle * 0.5f);
+        box->rot = quat_normalize(quat_mul(qy, qx));
+    }
 }
 
 static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
@@ -119,10 +137,10 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
 }
 
 static void render(const AppState *state) {
-    float aspect;
-    vec3  eye;
-    mat4  view, proj, box_model, floor_model;
-    quat  qy, qx, rot;
+    float   aspect;
+    vec3    eye;
+    mat4    view, proj;
+    sol_u32 i;
 
     rhi_begin_frame(state->fb_width, state->fb_height, 0.10f, 0.12f, 0.15f, 1.0f);
 
@@ -135,17 +153,12 @@ static void render(const AppState *state) {
                         vec3_make(0.0f, 1.0f, 0.0f));   /* up is +Y        */
     proj = mat4_perspective(sol_radians(45.0f), aspect, 0.1f, 100.0f);
 
-    /* box: tumbling, hovering above the floor — quaternion TRS */
-    qy  = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle);
-    qx  = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), state->angle * 0.5f);
-    rot = quat_normalize(quat_mul(qy, qx));
-    box_model = mat4_from_trs(vec3_make(0.0f, 1.0f, 0.0f), rot, vec3_make(1.0f, 1.0f, 1.0f));
-    draw_mesh(state, state->box, box_model, view, proj, eye);
-
-    /* floor: static grid at y = 0 (identity rotation) */
-    floor_model = mat4_from_trs(vec3_make(0.0f, 0.0f, 0.0f),
-                                quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-    draw_mesh(state, state->floor, floor_model, view, proj, eye);
+    /* iterate the scene — each object's model matrix comes from its TRS */
+    for (i = 0; i < state->scene.count; i++) {
+        const SceneObject *o = &state->scene.objects[i];
+        mat4 model = mat4_from_trs(o->pos, o->rot, o->scale);
+        draw_mesh(state, o->mesh, model, view, proj, eye);
+    }
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -225,6 +238,7 @@ int main(void) {
         rhi_present();
     }
 
+    scene_free(&state.scene);
     rhi_shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();

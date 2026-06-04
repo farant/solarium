@@ -13,7 +13,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c obj.c
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c obj.c scene.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     exit 0
 fi
@@ -25,7 +25,7 @@ if [ "$MODE" = "asan" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c obj.c \
+        main.c rhi_gl.c mesh.c obj.c scene.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit \
         -o solarium-asan
@@ -40,7 +40,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c obj.c \
+    main.c rhi_gl.c mesh.c obj.c scene.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit \
     -o solarium

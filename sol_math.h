@@ -3,18 +3,10 @@
 
 #include <math.h>
 
+#include "sol_types.h"   /* vec3, vec4, mat4, quat */
+
 #define SOL_PI 3.14159265358979323846f
 static float sol_radians(float deg) { return deg * (SOL_PI / 180.0f); }
-
-/* ---- types ---- */
-typedef struct { float x, y, z; }    vec3;
-typedef struct { float x, y, z, w; } vec4;
-
-/* mat4: 16 floats, COLUMN-MAJOR — element (row, col) lives at m[col*4 + row],
-   which is exactly how OpenGL wants it, so upload is transpose=GL_FALSE. */
-typedef struct { float m[16]; } mat4;
-
-typedef struct { float x, y, z, w; } quat;   /* unit quaternion = a rotation */
 
 /* ---- vec3 ---- */
 static vec3 vec3_make(float x, float y, float z) {
