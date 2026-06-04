@@ -463,8 +463,13 @@ byte-identical round-trip → 2.5e keystone proof: identity survives deletion an
 (compiled module), 3b Camera + first-person walk/fly (keyboard, platform-free via a
 CameraInput struct), 3c mouse-look (cursor capture, relative deltas), 3d orbit mode +
 FP/orbit toggle (scroll via window user-pointer callback). camera.c is headless-tested.
-See SCENE_FORMAT.md and git history. **Next: Item 4 — object picking** (which also gives
-orbit a real, click-selected target; it's hardcoded to (0,0.5,0) for now).
+**Item 4 complete** — object picking (CPU ray-cast, not glReadPixels): 4a Ray/Aabb +
+ray_vs_aabb (slab) in sol_math, Mesh local AABB at build time, object_world_matrix moved
+into scene.c as scene_world_matrix; 4b scene_pick (nearest AABB hit → stable handle); 4c
+camera_ray (analytic) + left-click wiring (FP center / orbit tap-vs-drag); 4d selection
+highlight (uHighlight uniform, new rhi_set_uniform_float) + orbit pivots on the clicked
+object (snapshot target). Pick math headless-tested (picktest). See SCENE_FORMAT.md and
+git history. **Next: Item 5 — textures + a readable surface (★ first dogfoodable palace).**
 
 Known boundaries deferred out of Item 2 (not bugs — scoped follow-ups):
 - `scene_load` restores `mesh_ref` (the name) but not GL geometry; wiring ref→generator
