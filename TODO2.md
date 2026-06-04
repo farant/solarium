@@ -459,7 +459,12 @@ complete. **Item 2 complete** — the persistent, identified object graph: 2.1 q
 2.2 Scene + stable IDs, 2.3 hierarchy, 2.4 overbuilt slots, and 2.5 STML serialization
 (2.5a stml.c DOM parser → 2.5b ULID nid generator → 2.5c scene_save → 2.5d scene_load +
 byte-identical round-trip → 2.5e keystone proof: identity survives deletion and reload).
-See SCENE_FORMAT.md and git history. **Next: Item 3.**
+**Item 3 complete** — movable camera + navigation: 3a promoted sol_math.h → sol_math.c
+(compiled module), 3b Camera + first-person walk/fly (keyboard, platform-free via a
+CameraInput struct), 3c mouse-look (cursor capture, relative deltas), 3d orbit mode +
+FP/orbit toggle (scroll via window user-pointer callback). camera.c is headless-tested.
+See SCENE_FORMAT.md and git history. **Next: Item 4 — object picking** (which also gives
+orbit a real, click-selected target; it's hardcoded to (0,0.5,0) for now).
 
 Known boundaries deferred out of Item 2 (not bugs — scoped follow-ups):
 - `scene_load` restores `mesh_ref` (the name) but not GL geometry; wiring ref→generator
