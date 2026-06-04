@@ -84,7 +84,7 @@ if [ "$MODE" = "asan" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c stml.c sol_math.c camera.c \
+        main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c stml.c sol_math.c camera.c image.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit \
         -o solarium-asan
@@ -99,7 +99,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c stml.c sol_math.c camera.c \
+    main.c rhi_gl.c mesh.c obj.c scene.c scene_io.c nid.c stml.c sol_math.c camera.c image.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit \
     -o solarium

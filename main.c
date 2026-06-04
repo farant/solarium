@@ -9,6 +9,7 @@
 #include "scene.h"
 #include "sol_math.h"
 #include "camera.h"
+#include "image.h"
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -70,7 +71,7 @@ static const char *FRAGMENT_SRC =
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
-    RhiTexture  checker_tex;    /* procedural test texture (item 5a) */
+    RhiTexture  albedo_tex;     /* decoded page image (item 5b); 0 if load failed */
     Scene       scene;
     sol_u32     box_handle;     /* so update() can animate the box object */
     sol_u32     anchor_handle;  /* the empty the box is parented to */
@@ -225,22 +226,19 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     st->f_was_down = f_now;
 }
 
-/* A procedural warm/cool checker, built on the CPU (above the seam) and uploaded
-   as an sRGB texture. Proves the create->bind->sample path + UV mapping. */
-static RhiTexture make_checker(void) {
-    enum { N = 64 };
-    unsigned char px[N * N * 4];
-    int x, y;
-    for (y = 0; y < N; y++) {
-        for (x = 0; x < N; x++) {
-            unsigned char *p = &px[(y * N + x) * 4];
-            int c = ((x >> 3) ^ (y >> 3)) & 1;        /* 8px cells */
-            if (c) { p[0] = 220; p[1] = 180; p[2] = 120; }   /* warm */
-            else   { p[0] = 60;  p[1] = 80;  p[2] = 110; }   /* cool */
-            p[3] = 255;
-        }
+/* Decode a page image with stb (via image.c) and upload it as an sRGB texture.
+   Returns a zero handle if the file is missing/undecodable. */
+static RhiTexture load_texture(const char *path) {
+    Image      img;
+    RhiTexture tex;
+    tex.id = 0;
+    if (image_load(path, &img)) {
+        tex = rhi_create_texture(img.pixels, img.w, img.h, RHI_TEX_SRGB8);
+        image_free(&img);
+    } else {
+        fprintf(stderr, "image load failed: %s\n", path);
     }
-    return rhi_create_texture(px, N, N, RHI_TEX_SRGB8);
+    return tex;
 }
 
 /* One-time setup: build the pipeline + meshes, populate the scene. */
@@ -267,7 +265,7 @@ static int init_scene(AppState *state) {
     desc.depth_test = SOL_TRUE;
     state->pipeline = rhi_create_pipeline(&desc);
 
-    state->checker_tex = make_checker();   /* item 5a: a texture to prove the sampler path */
+    state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* meshes (shared assets the scene objects reference) */
     mb_init(&mb);
@@ -381,8 +379,8 @@ static void render(AppState *state) {
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         model = scene_world_matrix(&state->scene, o);
         hl    = (o->handle == state->selected_handle) ? 1.0f : 0.0f;
-        if (o->handle == state->box_handle) {     /* item 5a: only the box is textured for now */
-            tex = state->checker_tex; use = 1.0f;
+        if (o->handle == state->box_handle && state->albedo_tex.id) {  /* textured box (5b) */
+            tex = state->albedo_tex; use = 1.0f;
         } else {
             tex.id = 0; use = 0.0f;
         }

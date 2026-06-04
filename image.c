@@ -1,0 +1,47 @@
+/* image.c — the one quarantined translation unit: it pulls in stb_image (the
+   sanctioned image-decode dependency, §1.3 amended) and wraps it behind the
+   clean image.h. EXCLUDED from build.sh c89check — stb is not held to our
+   strict-C89 standard, just as GLFW's headers aren't. */
+
+#include "image.h"
+
+/* stb_image config + warning quarantine (it is not our code to lint) */
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_THREAD_LOCALS
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+#pragma clang diagnostic ignored "-Wcast-qual"
+#pragma clang diagnostic ignored "-Wconversion"
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wdouble-promotion"
+#pragma clang diagnostic ignored "-Wunused-function"
+#pragma clang diagnostic ignored "-Wdisabled-macro-expansion"
+#endif
+
+#include "vendor/stb_image.h"
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
+sol_bool image_load(const char *path, Image *out) {
+    int            w, h, ch;
+    unsigned char *data;
+
+    stbi_set_flip_vertically_on_load(1);            /* GL wants row 0 at the bottom */
+    data = stbi_load(path, &w, &h, &ch, 4);         /* force 4 channels -> RGBA8 */
+    if (!data) return SOL_FALSE;
+
+    out->pixels = data;
+    out->w = w;
+    out->h = h;
+    return SOL_TRUE;
+}
+
+void image_free(Image *img) {
+    if (img->pixels) {
+        stbi_image_free(img->pixels);
+        img->pixels = (unsigned char *)0;
+    }
+}
