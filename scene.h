@@ -5,10 +5,11 @@
 #include "sol_types.h"
 #include "mesh.h"
 
+typedef struct { char *key; char *value; }     MetaEntry;
+typedef struct { char *type; sol_u32 target; } Relation;
+
 /* One object in the scene. Identity is the stable `handle`, NOT the array
-   index — that decoupling is the whole point (it survives deletion/reload).
-   The persistent ULID nid and the parent/metadata/relationship/content slots
-   arrive in later checkpoints; 2.2 keeps the core. */
+   index — that decoupling survives deletion/reload. */
 typedef struct {
     sol_u32 handle;    /* stable, monotonic, never reused; not the index */
     sol_u32 parent;    /* parent handle; 0 = root */
@@ -16,6 +17,11 @@ typedef struct {
     quat    rot;
     vec3    scale;
     Mesh    mesh;      /* shared reference; a zero Mesh (index_count 0) = empty */
+
+    /* overbuilt slots — mostly empty this phase, serialized in 2.5 */
+    MetaEntry *meta;       sol_u32 meta_count;  sol_u32 meta_cap;   /* string->string */
+    Relation  *relations;  sol_u32 rel_count;   sol_u32 rel_cap;    /* typed edges     */
+    char      *content;    /* attached doc/note path; NULL = none */
 } SceneObject;
 
 typedef struct {
@@ -29,5 +35,11 @@ void         scene_init(Scene *s);
 void         scene_free(Scene *s);
 sol_u32      scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 scale);
 SceneObject *scene_get(Scene *s, sol_u32 handle);  /* NULL if none; valid until next scene_add */
+
+/* slot operations — handle-based (resolve internally, immune to stale pointers) */
+void        scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char *value);
+const char *scene_meta_get(Scene *s, sol_u32 handle, const char *key);   /* NULL if none */
+void        scene_rel_add(Scene *s, sol_u32 handle, const char *type, sol_u32 target);
+void        scene_content_set(Scene *s, sol_u32 handle, const char *path);
 
 #endif /* SCENE_H */

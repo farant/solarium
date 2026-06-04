@@ -110,7 +110,17 @@ static int init_scene(AppState *state) {
     state->box_handle = scene_add(&state->scene, anchor, box_mesh,
               vec3_make(1.5f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
 
+    /* overbuilt slots demo (mostly empty this phase) */
+    scene_meta_set(&state->scene, state->box_handle, "title",  "Test Box");
+    scene_meta_set(&state->scene, state->box_handle, "author", "Solarium");
+    scene_rel_add(&state->scene, state->box_handle, "orbits", state->anchor_handle);
+    scene_content_set(&state->scene, state->box_handle, "notes/box.txt");
+
     printf("scene: %u objects (1 empty anchor)\n", (unsigned)state->scene.count);
+    printf("box meta: title=\"%s\", author=\"%s\"; %u relations\n",
+           scene_meta_get(&state->scene, state->box_handle, "title"),
+           scene_meta_get(&state->scene, state->box_handle, "author"),
+           (unsigned)scene_get(&state->scene, state->box_handle)->rel_count);
     return 1;
 }
 
