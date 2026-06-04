@@ -46,5 +46,6 @@ Ray  camera_ray(const Camera *c, float ndc_x, float ndc_y, float aspect);  /* pi
 /* mode transitions (kept continuous so the view never jumps) */
 void camera_enter_orbit(Camera *c, vec3 target);   /* aim at target, remember radius */
 void camera_enter_fp(Camera *c);                    /* back to first-person walk */
+void camera_focus(Camera *c, vec3 target, vec3 normal, float half_height);  /* framed head-on view */
 
 #endif /* CAMERA_H */

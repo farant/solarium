@@ -94,6 +94,23 @@ void camera_enter_fp(Camera *c) {
     c->mode = CAMERA_WALK;   /* keep pos/yaw/pitch -> looks the same, just controls change */
 }
 
+/* Frame a surface head-on: sit on its normal at a distance that fills the view,
+   looking back at its center. Leaves the camera in first-person walk so you can
+   step away afterward. */
+void camera_focus(Camera *c, vec3 target, vec3 normal, float half_height) {
+    float dist = (half_height / tanf(c->fov * 0.5f)) * 1.3f;   /* frame + margin */
+    vec3  eye  = vec3_add(target, vec3_scale(vec3_normalize(normal), dist));
+    vec3  d    = vec3_sub(target, eye);
+    float len  = sqrtf(vec3_dot(d, d));
+    c->mode = CAMERA_WALK;
+    c->pos  = eye;
+    if (len > 0.0001f) {
+        vec3 dir = vec3_scale(d, 1.0f / len);
+        c->pitch = asinf(dir.y);
+        c->yaw   = atan2f(dir.z, dir.x);
+    }
+}
+
 mat4 camera_view(const Camera *c) {
     vec3 target = vec3_add(c->pos, camera_forward(c));
     return mat4_look_at(c->pos, target, WORLD_UP);

@@ -87,6 +87,20 @@ int main(void) {
         }
     }
 
+    /* camera_focus: framing a +Z-facing surface puts the eye on the +Z axis,
+       looking back at the target (forward ~ -Z) */
+    camera_focus(&c, vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 0.0f, 1.0f), 0.6f);
+    {
+        vec3 f = camera_forward(&c);
+        printf("focus eye=(%.3f, %.3f, %.3f) fwd=(%.3f, %.3f, %.3f)\n",
+               c.pos.x, c.pos.y, c.pos.z, f.x, f.y, f.z);
+        if (!(c.pos.z > 0.0f) || !approx(c.pos.x, 0.0f) || !approx(c.pos.y, 0.0f)) {
+            printf("FAIL: focus eye should sit on +Z axis\n");
+            return 1;
+        }
+        if (!approx(f.z, -1.0f)) { printf("FAIL: focus should look back along -Z\n"); return 1; }
+    }
+
     printf("camera_test: OK\n");
     return 0;
 }

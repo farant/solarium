@@ -75,6 +75,7 @@ typedef struct {
     Scene       scene;
     sol_u32     box_handle;     /* so update() can animate the box object */
     sol_u32     anchor_handle;  /* the empty the box is parented to */
+    sol_u32     page_handle;    /* the readable parchment surface (item 5d) */
     float       angle;
     Camera      camera;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
@@ -117,8 +118,14 @@ static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
         SceneObject *o = scene_get(&st->scene, hit);
         printf("picked: handle %u, nid %s, t=%.2f\n",
                (unsigned)hit, (o && o->nid) ? o->nid : "?", t);
-        if (st->camera.mode == CAMERA_ORBIT)            /* "click a shelf to zoom" */
+        if (hit == st->page_handle) {                   /* click the page -> read it */
+            camera_focus(&st->camera, object_world_pos(&st->scene, st->page_handle),
+                         vec3_make(0.0f, 0.0f, 1.0f), 0.6f);   /* page faces +Z, half-height 0.6 */
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);  /* first-person look */
+            st->mouse_skip = 2;                         /* no jump across the cursor-mode change */
+        } else if (st->camera.mode == CAMERA_ORBIT) {   /* "click a shelf to zoom" */
             camera_enter_orbit(&st->camera, object_world_pos(&st->scene, hit));
+        }
     } else {
         printf("picked: nothing\n");
     }
@@ -309,6 +316,7 @@ static int init_scene(AppState *state) {
     page = scene_add(&state->scene, 0, page_mesh,
               vec3_make(-2.0f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     scene_texture_set(&state->scene, page, state->albedo_tex);
+    state->page_handle = page;
 
     /* geometry by reference: the asset name regenerates the mesh on load */
     scene_mesh_ref_set(&state->scene, floor, "grid");
