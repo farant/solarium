@@ -95,19 +95,28 @@ planned future phase, and the seam is what makes it a new backend rather than a 
 
 ### 1.3 Zero dependencies
 
-No package manager, no third-party libraries by default. **GLFW is the one sanctioned
-external dependency** (the platform layer: window, input, timing) and stays confined to the
-platform/`main`-level code, never leaking into the RHI or above.
+No package manager, no third-party libraries by default in the **engine/runtime**. **GLFW is
+the sanctioned platform dependency** (window, input, timing), confined to platform/`main`-level
+code, never leaking into the RHI or above.
 
-Two decisions this phase forces, ruled here (see §4 — these are the project owner's calls,
-encoded as the established default; flip them in this document if desired):
-- **Image decoding (item 5):** hand-roll a minimal **TGA** reader. Do *not* vendor
-  `stb_image`. TGA (uncompressed + RLE, 24/32-bit) is ~50 lines and sufficient.
+Two decisions this phase forces, ruled here (see §4 — these are the project owner's calls):
+- **Image decoding (item 5): AMENDED — vendor `stb_image.h`.** Originally this was "hand-roll a
+  minimal TGA reader, no `stb_image`." Flipped by the owner (2026-06): we realistically need
+  **PNG** (page scans, diagrams), and hand-rolling PNG means implementing DEFLATE/zlib + CRC —
+  a large detour off the palace goal, unlike TGA. `stb_image` (public-domain single-header,
+  vendored at `vendor/stb_image.h`) decodes PNG/JPEG/TGA/BMP behind one call. The hand-rolled
+  TGA reader is **dropped**. Scope of the exception: image **decode only**, a content-import
+  concern — *not* a general loosening. It's quarantined like GLFW (its implementation TU built
+  with relaxed warnings, excluded from `c89check`), stays **above the seam** (CPU → RGBA buffer
+  handed to `rhi_create_texture`), and the **sRGB-vs-linear** handling remains ours (stb returns
+  raw bytes; we mark the GL texture format).
 - **glTF loading (item 6):** hand-roll a minimal **`.glb`** parser for the static subset.
-  Do *not* use `cgltf` or `assimp`.
+  Do *not* use `cgltf` or `assimp`. (Unchanged — a `.glb` for our static subset is tractable to
+  hand-roll, and avoids a much heavier dependency.)
 
-This is consistent with the substrate's character (the engine sits on a zero-dependency
-C89 base). Everything is hand-rolled and owned.
+The principle, restated: **zero deps in the engine/runtime; a vendored public-domain header is
+permitted for a solved content-import problem (image decode).** The renderer, seam, scene/
+identity model, math, and camera remain hand-rolled and owned.
 
 ### 1.4 What this software is: a persistent knowledge environment, not a game
 
@@ -337,8 +346,8 @@ starts steering the build. Hit this milestone, then stop and use it before conti
 
 **Spec.**
 - Flesh out the stubbed `RhiTexture`: create from pixel data, bind to a sampler slot, sample in
-  the fragment shader. Image decode: a **hand-rolled minimal TGA reader** (uncompressed + RLE,
-  24/32-bit) per §1.3 — no `stb_image`.
+  the fragment shader. Image decode: **`stb_image`** (vendored `vendor/stb_image.h`) → an RGBA
+  buffer handed to `rhi_create_texture` (§1.3, amended — supports PNG/JPEG/TGA/BMP).
 - **CRITICAL — color space is part of the texture's identity, decided now:** the texture/format
   enum must distinguish **sRGB** textures (albedo, page images → decoded/sampled sRGB→linear)
   from **linear** textures (normal/roughness/data → sampled raw). Encode this at creation now so
@@ -440,7 +449,7 @@ These are load-bearing and yours, not the agent's, to set. I have encoded the es
 default in the spec above; change them in this document before handing it off if you want
 otherwise:
 
-1. **Image decoding:** hand-rolled TGA (not `stb_image`). [§1.3, item 5]
+1. **Image decoding:** `stb_image` (vendored), decode-only exception. [§1.3 AMENDED, item 5]
 2. **glTF loading:** hand-rolled `.glb` (not `cgltf`/`assimp`). [§1.3, item 6]
 3. **Object identity:** **DECIDED** — persistent ID is a **ULID-style `nid`** (timestamp+random
    base32: globally unique, mergeable, time-sortable, weak-RNG-tolerant); runtime ID is a
