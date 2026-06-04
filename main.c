@@ -10,7 +10,8 @@
 #include "sol_math.h"
 #include "camera.h"
 
-#define LOOK_SPEED 1.5f          /* radians/sec for keyboard look */
+#define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
+#define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
 
 /* --- shaders: GLSL source handed to the backend (still app-authored) --- */
 static const char *VERTEX_SRC =
@@ -67,6 +68,11 @@ typedef struct {
     float       angle;
     Camera      camera;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
+    /* mouse-look / cursor state (item 3c) */
+    double      mouse_last_x, mouse_last_y;
+    sol_bool    mouse_have_last;   /* first-frame guard */
+    sol_bool    cursor_captured;
+    sol_bool    tab_was_down;
 } AppState;
 
 /* Poll GLFW into a CameraInput (the platform layer; camera.c stays GLFW-free).
@@ -74,8 +80,10 @@ typedef struct {
    triggered so it fires once per press. */
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool f_now;
+    sol_bool f_now, tab_now;
+    double   mx, my;
 
+    /* movement (held) */
     in->forward = glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS;
     in->back    = glfwGetKey(w, GLFW_KEY_S) == GLFW_PRESS;
     in->left    = glfwGetKey(w, GLFW_KEY_A) == GLFW_PRESS;
@@ -83,6 +91,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     in->up      = glfwGetKey(w, GLFW_KEY_SPACE)        == GLFW_PRESS;
     in->down    = glfwGetKey(w, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS;
 
+    /* keyboard look (held -> a rate -> dt-scaled) */
     in->look_dx = 0.0f;
     in->look_dy = 0.0f;
     if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
@@ -90,6 +99,31 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     if (glfwGetKey(w, GLFW_KEY_UP)    == GLFW_PRESS) in->look_dy += look;
     if (glfwGetKey(w, GLFW_KEY_DOWN)  == GLFW_PRESS) in->look_dy -= look;
 
+    /* Tab toggles cursor capture (edge-triggered) */
+    tab_now = glfwGetKey(w, GLFW_KEY_TAB) == GLFW_PRESS;
+    if (tab_now && !st->tab_was_down) {
+        st->cursor_captured = !st->cursor_captured;
+        glfwSetInputMode(w, GLFW_CURSOR,
+                         st->cursor_captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        st->mouse_have_last = SOL_FALSE;            /* reseed -> no jump on re-capture */
+    }
+    st->tab_was_down = tab_now;
+
+    /* mouse look (a displacement -> sensitivity-scaled, NOT dt-scaled) */
+    glfwGetCursorPos(w, &mx, &my);
+    if (st->cursor_captured) {
+        if (st->mouse_have_last) {                  /* skip the garbage first delta */
+            float dx = (float)(mx - st->mouse_last_x);
+            float dy = (float)(my - st->mouse_last_y);
+            in->look_dx += dx * MOUSE_SENSITIVITY;
+            in->look_dy -= dy * MOUSE_SENSITIVITY;  /* screen-y grows down -> negate */
+        }
+        st->mouse_last_x    = mx;
+        st->mouse_last_y    = my;
+        st->mouse_have_last = SOL_TRUE;
+    }
+
+    /* F toggles walk/fly (edge-triggered) */
     f_now = glfwGetKey(w, GLFW_KEY_F) == GLFW_PRESS;
     in->toggle_mode = (f_now && !st->f_was_down);   /* fire once per press */
     st->f_was_down  = f_now;
@@ -269,6 +303,8 @@ int main(void) {
     }
 
     glfwSetKeyCallback(window, on_key);   /* platform: input */
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);  /* capture for mouse-look */
+    state.cursor_captured = SOL_TRUE;
 
     if (!rhi_init(window)) {              /* backend: context + GL info */
         fprintf(stderr, "rhi_init failed\n");
