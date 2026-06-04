@@ -477,8 +477,15 @@ ray_vs_aabb (slab) in sol_math, Mesh local AABB at build time, object_world_matr
 into scene.c as scene_world_matrix; 4b scene_pick (nearest AABB hit → stable handle); 4c
 camera_ray (analytic) + left-click wiring (FP center / orbit tap-vs-drag); 4d selection
 highlight (uHighlight uniform, new rhi_set_uniform_float) + orbit pivots on the clicked
-object (snapshot target). Pick math headless-tested (picktest). See SCENE_FORMAT.md and
-git history. **Next: Item 5 — textures + a readable surface (★ first dogfoodable palace).**
+object (snapshot target). Pick math headless-tested (picktest).
+**Item 5 complete (★ first dogfoodable palace)** — textures + a readable surface: 5a fleshed
+out RhiTexture (create/bind/sample, handle table) with a color-space format enum
+(RHI_TEX_SRGB8 vs RHI_TEX_RGBA8) + rhi_set_uniform_int, shader samples an albedo; 5b stb_image
+decode (image.c quarantined TU, vendor/stb_image.h, §1.3-amended) → sRGB texture; 5c per-object
+material (SceneObject.texture + scene_texture_set) + the parchment reading quad (purpose-built
+upright vertical quad); 5d click the page → camera_focus frames a head-on reading view. See
+SCENE_FORMAT.md and git history. **Next: Item 6 — load a real model (.glb / glTF static
+subset, hand-rolled per §1.3).**
 
 Known boundaries deferred out of Item 2 (not bugs — scoped follow-ups):
 - `scene_load` restores `mesh_ref` (the name) but not GL geometry; wiring ref→generator
