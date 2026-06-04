@@ -246,9 +246,9 @@ static int init_scene(AppState *state) {
     MeshBuilder mb;
     RhiShader shader;
     RhiPipelineDesc desc;
-    Mesh box_mesh, floor_mesh;
+    Mesh box_mesh, floor_mesh, page_mesh;
     Mesh empty = {0};            /* zero mesh -> an empty (transform-only) */
-    sol_u32 anchor, floor;
+    sol_u32 anchor, floor, page;
 
     shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
     if (!shader.id) return 0;
@@ -278,6 +278,22 @@ static int init_scene(AppState *state) {
     floor_mesh = mesh_from_builder(&mb);
     mb_free(&mb);
 
+    /* a page-aspect quad standing in the XY plane, facing +Z, with upright UVs
+       (uv (0,0) at bottom-left). Built directly rather than make_plane+rotation,
+       which would invert V relative to world-up. ~3:4 to match paper-picture.png */
+    mb_init(&mb);
+    {
+        sol_f32 hw = 0.45f, hh = 0.60f;   /* half of 0.9 x 1.2 */
+        sol_u32 a = mb_push_vertex(&mb, -hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f);  /* BL */
+        sol_u32 b = mb_push_vertex(&mb,  hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f);  /* BR */
+        sol_u32 c = mb_push_vertex(&mb,  hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f);  /* TR */
+        sol_u32 d = mb_push_vertex(&mb, -hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f);  /* TL */
+        mb_push_triangle(&mb, a, b, c);
+        mb_push_triangle(&mb, a, c, d);
+    }
+    page_mesh = mesh_from_builder(&mb);
+    mb_free(&mb);
+
     /* scene: floor (root), an empty anchor (root), and the box as the
        anchor's child — so spinning the anchor makes the box orbit it */
     scene_init(&state->scene);
@@ -289,9 +305,15 @@ static int init_scene(AppState *state) {
     state->box_handle = scene_add(&state->scene, anchor, box_mesh,
               vec3_make(1.5f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
 
+    /* the parchment reading surface: the page quad, already upright and facing +Z */
+    page = scene_add(&state->scene, 0, page_mesh,
+              vec3_make(-2.0f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+    scene_texture_set(&state->scene, page, state->albedo_tex);
+
     /* geometry by reference: the asset name regenerates the mesh on load */
     scene_mesh_ref_set(&state->scene, floor, "grid");
     scene_mesh_ref_set(&state->scene, state->box_handle, "box");
+    scene_mesh_ref_set(&state->scene, page, "page");
 
     /* overbuilt slots demo (mostly empty this phase) */
     scene_meta_set(&state->scene, state->box_handle, "title",  "Test Box");
@@ -379,11 +401,8 @@ static void render(AppState *state) {
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         model = scene_world_matrix(&state->scene, o);
         hl    = (o->handle == state->selected_handle) ? 1.0f : 0.0f;
-        if (o->handle == state->box_handle && state->albedo_tex.id) {  /* textured box (5b) */
-            tex = state->albedo_tex; use = 1.0f;
-        } else {
-            tex.id = 0; use = 0.0f;
-        }
+        tex = o->texture;                      /* per-object material (item 5c) */
+        use = tex.id ? 1.0f : 0.0f;
         draw_mesh(state, o->mesh, model, view, proj, eye, hl, tex, use);
     }
 }

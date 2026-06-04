@@ -60,6 +60,7 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     o->scale = scale;
     o->mesh = mesh;
     o->mesh_ref = NULL;
+    o->texture.id = 0;
     o->meta = NULL; o->meta_count = 0; o->meta_cap = 0;
     o->relations = NULL; o->rel_count = 0; o->rel_cap = 0;
     o->content = NULL;
@@ -202,4 +203,9 @@ void scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name) {
     if (!o) return;
     free(o->mesh_ref);
     o->mesh_ref = sol_strdup(name);
+}
+
+void scene_texture_set(Scene *s, sol_u32 handle, RhiTexture tex) {
+    SceneObject *o = scene_get(s, handle);
+    if (o) o->texture = tex;   /* shared handle; the app owns/destroys it, not the scene */
 }
