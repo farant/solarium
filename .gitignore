@@ -1,6 +1,7 @@
 # Build artifacts
 /solarium
 /solarium-asan
+/stml_test
 *.o
 *.dSYM/
 
