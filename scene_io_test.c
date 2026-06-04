@@ -50,6 +50,7 @@ int main(void) {
     Mesh    empty;
     sol_u32 floor_h, anchor_h, box_h;
     const char *path = "scene_io_test.stml";
+    char    a_floor_nid[NID_LEN + 1], a_box_nid[NID_LEN + 1], a_anchor_nid[NID_LEN + 1];
 
     empty.vbuffer.id = 0;     /* a zero Mesh -> transform-only; no GL involved */
     empty.ibuffer.id = 0;
@@ -68,6 +69,12 @@ int main(void) {
     scene_meta_set(&scene, box_h, "author", "Solarium");
     scene_rel_add(&scene, box_h, "orbits", anchor_h);
     scene_content_set(&scene, box_h, "notes/box.txt");
+
+    /* remember the minted ids up front; both the round-trip and keystone
+       sections find the same objects by these later */
+    strcpy(a_floor_nid,  scene_get(&scene, floor_h)->nid);
+    strcpy(a_box_nid,    scene_get(&scene, box_h)->nid);
+    strcpy(a_anchor_nid, scene_get(&scene, anchor_h)->nid);
 
     if (!scene_save(&scene, path)) {
         printf("FAIL: scene_save could not write %s\n", path);
@@ -97,12 +104,6 @@ int main(void) {
     {
         const char *path2 = "scene_io_test_2.stml";
         Scene       b;
-        char        a_box_nid[NID_LEN + 1];
-        char        a_anchor_nid[NID_LEN + 1];
-
-        /* remember A's minted ids so we can find the same objects in B */
-        strcpy(a_box_nid,    scene_get(&scene, box_h)->nid);
-        strcpy(a_anchor_nid, scene_get(&scene, anchor_h)->nid);
 
         if (!scene_load(&b, path)) {
             printf("FAIL: scene_load(%s)\n", path);
@@ -135,6 +136,74 @@ int main(void) {
             printf("loaded box keeps its nid and its parent resolves to the anchor: ok\n");
         }
         scene_free(&b);
+    }
+
+    /* keystone: deleting an unrelated object reshuffles array positions, but the
+       survivors keep their identity and their references still resolve. */
+    printf("--- keystone: delete reshuffles position, identity persists ---\n");
+    {
+        SceneObject *box0   = scene_get(&scene, box_h);
+        long         before = box0 - scene.objects;     /* box's current array index */
+        SceneObject *box, *anchor;
+        long         after;
+
+        scene_remove(&scene, floor_h);                  /* delete an unreferenced root */
+
+        if (scene.count != 2 || scene_get(&scene, floor_h) != (SceneObject *)0) {
+            printf("FAIL: floor not cleanly removed (count=%u)\n", (unsigned)scene.count);
+            scene_free(&scene);
+            return 1;
+        }
+
+        box    = scene_get(&scene, box_h);              /* still found by original handle */
+        anchor = scene_get(&scene, anchor_h);
+        if (!box || !anchor) {
+            printf("FAIL: a survivor lost its handle\n");
+            scene_free(&scene);
+            return 1;
+        }
+        after = box - scene.objects;
+
+        if (strcmp(box->nid, a_box_nid) != 0 || strcmp(anchor->nid, a_anchor_nid) != 0) {
+            printf("FAIL: a survivor's nid changed\n");
+            scene_free(&scene);
+            return 1;
+        }
+        if (scene_get(&scene, box->parent) != anchor) {
+            printf("FAIL: box's parent reference broke\n");
+            scene_free(&scene);
+            return 1;
+        }
+        printf("deleted floor: box moved index %ld -> %ld, kept nid %s\n",
+               before, after, box->nid);
+        printf("box's parent still resolves to the anchor: ok\n");
+
+        /* identity survives persistence after the delete, too */
+        {
+            const char  *path3 = "scene_io_test_3.stml";
+            Scene        d;
+            sol_u32      dbox_h;
+            SceneObject *dbox, *dpar;
+
+            if (!scene_save(&scene, path3) || !scene_load(&d, path3)) {
+                printf("FAIL: save/reload after delete\n");
+                scene_free(&scene);
+                return 1;
+            }
+            dbox_h = scene_handle_for_nid(&d, a_box_nid);
+            dbox   = scene_get(&d, dbox_h);
+            dpar   = dbox ? scene_get(&d, dbox->parent) : (SceneObject *)0;
+            if (d.count != 2 ||
+                scene_handle_for_nid(&d, a_floor_nid) != 0 ||
+                !dbox || !dpar || strcmp(dpar->nid, a_anchor_nid) != 0) {
+                printf("FAIL: survivors/links not preserved across delete+reload\n");
+                scene_free(&d);
+                scene_free(&scene);
+                return 1;
+            }
+            printf("after delete, save+reload keeps survivors and drops the floor: ok\n");
+            scene_free(&d);
+        }
     }
 
     scene_free(&scene);

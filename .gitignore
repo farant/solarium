@@ -7,6 +7,7 @@
 /scene.stml
 /scene_io_test.stml
 /scene_io_test_2.stml
+/scene_io_test_3.stml
 *.o
 *.dSYM/
 

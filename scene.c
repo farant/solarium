@@ -65,6 +65,26 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     return o->handle;
 }
 
+/* Remove by handle, preserving array order (shift the tail down). Identity is
+   decoupled from index, so survivors keep their handles/nids — their slots just
+   move. References TO the removed object are left dangling on purpose: scene_get
+   returns NULL for them, which the world-matrix walk and the serializer already
+   tolerate (a cascade/reparent policy is a later editor concern). */
+void scene_remove(Scene *s, sol_u32 handle) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        if (s->objects[i].handle == handle) {
+            scene_object_free(&s->objects[i]);
+            if (i + 1 < s->count) {
+                memmove(&s->objects[i], &s->objects[i + 1],
+                        (size_t)(s->count - i - 1) * sizeof(SceneObject));
+            }
+            s->count--;
+            return;
+        }
+    }
+}
+
 /* Linear scan: identity is decoupled from position, so we search by handle
    rather than indexing. Returned pointer is valid until the next scene_add
    (which may realloc the object array). */

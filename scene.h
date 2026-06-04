@@ -36,6 +36,7 @@ typedef struct {
 void         scene_init(Scene *s);
 void         scene_free(Scene *s);
 sol_u32      scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 scale);
+void         scene_remove(Scene *s, sol_u32 handle);  /* no-op if absent; invalidates SceneObject* */
 SceneObject *scene_get(Scene *s, sol_u32 handle);  /* NULL if none; valid until next scene_add */
 sol_u32      scene_handle_for_nid(Scene *s, const char *nid);  /* 0 if none — the nid->handle map */
 
