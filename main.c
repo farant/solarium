@@ -79,6 +79,9 @@ typedef struct {
     sol_u32     page_handle;    /* the readable parchment surface (item 5d) */
     float       angle;
     Camera      camera;
+    /* offscreen HDR pass (item 7) */
+    RhiRenderTarget hdr_rt;          /* scene renders here, then to the window */
+    int             rt_width, rt_height;  /* size hdr_rt was built at; recreate on resize */
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -438,13 +441,31 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     rhi_draw_indexed(0, mesh.index_count);
 }
 
+/* Ensure the HDR target matches the window's framebuffer size, recreating it on
+   resize (the one path that both first-creates and resizes it). A minimized
+   window reports 0 — clamp so we never make a zero-size framebuffer. */
+static void ensure_render_target(AppState *state, int w, int h) {
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (state->hdr_rt.id != 0 && state->rt_width == w && state->rt_height == h)
+        return;                                   /* already the right size */
+    if (state->hdr_rt.id != 0)
+        rhi_destroy_render_target(state->hdr_rt);
+    state->hdr_rt    = rhi_create_render_target(w, h, RHI_TEX_RGBA16F);
+    state->rt_width  = w;
+    state->rt_height = h;
+}
+
 static void render(AppState *state) {
     float   aspect;
     vec3    eye;
     mat4    view, proj;
     sol_u32 i;
 
-    rhi_begin_frame(state->fb_width, state->fb_height, 0.10f, 0.12f, 0.15f, 1.0f);
+    ensure_render_target(state, state->fb_width, state->fb_height);
+
+    /* ---- pass 1: render the scene into the offscreen HDR target ---- */
+    rhi_begin_pass(state->hdr_rt, 0.10f, 0.12f, 0.15f, 1.0f);
 
     aspect = (state->fb_height > 0)
            ? (float)state->fb_width / (float)state->fb_height
@@ -466,6 +487,12 @@ static void render(AppState *state) {
         use = tex.id ? 1.0f : 0.0f;
         draw_mesh(state, o->mesh, model, view, proj, eye, hl, tex, use);
     }
+
+    rhi_end_pass();
+
+    /* ---- 7a: raw-copy the HDR color to the window. No shader, no tonemap yet;
+       the fullscreen tonemap pass in 7b replaces this blit. ---- */
+    rhi_blit_to_screen(state->hdr_rt);
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -553,6 +580,7 @@ int main(void) {
     }
 
     scene_free(&state.scene);
+    if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
     rhi_shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();

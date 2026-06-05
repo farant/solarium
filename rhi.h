@@ -13,15 +13,19 @@ typedef struct { sol_u32 id; } RhiBuffer;
 typedef struct { sol_u32 id; } RhiShader;
 typedef struct { sol_u32 id; } RhiPipeline;
 typedef struct { sol_u32 id; } RhiTexture;
+typedef struct { sol_u32 id; } RhiRenderTarget;
 
 /* ---- enums ---- */
 typedef enum { RHI_BUFFER_VERTEX, RHI_BUFFER_INDEX } RhiBufferType;
 typedef enum { RHI_FORMAT_FLOAT2, RHI_FORMAT_FLOAT3 } RhiVertexFormat;
 
-/* Color space is part of a texture's identity (decided at creation, per §1.5):
-   SRGB8 for color/albedo/page images (GPU converts sRGB->linear on sample);
-   RGBA8 for linear data maps (normal/roughness/masks; sampled raw). */
-typedef enum { RHI_TEX_SRGB8, RHI_TEX_RGBA8 } RhiTextureFormat;
+/* Color space / precision is part of a texture's identity (decided at creation,
+   per §1.5):
+   SRGB8   — color/albedo/page images (GPU converts sRGB->linear on sample);
+   RGBA8   — linear data maps (normal/roughness/masks; sampled raw);
+   RGBA16F — float HDR render-target color: values may exceed 1.0 without
+             clipping (the point of the offscreen pass; item 7). */
+typedef enum { RHI_TEX_SRGB8, RHI_TEX_RGBA8, RHI_TEX_RGBA16F } RhiTextureFormat;
 
 /* ---- vertex layout + pipeline description ---- */
 typedef struct {
@@ -51,9 +55,19 @@ RhiShader   rhi_create_shader(const char *vertex_src, const char *fragment_src);
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc);
 RhiTexture  rhi_create_texture(const void *pixels, int width, int height, RhiTextureFormat fmt);  /* RGBA8 source */
 
+/* An offscreen render target: a framebuffer wiring a samplable color texture
+   (color_format, typically RHI_TEX_RGBA16F) + a write-only depth renderbuffer.
+   Created at a fixed size; recreate on window resize. All framebuffer GL lives
+   in the backend (§1.2). Returns id 0 on failure. */
+RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat color_format);
+
 /* ---- per frame ---- */
-void rhi_begin_frame(int fb_width, int fb_height,
-                     float r, float g, float b, float a);  /* viewport + clear color & depth */
+/* Begin a render pass targeting `target`: bind its framebuffer, set the viewport
+   to its size, and clear color+depth. A zero target ({0}) means the default
+   framebuffer (the window) — the backend queries the window's size itself.
+   rhi_end_pass restores the default framebuffer. */
+void rhi_begin_pass(RhiRenderTarget target, float r, float g, float b, float a);
+void rhi_end_pass(void);
 void rhi_set_pipeline(RhiPipeline pipeline);               /* binds shader + layout + state */
 void rhi_bind_vertex_buffer(RhiBuffer buffer);
 void rhi_bind_index_buffer(RhiBuffer buffer);
@@ -64,6 +78,16 @@ void rhi_set_uniform_float(const char *name, float v);
 void rhi_set_uniform_int(const char *name, int v);               /* e.g. a sampler's texture unit */
 void rhi_draw(int first_vertex, int vertex_count);
 void rhi_draw_indexed(int first_index, int index_count);
+
+/* The render target's color attachment as a bindable texture, so a later pass
+   can sample what was just rendered (used by the tonemap pass in 7b). */
+RhiTexture rhi_render_target_texture(RhiRenderTarget rt);
+
+/* Copy a render target's color straight to the window — a raw GL blit, no shader.
+   Temporary scaffolding for 7a (proves the FBO round-trip); the tonemap pass in
+   7b supersedes it. */
+void rhi_blit_to_screen(RhiRenderTarget rt);
+
 void rhi_present(void);
 
 /* ---- resource teardown ---- */
@@ -71,5 +95,6 @@ void rhi_destroy_buffer(RhiBuffer buffer);
 void rhi_destroy_shader(RhiShader shader);
 void rhi_destroy_pipeline(RhiPipeline pipeline);
 void rhi_destroy_texture(RhiTexture texture);
+void rhi_destroy_render_target(RhiRenderTarget rt);
 
 #endif /* RHI_H */

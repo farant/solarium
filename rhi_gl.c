@@ -13,10 +13,11 @@
 #include <OpenGL/gl3.h>
 
 /* ---- internal resource storage (handle id -> GL object) ---- */
-#define MAX_BUFFERS   256
-#define MAX_SHADERS    64
-#define MAX_PIPELINES  64
-#define MAX_TEXTURES   64
+#define MAX_BUFFERS        256
+#define MAX_SHADERS         64
+#define MAX_PIPELINES       64
+#define MAX_TEXTURES        64
+#define MAX_RENDER_TARGETS  16
 
 typedef struct {
     GLuint        program;
@@ -27,6 +28,13 @@ typedef struct {
     sol_bool      depth_test;
 } GlPipeline;
 
+typedef struct {
+    GLuint     fbo;
+    GLuint     depth_rbo;   /* write-only depth; never sampled this item */
+    RhiTexture color;       /* handle into g_textures, so it binds like any texture */
+    int        width, height;
+} GlRenderTarget;
+
 static GLuint     g_buffers[MAX_BUFFERS];
 static sol_u32    g_buffer_count;
 static GLuint     g_shaders[MAX_SHADERS];
@@ -35,6 +43,8 @@ static GlPipeline g_pipelines[MAX_PIPELINES];
 static sol_u32    g_pipeline_count;
 static GLuint     g_textures[MAX_TEXTURES];
 static sol_u32    g_texture_count;
+static GlRenderTarget g_render_targets[MAX_RENDER_TARGETS];
+static sol_u32        g_render_target_count;
 
 static struct GLFWwindow *g_window;
 static const GlPipeline  *g_current;   /* pipeline bound by rhi_set_pipeline */
@@ -48,6 +58,8 @@ static sol_u32 g_pipeline_free[MAX_PIPELINES];
 static sol_u32 g_pipeline_free_count;
 static sol_u32 g_texture_free[MAX_TEXTURES];
 static sol_u32 g_texture_free_count;
+static sol_u32 g_render_target_free[MAX_RENDER_TARGETS];
+static sol_u32 g_render_target_free_count;
 
 /* Reuse a freed slot if one exists, else extend the table. */
 static sol_u32 slot_alloc(sol_u32 *count, sol_u32 *free_list, sol_u32 *free_count) {
@@ -231,11 +243,110 @@ void rhi_bind_texture(RhiTexture texture, int slot) {
     glBindTexture(GL_TEXTURE_2D, texture.id ? g_textures[texture.id - 1] : 0);
 }
 
+RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat color_format) {
+    RhiRenderTarget h;
+    GlRenderTarget *rt;
+    GLuint          fbo, color_tex, depth_rbo;
+    GLint           internal;
+    sol_u32         rt_idx, tex_idx;
+    GLenum          status;
+
+    h.id = 0;
+    internal = (color_format == RHI_TEX_RGBA16F) ? GL_RGBA16F
+             : (color_format == RHI_TEX_SRGB8)   ? GL_SRGB8_ALPHA8
+             :                                      GL_RGBA8;
+
+    /* color attachment: a samplable texture. NULL data = allocate, don't upload.
+       No mipmaps (it's a render target); clamp + linear for the sampling pass. */
+    glGenTextures(1, &color_tex);
+    glBindTexture(GL_TEXTURE_2D, color_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, internal, (GLsizei)width, (GLsizei)height, 0,
+                 GL_RGBA, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    /* depth attachment: a renderbuffer — write-only, cheaper than a texture,
+       and we never sample the camera's depth in this item. */
+    glGenRenderbuffers(1, &depth_rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24,
+                          (GLsizei)width, (GLsizei)height);
+
+    /* the framebuffer object: wire color + depth into its slots */
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, color_tex, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, depth_rbo);
+
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);            /* restore default before any return */
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "render target incomplete: 0x%04x\n", (unsigned)status);
+        glDeleteTextures(1, &color_tex);
+        glDeleteRenderbuffers(1, &depth_rbo);
+        glDeleteFramebuffers(1, &fbo);
+        return h;                                    /* id 0 = failure */
+    }
+
+    /* register the color texture in the texture table so rhi_bind_texture and
+       rhi_render_target_texture treat it as an ordinary texture handle */
+    tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    g_textures[tex_idx] = color_tex;
+
+    rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count);
+    rt = &g_render_targets[rt_idx];
+    rt->fbo       = fbo;
+    rt->depth_rbo = depth_rbo;
+    rt->color.id  = tex_idx + 1;
+    rt->width     = width;
+    rt->height    = height;
+
+    h.id = rt_idx + 1;
+    gl_check("rhi_create_render_target");
+    return h;
+}
+
+RhiTexture rhi_render_target_texture(RhiRenderTarget rt) {
+    RhiTexture t;
+    if (!rt.id) { t.id = 0; return t; }
+    return g_render_targets[rt.id - 1].color;
+}
+
+void rhi_blit_to_screen(RhiRenderTarget rt) {
+    const GlRenderTarget *r = &g_render_targets[rt.id - 1];
+    int w, h;
+    glfwGetFramebufferSize(g_window, &w, &h);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);  /* copy FROM our FBO ... */
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);        /* ... TO the window     */
+    glBlitFramebuffer(0, 0, r->width, r->height, 0, 0, w, h,
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl_check("rhi_blit_to_screen");
+}
+
 /* ---- per frame ---- */
-void rhi_begin_frame(int fb_width, int fb_height, float r, float g, float b, float a) {
-    glViewport(0, 0, fb_width, fb_height);
+void rhi_begin_pass(RhiRenderTarget target, float r, float g, float b, float a) {
+    int w, h;
+    if (target.id != 0) {
+        const GlRenderTarget *rt = &g_render_targets[target.id - 1];
+        glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
+        w = rt->width;
+        h = rt->height;
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);        /* the window */
+        glfwGetFramebufferSize(g_window, &w, &h);    /* backend owns the window ptr */
+    }
+    glViewport(0, 0, w, h);                          /* viewport does NOT follow the bind */
     glClearColor(r, g, b, a);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+void rhi_end_pass(void) {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);            /* next begin_pass re-sets viewport */
 }
 
 void rhi_set_pipeline(RhiPipeline pipeline) {
@@ -337,4 +448,26 @@ void rhi_destroy_texture(RhiTexture texture) {
     glDeleteTextures(1, &g_textures[idx]);
     slot_free(idx, g_texture_free, &g_texture_free_count);
     gl_check("rhi_destroy_texture");
+}
+
+void rhi_destroy_render_target(RhiRenderTarget rt) {
+    GlRenderTarget *r;
+    sol_u32 idx, tex_idx;
+    if (!rt.id) return;
+    idx = rt.id - 1;
+    r = &g_render_targets[idx];
+
+    glDeleteFramebuffers(1, &r->fbo);
+    glDeleteRenderbuffers(1, &r->depth_rbo);
+
+    if (r->color.id) {                               /* release the color texture slot too */
+        tex_idx = r->color.id - 1;
+        glDeleteTextures(1, &g_textures[tex_idx]);
+        g_textures[tex_idx] = 0;
+        slot_free(tex_idx, g_texture_free, &g_texture_free_count);
+    }
+
+    r->fbo = 0; r->depth_rbo = 0; r->color.id = 0;
+    slot_free(idx, g_render_target_free, &g_render_target_free_count);
+    gl_check("rhi_destroy_render_target");
 }
