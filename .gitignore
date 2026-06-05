@@ -6,12 +6,16 @@
 /scene_io_test
 /camera_test
 /pick_test
+/json_test
 /scene.stml
 /scene_io_test.stml
 /scene_io_test_2.stml
 /scene_io_test_3.stml
 *.o
 *.dSYM/
+
+# Local test assets (Sketchfab models — CC-BY / CC-BY-NC-ND; kept local, attribute if ever tracked)
+*.glb
 
 # Editor / tooling
 compile_commands.json
