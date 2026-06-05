@@ -158,10 +158,20 @@ static void add_glb_to_scene(AppState *state, const char *path, float x, float z
     pos    = vec3_make(x - scale * center.x, -scale * b.min.y, z - scale * center.z);  /* base on floor */
 
     printf("glb: %s -> %u part(s), autoscale %.4f\n", path, (unsigned)model.count, scale);
-    for (m = 0; m < model.count; m++) {
-        sol_u32 h = scene_add(&state->scene, 0, model.parts[m].mesh, pos,
-                              quat_identity(), vec3_make(scale, scale, scale));
-        scene_texture_set(&state->scene, h, model.parts[m].albedo);
+
+    /* group the parts under one empty anchor so the model is a single selectable
+       object: the anchor carries the fit transform (pos + scale); the parts are
+       its children at local identity, so each part's WORLD matrix is unchanged. */
+    {
+        Mesh    empty  = {0};
+        sol_u32 anchor = scene_add(&state->scene, 0, empty, pos,
+                                   quat_identity(), vec3_make(scale, scale, scale));
+        for (m = 0; m < model.count; m++) {
+            sol_u32 h = scene_add(&state->scene, anchor, model.parts[m].mesh,
+                                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(),
+                                  vec3_make(1.0f, 1.0f, 1.0f));
+            scene_texture_set(&state->scene, h, model.parts[m].albedo);
+        }
     }
     glb_free(&model);
 }
@@ -175,6 +185,18 @@ static vec3 object_world_pos(Scene *s, sol_u32 handle) {
         return vec3_make(w.m[12], w.m[13], w.m[14]);
     }
     return vec3_make(0.0f, 0.5f, 0.0f);
+}
+
+/* The top-level ancestor of an object: walk the parent chain to the root. For a
+   grouped import this is the model anchor (so every part shares one group root);
+   for a root-level object it's the object itself. Drives group highlighting. */
+static sol_u32 group_root(Scene *s, sol_u32 handle) {
+    SceneObject *o = scene_get(s, handle);
+    while (o && o->parent != 0) {
+        handle = o->parent;
+        o = scene_get(s, handle);
+    }
+    return handle;
 }
 
 /* Cast a pick ray through a screen point (NDC) and select the nearest object,
@@ -499,8 +521,11 @@ static void render(AppState *state) {
     vec3    eye;
     mat4    view, proj;
     sol_u32 i;
+    sol_u32 sel_root;
 
     ensure_render_target(state, state->fb_width, state->fb_height);
+
+    sel_root = group_root(&state->scene, state->selected_handle);  /* 0 if nothing selected */
 
     /* ---- pass 1: render the scene into the offscreen HDR target ---- */
     rhi_begin_pass(state->hdr_rt, 0.10f, 0.12f, 0.15f, 1.0f);
@@ -520,7 +545,8 @@ static void render(AppState *state) {
         RhiTexture tex;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         model = scene_world_matrix(&state->scene, o);
-        hl    = (o->handle == state->selected_handle) ? 1.0f : 0.0f;
+        hl    = (sel_root != 0 && group_root(&state->scene, o->handle) == sel_root)
+              ? 1.0f : 0.0f;                       /* light the whole selected group */
         tex = o->texture;                      /* per-object material (item 5c) */
         use = tex.id ? 1.0f : 0.0f;
         draw_mesh(state, o->mesh, model, view, proj, eye, hl, tex, use);
