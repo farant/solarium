@@ -160,23 +160,22 @@ static int build_primitive(JsonValue *g, const unsigned char *bin, sol_u32 bin_l
     return 1;
 }
 
-/* Resolve a material's base-color texture to an uploaded sRGB texture, decoding
-   the embedded image once (cached by glTF image index). Returns a 0 handle when
-   there is no base-color texture or the image can't be reached. */
-static RhiTexture get_albedo(JsonValue *g, const unsigned char *bin, sol_u32 bin_len,
-                             int mat_idx, RhiTexture *cache, sol_u32 img_count) {
+/* Decode the image referenced by a texture-reference object (a material's
+   baseColorTexture / metallicRoughnessTexture / ...) and upload it in the given
+   color space. Cached by glTF image index — which assumes an image isn't reused
+   across color spaces (true for color-vs-data maps; refine if an asset breaks
+   it). Returns a 0 handle when absent or the image can't be reached. */
+static RhiTexture decode_texture(JsonValue *g, const unsigned char *bin, sol_u32 bin_len,
+                                 JsonValue *tex_ref, RhiTextureFormat fmt,
+                                 RhiTexture *cache, sol_u32 img_count) {
     RhiTexture none;
-    JsonValue *mat, *bct, *tex, *img, *bv;
+    JsonValue *tex, *img, *bv;
     int        tex_idx, img_idx, bv_idx;
     size_t     bvoff, bvlen;
     Image      decoded;
 
     none.id = 0;
-    if (mat_idx < 0) return none;
-    mat = json_index(json_member(g, "materials"), (sol_u32)mat_idx);
-    if (!mat) return none;
-    bct = json_member(json_member(mat, "pbrMetallicRoughness"), "baseColorTexture");
-    tex_idx = (int)json_number(json_member(bct, "index"), -1.0);
+    tex_idx = (int)json_number(json_member(tex_ref, "index"), -1.0);
     if (tex_idx < 0) return none;
 
     tex = json_index(json_member(g, "textures"), (sol_u32)tex_idx);
@@ -193,7 +192,7 @@ static RhiTexture get_albedo(JsonValue *g, const unsigned char *bin, sol_u32 bin
     if (bvoff + bvlen > (size_t)bin_len) return none;
 
     if (image_load_from_memory(bin + bvoff, (int)bvlen, &decoded)) {
-        RhiTexture t = rhi_create_texture(decoded.pixels, decoded.w, decoded.h, RHI_TEX_SRGB8);
+        RhiTexture t = rhi_create_texture(decoded.pixels, decoded.w, decoded.h, fmt);
         image_free(&decoded);
         cache[img_idx] = t;
         return t;
@@ -201,15 +200,16 @@ static RhiTexture get_albedo(JsonValue *g, const unsigned char *bin, sol_u32 bin
     return none;
 }
 
-/* Resolve a full PBR material: the base-color texture (above) plus the scalar
-   factors. Absent factors fall back to the glTF spec defaults (white, metal 1,
-   rough 1). 8b-8d add the MR / normal / AO maps. */
+/* Resolve a full PBR material: the texture maps + scalar factors. Absent factors
+   fall back to the glTF spec defaults (white, metal 1, rough 1). Albedo decodes
+   sRGB; the MR map decodes linear (data, not color). 8c-8d add AO / normal. */
 static Material get_material(JsonValue *g, const unsigned char *bin, sol_u32 bin_len,
                              int mat_idx, RhiTexture *cache, sol_u32 img_count) {
     Material   out;
     JsonValue *mat, *pbr, *bcf;
 
     out.albedo_tex.id = 0;
+    out.mr_tex.id     = 0;
     out.base_color    = vec3_make(1.0f, 1.0f, 1.0f);
     out.metallic      = 1.0f;     /* glTF spec defaults when a factor is absent */
     out.roughness     = 1.0f;
@@ -228,7 +228,10 @@ static Material get_material(JsonValue *g, const unsigned char *bin, sol_u32 bin
                                    (float)json_number(json_index(bcf, 2), 1.0));
     }
 
-    out.albedo_tex = get_albedo(g, bin, bin_len, mat_idx, cache, img_count);
+    out.albedo_tex = decode_texture(g, bin, bin_len,
+                       json_member(pbr, "baseColorTexture"),         RHI_TEX_SRGB8, cache, img_count);
+    out.mr_tex     = decode_texture(g, bin, bin_len,
+                       json_member(pbr, "metallicRoughnessTexture"), RHI_TEX_RGBA8, cache, img_count);
     return out;
 }
 

@@ -45,6 +45,8 @@ static const char *FRAGMENT_SRC =
     "uniform float uHighlight;\n"                            /* 0 = normal, 1 = selected */
     "uniform sampler2D uAlbedoTex;\n"
     "uniform float uUseAlbedoTex;\n"                         /* 0 = base_color only */
+    "uniform sampler2D uMRTex;\n"
+    "uniform float uUseMRTex;\n"                             /* 0 = scalar factors only */
     "uniform vec3  uBaseColor;\n"                            /* baseColorFactor (linear) */
     "uniform float uMetallic;\n"
     "uniform float uRoughness;\n"
@@ -71,7 +73,13 @@ static const char *FRAGMENT_SRC =
     "    vec3 albedo = uBaseColor;\n"
     "    if (uUseAlbedoTex > 0.5) albedo *= texture(uAlbedoTex, vUV).rgb;\n"  /* sRGB tex -> linear on sample */
     "    float metallic  = uMetallic;\n"
-    "    float roughness = max(uRoughness, 0.04);\n"          /* clamp: avoid a vanishing highlight */
+    "    float roughness = uRoughness;\n"
+    "    if (uUseMRTex > 0.5) {\n"
+    "        vec3 mr = texture(uMRTex, vUV).rgb;\n"           /* linear: G=roughness, B=metallic */
+    "        roughness *= mr.g;\n"                            /* factor x texture */
+    "        metallic  *= mr.b;\n"
+    "    }\n"
+    "    roughness = max(roughness, 0.04);\n"                 /* clamp AFTER compositing */
     "\n"
     "    vec3 N = normalize(vNormal);\n"                       /* renormalize after interp */
     "    vec3 V = normalize(uViewPos - vWorldPos);\n"          /* direction TO the camera */
@@ -501,6 +509,7 @@ static int init_scene(AppState *state) {
     /* item 6: real glTF models standing in the room */
     add_glb_to_scene(state, "book.glb",   2.0f,  0.0f);
     add_glb_to_scene(state, "candle.glb", 0.0f,  2.0f);   /* front-centre, clear of the page */
+    add_glb_to_scene(state, "sword.glb", -1.5f, -1.5f);   /* item 8b: real metallic-roughness map */
 
     /* geometry by reference: the asset name regenerates the mesh on load */
     scene_mesh_ref_set(&state->scene, floor, "grid");
@@ -571,6 +580,11 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     if (mat.albedo_tex.id) {
         rhi_bind_texture(mat.albedo_tex, 0);
         rhi_set_uniform_int("uAlbedoTex", 0);   /* sampler -> texture unit 0 */
+    }
+    rhi_set_uniform_float("uUseMRTex", mat.mr_tex.id ? 1.0f : 0.0f);
+    if (mat.mr_tex.id) {
+        rhi_bind_texture(mat.mr_tex, 1);
+        rhi_set_uniform_int("uMRTex", 1);       /* sampler -> texture unit 1 */
     }
 
     rhi_bind_vertex_buffer(mesh.vbuffer);

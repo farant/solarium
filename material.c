@@ -5,6 +5,7 @@
 Material material_default(void) {
     Material m;
     m.albedo_tex.id = 0;
+    m.mr_tex.id     = 0;
     m.base_color.x  = 1.0f;
     m.base_color.y  = 1.0f;
     m.base_color.z  = 1.0f;
