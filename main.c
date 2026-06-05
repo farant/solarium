@@ -47,6 +47,9 @@ static const char *FRAGMENT_SRC =
     "uniform float uUseAlbedoTex;\n"                         /* 0 = base_color only */
     "uniform sampler2D uMRTex;\n"
     "uniform float uUseMRTex;\n"                             /* 0 = scalar factors only */
+    "uniform sampler2D uAOTex;\n"
+    "uniform float uUseAOTex;\n"
+    "uniform float uAOStrength;\n"
     "uniform vec3  uBaseColor;\n"                            /* baseColorFactor (linear) */
     "uniform float uMetallic;\n"
     "uniform float uRoughness;\n"
@@ -102,7 +105,9 @@ static const char *FRAGMENT_SRC =
     "    vec3 radiance = vec3(1.0, 0.98, 0.92) * 3.0;\n"      /* directional light color * intensity (retune by eye) */
     "    vec3 Lo = (diffuse + specular) * radiance * NoL;\n"
     "\n"
-    "    vec3 ambient = 0.03 * albedo;\n"                     /* crude fill until IBL (* ao in 8c) */
+    "    float ao = 1.0;\n"
+    "    if (uUseAOTex > 0.5) ao = 1.0 + uAOStrength * (texture(uAOTex, vUV).r - 1.0);\n"
+    "    vec3 ambient = 0.03 * albedo * ao;\n"                /* AO modulates indirect only; direct Lo untouched */
     "    vec3 color = ambient + Lo;\n"
     "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* selection tint (linear) */
     "    FragColor = vec4(color, 1.0);\n"                     /* LINEAR -> the HDR buffer; 7c tonemaps + encodes */
@@ -585,6 +590,12 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     if (mat.mr_tex.id) {
         rhi_bind_texture(mat.mr_tex, 1);
         rhi_set_uniform_int("uMRTex", 1);       /* sampler -> texture unit 1 */
+    }
+    rhi_set_uniform_float("uUseAOTex",   mat.ao_tex.id ? 1.0f : 0.0f);
+    rhi_set_uniform_float("uAOStrength", mat.ao_strength);
+    if (mat.ao_tex.id) {
+        rhi_bind_texture(mat.ao_tex, 2);        /* may be the same GL texture as unit 1 (ORM) — fine */
+        rhi_set_uniform_int("uAOTex", 2);       /* sampler -> texture unit 2 */
     }
 
     rhi_bind_vertex_buffer(mesh.vbuffer);

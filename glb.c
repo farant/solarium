@@ -210,9 +210,11 @@ static Material get_material(JsonValue *g, const unsigned char *bin, sol_u32 bin
 
     out.albedo_tex.id = 0;
     out.mr_tex.id     = 0;
+    out.ao_tex.id     = 0;
     out.base_color    = vec3_make(1.0f, 1.0f, 1.0f);
     out.metallic      = 1.0f;     /* glTF spec defaults when a factor is absent */
     out.roughness     = 1.0f;
+    out.ao_strength   = 1.0f;
     if (mat_idx < 0) return out;
 
     mat = json_index(json_member(g, "materials"), (sol_u32)mat_idx);
@@ -232,6 +234,13 @@ static Material get_material(JsonValue *g, const unsigned char *bin, sol_u32 bin
                        json_member(pbr, "baseColorTexture"),         RHI_TEX_SRGB8, cache, img_count);
     out.mr_tex     = decode_texture(g, bin, bin_len,
                        json_member(pbr, "metallicRoughnessTexture"), RHI_TEX_RGBA8, cache, img_count);
+
+    {   /* occlusionTexture: material-level (not under pbr); R = AO. Often the
+           same image as the MR map (ORM) -> decode_texture returns the cache. */
+        JsonValue *occ = json_member(mat, "occlusionTexture");
+        out.ao_tex      = decode_texture(g, bin, bin_len, occ, RHI_TEX_RGBA8, cache, img_count);
+        out.ao_strength = (float)json_number(json_member(occ, "strength"), 1.0);
+    }
     return out;
 }
 

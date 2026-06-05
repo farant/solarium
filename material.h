@@ -10,10 +10,12 @@
 typedef struct {
     RhiTexture albedo_tex;   /* base-color map; id 0 = none (use base_color alone) */
     RhiTexture mr_tex;       /* metallic-roughness map (G=rough, B=metal); id 0 = none */
+    RhiTexture ao_tex;       /* occlusion map (R channel); id 0 = none. often == mr_tex (ORM) */
     vec3       base_color;   /* baseColorFactor (linear); multiplies albedo */
     float      metallic;     /* metallicFactor  [0,1] */
     float      roughness;    /* roughnessFactor [0,1] */
-    /* 8c ao_tex; 8d normal_tex + normal_scale */
+    float      ao_strength;  /* occlusionTexture.strength (default 1.0) */
+    /* 8d normal_tex + normal_scale */
 } Material;
 
 /* A neutral dielectric (white, non-metal, mid roughness) — what every scene
