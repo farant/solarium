@@ -110,6 +110,35 @@ static Aabb union_bounds(const GlbModel *model) {
     return b;
 }
 
+/* Load a glTF .glb, auto-fit it (longest side ~1.2 units), and stand it on the
+   floor centered at (x,z). Node transforms are already baked by the loader. */
+static void add_glb_to_scene(AppState *state, const char *path, float x, float z) {
+    GlbModel model;
+    Aabb     b;
+    vec3     center, ext, pos;
+    float    maxdim, scale;
+    sol_u32  m;
+
+    if (!glb_load(path, &model)) { fprintf(stderr, "glb load failed: %s\n", path); return; }
+
+    b      = union_bounds(&model);
+    center = vec3_scale(vec3_add(b.min, b.max), 0.5f);
+    ext    = vec3_sub(b.max, b.min);
+    maxdim = ext.x;
+    if (ext.y > maxdim) maxdim = ext.y;
+    if (ext.z > maxdim) maxdim = ext.z;
+    scale  = (maxdim > 0.0001f) ? (1.2f / maxdim) : 1.0f;
+    pos    = vec3_make(x - scale * center.x, -scale * b.min.y, z - scale * center.z);  /* base on floor */
+
+    printf("glb: %s -> %u part(s), autoscale %.4f\n", path, (unsigned)model.count, scale);
+    for (m = 0; m < model.count; m++) {
+        sol_u32 h = scene_add(&state->scene, 0, model.parts[m].mesh, pos,
+                              quat_identity(), vec3_make(scale, scale, scale));
+        scene_texture_set(&state->scene, h, model.parts[m].albedo);
+    }
+    glb_free(&model);
+}
+
 /* World-space position of an object (its world matrix's translation column),
    falling back to the scene focus if the handle is gone. */
 static vec3 object_world_pos(Scene *s, sol_u32 handle) {
@@ -338,33 +367,9 @@ static int init_scene(AppState *state) {
     scene_texture_set(&state->scene, page, state->albedo_tex);
     state->page_handle = page;
 
-    /* item 6b: load a real glTF model, auto-fit it to the room, stand it up */
-    {
-        GlbModel model;
-        if (glb_load("book.glb", &model)) {
-            Aabb    b      = union_bounds(&model);
-            vec3    center = vec3_scale(vec3_add(b.min, b.max), 0.5f);
-            vec3    ext    = vec3_sub(b.max, b.min);
-            float   maxdim = ext.x;
-            float   scale;
-            vec3    pos;
-            sol_u32 m;
-            if (ext.y > maxdim) maxdim = ext.y;
-            if (ext.z > maxdim) maxdim = ext.z;
-            scale = (maxdim > 0.0001f) ? (1.2f / maxdim) : 1.0f;     /* longest side -> ~1.2 units */
-            pos   = vec3_sub(vec3_make(2.0f, 1.0f, 0.0f), vec3_scale(center, scale));  /* center it there */
-            printf("glb: book.glb -> %u part(s), autoscale %.4f\n",
-                   (unsigned)model.count, scale);
-            for (m = 0; m < model.count; m++) {
-                sol_u32 h = scene_add(&state->scene, 0, model.parts[m].mesh, pos,
-                                      quat_identity(), vec3_make(scale, scale, scale));
-                scene_texture_set(&state->scene, h, model.parts[m].albedo);
-            }
-            glb_free(&model);
-        } else {
-            fprintf(stderr, "glb load failed: book.glb\n");
-        }
-    }
+    /* item 6: real glTF models standing in the room */
+    add_glb_to_scene(state, "book.glb",   2.0f,  0.0f);
+    add_glb_to_scene(state, "candle.glb", 0.0f,  2.0f);   /* front-centre, clear of the page */
 
     /* geometry by reference: the asset name regenerates the mesh on load */
     scene_mesh_ref_set(&state->scene, floor, "grid");

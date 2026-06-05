@@ -4,6 +4,7 @@
 #include "json.h"
 #include "rhi.h"
 #include "image.h"
+#include "sol_math.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,10 +107,11 @@ static sol_u32 acc_index(const Accessor *a, sol_u32 i) {
     return read_index(a->base + (size_t)i * (size_t)a->stride, a->comp);
 }
 
-/* Build one primitive's geometry into a Mesh. Pushes vertices in POSITION-accessor
-   order (so glTF indices map straight to builder indices), then the triangles. */
+/* Build one primitive's geometry into a Mesh, baking the node `world` matrix
+   into positions and normals. Pushes vertices in POSITION-accessor order (so
+   glTF indices map straight to builder indices), then the triangles. */
 static int build_primitive(JsonValue *g, const unsigned char *bin, sol_u32 bin_len,
-                           JsonValue *prim, Mesh *out) {
+                           JsonValue *prim, mat4 world, Mesh *out) {
     JsonValue  *attrs;
     Accessor    pos, nrm, uv, idx;
     int         has_nrm, has_uv, has_idx;
@@ -132,11 +134,15 @@ static int build_primitive(JsonValue *g, const unsigned char *bin, sol_u32 bin_l
 
     mb_init(&mb);
     for (i = 0; i < pos.count; i++) {
-        float px = acc_float(&pos, i, 0), py = acc_float(&pos, i, 1), pz = acc_float(&pos, i, 2);
-        float nx = 0.0f, ny = 0.0f, nz = 0.0f, u = 0.0f, v = 0.0f;
-        if (has_nrm) { nx = acc_float(&nrm, i, 0); ny = acc_float(&nrm, i, 1); nz = acc_float(&nrm, i, 2); }
-        if (has_uv)  { u  = acc_float(&uv,  i, 0); v  = acc_float(&uv,  i, 1); }
-        mb_push_vertex(&mb, px, py, pz, nx, ny, nz, u, 1.0f - v);   /* glTF UV is top-left -> flip V */
+        vec3  lp, ln, wp, wn;
+        float u = 0.0f, v = 0.0f;
+        lp = vec3_make(acc_float(&pos, i, 0), acc_float(&pos, i, 1), acc_float(&pos, i, 2));
+        ln = vec3_make(0.0f, 0.0f, 0.0f);
+        if (has_nrm) ln = vec3_make(acc_float(&nrm, i, 0), acc_float(&nrm, i, 1), acc_float(&nrm, i, 2));
+        if (has_uv)  { u = acc_float(&uv, i, 0); v = acc_float(&uv, i, 1); }
+        wp = mat4_mul_point(world, lp);                            /* bake node transform */
+        wn = has_nrm ? vec3_normalize(mat4_mul_dir(world, ln)) : ln;
+        mb_push_vertex(&mb, wp.x, wp.y, wp.z, wn.x, wn.y, wn.z, u, 1.0f - v);  /* glTF UV top-left -> flip V */
     }
 
     if (has_idx) {
@@ -195,6 +201,99 @@ static RhiTexture get_albedo(JsonValue *g, const unsigned char *bin, sol_u32 bin
     return none;
 }
 
+/* A node's local transform: a "matrix" (16 column-major floats, same order as
+   our mat4) if present, else composed from translation/rotation/scale (defaults
+   identity). */
+static mat4 node_local(JsonValue *node) {
+    JsonValue *jm = json_member(node, "matrix");
+    if (jm && json_count(jm) == 16) {
+        mat4 r;
+        int  i;
+        for (i = 0; i < 16; i++) r.m[i] = (float)json_number(json_index(jm, (sol_u32)i), 0.0);
+        return r;
+    }
+    {
+        JsonValue *jt = json_member(node, "translation");
+        JsonValue *jr = json_member(node, "rotation");
+        JsonValue *js = json_member(node, "scale");
+        vec3 t, s;
+        quat q;
+        t = vec3_make((float)json_number(json_index(jt, 0), 0.0),
+                      (float)json_number(json_index(jt, 1), 0.0),
+                      (float)json_number(json_index(jt, 2), 0.0));
+        q.x = (float)json_number(json_index(jr, 0), 0.0);
+        q.y = (float)json_number(json_index(jr, 1), 0.0);
+        q.z = (float)json_number(json_index(jr, 2), 0.0);
+        q.w = (float)json_number(json_index(jr, 3), 1.0);
+        s = vec3_make((float)json_number(json_index(js, 0), 1.0),
+                      (float)json_number(json_index(js, 1), 1.0),
+                      (float)json_number(json_index(js, 2), 1.0));
+        return mat4_from_trs(t, q, s);
+    }
+}
+
+/* Traversal context: shared inputs + the growable output parts. */
+typedef struct {
+    JsonValue           *g;
+    const unsigned char *bin;
+    sol_u32              bin_len;
+    RhiTexture          *cache;
+    sol_u32              img_count;
+    GlbPart             *parts;
+    sol_u32              count;
+    sol_u32              cap;
+} GlbCtx;
+
+static void ctx_add(GlbCtx *c, Mesh mesh, RhiTexture albedo) {
+    if (c->count == c->cap) {
+        sol_u32  cap   = c->cap ? c->cap * 2 : 8;
+        GlbPart *grown = (GlbPart *)realloc(c->parts, (size_t)cap * sizeof(GlbPart));
+        if (!grown) return;            /* drop this part rather than crash */
+        c->parts = grown;
+        c->cap   = cap;
+    }
+    c->parts[c->count].mesh   = mesh;
+    c->parts[c->count].albedo = albedo;
+    c->count++;
+}
+
+/* Walk a node and its children, composing world transforms and emitting a part
+   per primitive of any referenced mesh. */
+static void process_node(GlbCtx *c, int node_idx, mat4 parent, int depth) {
+    JsonValue *node, *children;
+    mat4       world;
+    int        mesh_idx;
+    sol_u32    i;
+
+    if (depth > 256) return;           /* cycle guard */
+    node = json_index(json_member(c->g, "nodes"), (sol_u32)node_idx);
+    if (!node) return;
+    world = mat4_mul(parent, node_local(node));
+
+    mesh_idx = (int)json_number(json_member(node, "mesh"), -1.0);
+    if (mesh_idx >= 0) {
+        JsonValue *prims = json_member(json_index(json_member(c->g, "meshes"), (sol_u32)mesh_idx),
+                                       "primitives");
+        sol_u32 np = json_count(prims), p;
+        for (p = 0; p < np; p++) {
+            JsonValue *prim = json_index(prims, p);
+            Mesh       m;
+            if (build_primitive(c->g, c->bin, c->bin_len, prim, world, &m)) {
+                RhiTexture alb;
+                int mat_idx = (int)json_number(json_member(prim, "material"), -1.0);
+                alb.id = 0;
+                if (c->cache) alb = get_albedo(c->g, c->bin, c->bin_len, mat_idx, c->cache, c->img_count);
+                ctx_add(c, m, alb);
+            }
+        }
+    }
+
+    children = json_member(node, "children");
+    for (i = 0; i < json_count(children); i++) {
+        process_node(c, (int)json_number(json_index(children, i), -1.0), world, depth + 1);
+    }
+}
+
 static unsigned char *slurp_file(const char *path, long *out_size) {
     FILE          *f;
     long           size;
@@ -222,8 +321,7 @@ sol_bool glb_load(const char *path, GlbModel *out) {
     const unsigned char *bin;
     sol_u32              bin_len;
     size_t               off;
-    JsonValue           *g, *meshes;
-    sol_u32              prim_total, written;
+    JsonValue           *g;
 
     out->parts = (GlbPart *)0;
     out->count = 0;
@@ -259,50 +357,37 @@ sol_bool glb_load(const char *path, GlbModel *out) {
     free(json_str);
     if (!g) { free(buf); return SOL_FALSE; }
 
-    meshes = json_member(g, "meshes");
-    prim_total = 0;
+    /* traverse the default scene's node tree, composing + baking transforms */
     {
-        sol_u32 n = json_count(meshes), k;
-        for (k = 0; k < n; k++) {
-            prim_total += json_count(json_member(json_index(meshes, k), "primitives"));
-        }
-    }
-    if (prim_total == 0) { json_free(g); free(buf); return SOL_FALSE; }
+        GlbCtx     ctx;
+        JsonValue *scene, *roots;
+        int        scene_idx;
+        sol_u32    i;
 
-    out->parts = (GlbPart *)malloc((size_t)prim_total * sizeof(GlbPart));
-    if (!out->parts) { json_free(g); free(buf); return SOL_FALSE; }
+        ctx.g         = g;
+        ctx.bin       = bin;
+        ctx.bin_len   = bin_len;
+        ctx.img_count = json_count(json_member(g, "images"));
+        ctx.cache     = ctx.img_count ? (RhiTexture *)calloc(ctx.img_count, sizeof(RhiTexture)) : (RhiTexture *)0;
+        ctx.parts     = (GlbPart *)0;
+        ctx.count     = 0;
+        ctx.cap       = 0;
 
-    written = 0;
-    {
-        sol_u32     img_count = json_count(json_member(g, "images"));
-        RhiTexture *cache     = (RhiTexture *)0;
-        sol_u32     n = json_count(meshes), k, p, np;
-        if (img_count) cache = (RhiTexture *)calloc(img_count, sizeof(RhiTexture));  /* id 0 = uncached */
-        for (k = 0; k < n; k++) {
-            JsonValue *prims = json_member(json_index(meshes, k), "primitives");
-            np = json_count(prims);
-            for (p = 0; p < np; p++) {
-                JsonValue *prim = json_index(prims, p);
-                Mesh       m;
-                if (build_primitive(g, bin, bin_len, prim, &m)) {
-                    int mat_idx = (int)json_number(json_member(prim, "material"), -1.0);
-                    out->parts[written].mesh = m;
-                    if (cache) {
-                        out->parts[written].albedo = get_albedo(g, bin, bin_len, mat_idx, cache, img_count);
-                    } else {
-                        out->parts[written].albedo.id = 0;   /* no images -> no albedo */
-                    }
-                    written++;
-                }
-            }
+        scene_idx = (int)json_number(json_member(g, "scene"), 0.0);
+        scene     = json_index(json_member(g, "scenes"), (sol_u32)scene_idx);
+        roots     = json_member(scene, "nodes");
+        for (i = 0; i < json_count(roots); i++) {
+            process_node(&ctx, (int)json_number(json_index(roots, i), -1.0), mat4_identity(), 0);
         }
-        free(cache);                          /* CPU bookkeeping; the GPU textures persist */
+        free(ctx.cache);                      /* CPU bookkeeping; the GPU textures persist */
+
+        out->parts = ctx.parts;
+        out->count = ctx.count;
     }
-    out->count = written;
 
     json_free(g);
     free(buf);
-    return (written > 0) ? SOL_TRUE : SOL_FALSE;
+    return (out->count > 0) ? SOL_TRUE : SOL_FALSE;
 }
 
 void glb_free(GlbModel *out) {

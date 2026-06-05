@@ -188,6 +188,17 @@ vec3 mat4_mul_point(mat4 m, vec3 p) {
     return r;
 }
 
+/* Transform a direction by the upper 3x3 (no translation). For normals this is
+   exact under rotation + uniform scale; under non-uniform scale it's an
+   approximation (the strictly-correct form is the inverse-transpose). */
+vec3 mat4_mul_dir(mat4 m, vec3 d) {
+    vec3 r;
+    r.x = m.m[0]*d.x + m.m[4]*d.y + m.m[8]*d.z;
+    r.y = m.m[1]*d.x + m.m[5]*d.y + m.m[9]*d.z;
+    r.z = m.m[2]*d.x + m.m[6]*d.y + m.m[10]*d.z;
+    return r;
+}
+
 /* Transform an AABB: take the AABB of its 8 transformed corners. For a rotated
    box this is the (slightly loose) enclosing axis-aligned box — fine as a pick
    broad phase, and exact for axis-aligned boxes. */
