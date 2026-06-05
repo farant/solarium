@@ -4,6 +4,7 @@
 #include "sol_base.h"
 #include "sol_types.h"
 #include "mesh.h"
+#include "material.h"
 
 typedef struct { char *key; char *value; }     MetaEntry;
 typedef struct { char *type; sol_u32 target; } Relation;
@@ -19,7 +20,7 @@ typedef struct {
     vec3    scale;
     Mesh    mesh;      /* shared reference; a zero Mesh (index_count 0) = empty */
     char   *mesh_ref;  /* asset name for geometry-by-reference; NULL = none/empty */
-    RhiTexture texture; /* shared albedo texture handle; 0 = untextured (not owned) */
+    Material material; /* PBR material (item 8); texture handles shared, not owned */
 
     /* overbuilt slots — mostly empty this phase, serialized in 2.5 */
     MetaEntry *meta;       sol_u32 meta_count;  sol_u32 meta_cap;   /* string->string */
@@ -49,7 +50,7 @@ const char *scene_meta_get(Scene *s, sol_u32 handle, const char *key);   /* NULL
 void        scene_rel_add(Scene *s, sol_u32 handle, const char *type, sol_u32 target);
 void        scene_content_set(Scene *s, sol_u32 handle, const char *path);
 void        scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name);
-void        scene_texture_set(Scene *s, sol_u32 handle, RhiTexture tex);   /* shared handle, not owned */
+void        scene_material_set(Scene *s, sol_u32 handle, Material mat);   /* texture handles shared, not owned */
 
 /* serialization — defined in scene_io.c */
 sol_bool    scene_save(Scene *s, const char *path);   /* SOL_FALSE if the file won't open */

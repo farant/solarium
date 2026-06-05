@@ -7,9 +7,10 @@
 #include "sol_base.h"
 #include "rhi.h"
 #include "mesh.h"
+#include "material.h"
 
-/* one glTF primitive: geometry + its base-color texture (albedo.id 0 = none) */
-typedef struct { Mesh mesh; RhiTexture albedo; } GlbPart;
+/* one glTF primitive: geometry + its resolved PBR material */
+typedef struct { Mesh mesh; Material material; } GlbPart;
 
 typedef struct {
     GlbPart *parts;

@@ -24,13 +24,14 @@ static const char *VERTEX_SRC =
     "uniform mat4 uModel;\n"
     "uniform mat4 uView;\n"
     "uniform mat4 uProj;\n"
+    "uniform mat3 uNormalMatrix;\n"
     "out vec3 vNormal;\n"
     "out vec3 vWorldPos;\n"
     "out vec2 vUV;\n"
     "void main() {\n"
     "    vec4 worldPos = uModel * vec4(aPos, 1.0);\n"
     "    gl_Position = uProj * uView * worldPos;\n"
-    "    vNormal = mat3(uModel) * aNormal;\n"   /* rotate normal into world space */
+    "    vNormal = uNormalMatrix * aNormal;\n"   /* covector transform: correct under non-uniform scale */
     "    vWorldPos = worldPos.xyz;\n"
     "    vUV = aUV;\n"                          /* plumbed for item 5; unused now */
     "}\n";
@@ -40,32 +41,63 @@ static const char *FRAGMENT_SRC =
     "in vec3 vNormal;\n"
     "in vec3 vWorldPos;\n"
     "in vec2 vUV;\n"
-    "uniform vec3 uViewPos;\n"
+    "uniform vec3  uViewPos;\n"
     "uniform float uHighlight;\n"                            /* 0 = normal, 1 = selected */
-    "uniform sampler2D uTexture;\n"
-    "uniform float uUseTexture;\n"                           /* 0 = base color, 1 = sample uTexture */
+    "uniform sampler2D uAlbedoTex;\n"
+    "uniform float uUseAlbedoTex;\n"                         /* 0 = base_color only */
+    "uniform vec3  uBaseColor;\n"                            /* baseColorFactor (linear) */
+    "uniform float uMetallic;\n"
+    "uniform float uRoughness;\n"
     "out vec4 FragColor;\n"
+    "const float PI = 3.14159265359;\n"
+    "\n"
+    "float distributionGGX(float NoH, float rough) {\n"      /* D: microfacet alignment */
+    "    float a = rough*rough; float a2 = a*a;\n"
+    "    float d = NoH*NoH*(a2 - 1.0) + 1.0;\n"
+    "    return a2 / (PI * d * d);\n"
+    "}\n"
+    "float geometrySchlickGGX(float NdotX, float k) {\n"     /* one side of G */
+    "    return NdotX / (NdotX*(1.0 - k) + k);\n"
+    "}\n"
+    "float geometrySmith(float NoV, float NoL, float rough) {\n"   /* G: shadow/mask */
+    "    float k = (rough + 1.0)*(rough + 1.0) / 8.0;\n"     /* direct-lighting remap */
+    "    return geometrySchlickGGX(NoV, k) * geometrySchlickGGX(NoL, k);\n"
+    "}\n"
+    "vec3 fresnelSchlick(float HoV, vec3 F0) {\n"            /* F: grazing reflectance */
+    "    return F0 + (1.0 - F0) * pow(1.0 - HoV, 5.0);\n"
+    "}\n"
+    "\n"
     "void main() {\n"
+    "    vec3 albedo = uBaseColor;\n"
+    "    if (uUseAlbedoTex > 0.5) albedo *= texture(uAlbedoTex, vUV).rgb;\n"  /* sRGB tex -> linear on sample */
+    "    float metallic  = uMetallic;\n"
+    "    float roughness = max(uRoughness, 0.04);\n"          /* clamp: avoid a vanishing highlight */
+    "\n"
     "    vec3 N = normalize(vNormal);\n"                       /* renormalize after interp */
-    "    vec3 L = normalize(vec3(0.4, 1.0, 0.6));\n"           /* direction TO the light */
     "    vec3 V = normalize(uViewPos - vWorldPos);\n"          /* direction TO the camera */
-    "    vec3 H = normalize(L + V);\n"                         /* half-vector */
+    "    vec3 L = normalize(vec3(0.4, 1.0, 0.6));\n"           /* directional light: dir TO light */
+    "    vec3 H = normalize(L + V);\n"
+    "    float NoV = max(dot(N, V), 0.0001);\n"
+    "    float NoL = max(dot(N, L), 0.0);\n"
+    "    float NoH = max(dot(N, H), 0.0);\n"
+    "    float HoV = max(dot(H, V), 0.0);\n"
     "\n"
-    "    vec3 lightColor = vec3(1.0, 0.98, 0.92) * 2.0;\n"    /* >1 intensity: real HDR highlights for ACES to roll off (temporary until item-9 lights) */
-    "    vec3 baseColor  = vec3(0.85, 0.45, 0.35);\n"          /* the object's color */
-    "    vec3 albedo = (uUseTexture > 0.5)\n"
-    "                ? texture(uTexture, vUV).rgb\n"           /* sRGB tex -> linear on sample */
-    "                : baseColor;\n"
-    "    float ambient   = 0.15;\n"
-    "    float shininess = 48.0;\n"
+    "    vec3 F0 = mix(vec3(0.04), albedo, metallic);\n"      /* dielectric 4% vs metal-tinted */
+    "    float D = distributionGGX(NoH, roughness);\n"
+    "    float G = geometrySmith(NoV, NoL, roughness);\n"
+    "    vec3  F = fresnelSchlick(HoV, F0);\n"
+    "    vec3  specular = (D * G) * F / (4.0 * NoV * NoL + 0.0001);\n"
     "\n"
-    "    float diff = max(dot(N, L), 0.0);\n"                  /* Lambert diffuse */
-    "    float spec = (diff > 0.0) ? pow(max(dot(N, H), 0.0), shininess) : 0.0;\n"
-    "    vec3 color = albedo * ambient\n"
-    "               + albedo * lightColor * diff\n"
-    "               + lightColor * spec;\n"                    /* Blinn-Phong highlight */
-    "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* gold when selected (linear) */
-    "    FragColor = vec4(color, 1.0);\n"                     /* TRUE LINEAR -> the HDR buffer; gamma is in the post pass */
+    "    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);\n"     /* energy: no diffuse where it reflected / for metals */
+    "    vec3 diffuse = kD * albedo / PI;\n"
+    "\n"
+    "    vec3 radiance = vec3(1.0, 0.98, 0.92) * 3.0;\n"      /* directional light color * intensity (retune by eye) */
+    "    vec3 Lo = (diffuse + specular) * radiance * NoL;\n"
+    "\n"
+    "    vec3 ambient = 0.03 * albedo;\n"                     /* crude fill until IBL (* ao in 8c) */
+    "    vec3 color = ambient + Lo;\n"
+    "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* selection tint (linear) */
+    "    FragColor = vec4(color, 1.0);\n"                     /* LINEAR -> the HDR buffer; 7c tonemaps + encodes */
     "}\n";
 
 /* --- the fullscreen tonemap/encode pass (item 7b): samples the HDR buffer and
@@ -175,7 +207,7 @@ static void add_glb_to_scene(AppState *state, const char *path, float x, float z
             sol_u32 h = scene_add(&state->scene, anchor, model.parts[m].mesh,
                                   vec3_make(0.0f, 0.0f, 0.0f), quat_identity(),
                                   vec3_make(1.0f, 1.0f, 1.0f));
-            scene_texture_set(&state->scene, h, model.parts[m].albedo);
+            scene_material_set(&state->scene, h, model.parts[m].material);
         }
     }
     glb_free(&model);
@@ -444,8 +476,27 @@ static int init_scene(AppState *state) {
     /* the parchment reading surface: the page quad, already upright and facing +Z */
     page = scene_add(&state->scene, 0, page_mesh,
               vec3_make(-2.0f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-    scene_texture_set(&state->scene, page, state->albedo_tex);
     state->page_handle = page;
+
+    /* PBR materials for the procedural objects (item 8a) */
+    {
+        Material m = material_default();
+        m.base_color = vec3_make(0.85f, 0.45f, 0.35f);   /* the box keeps its warm orange */
+        m.roughness  = 0.5f;
+        scene_material_set(&state->scene, state->box_handle, m);
+    }
+    {
+        Material m = material_default();
+        m.base_color = vec3_make(0.5f, 0.5f, 0.5f);      /* a neutral, fairly rough floor */
+        m.roughness  = 0.85f;
+        scene_material_set(&state->scene, floor, m);
+    }
+    {
+        Material m = material_default();
+        m.albedo_tex = state->albedo_tex;                /* the parchment image; matte */
+        m.roughness  = 0.8f;
+        scene_material_set(&state->scene, page, m);
+    }
 
     /* item 6: real glTF models standing in the room */
     add_glb_to_scene(state, "book.glb",   2.0f,  0.0f);
@@ -502,18 +553,26 @@ static void update(AppState *state, double dt) {
 
 static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
                       mat4 view, mat4 proj, vec3 eye, float highlight,
-                      RhiTexture tex, float use_texture) {
+                      Material mat) {
+    mat3 nrm = mat3_normal_matrix(model);
+
     rhi_set_pipeline(state->pipeline);
-    rhi_set_uniform_mat4("uModel",      model.m);
-    rhi_set_uniform_mat4("uView",       view.m);
-    rhi_set_uniform_mat4("uProj",       proj.m);
-    rhi_set_uniform_vec3("uViewPos",    eye.x, eye.y, eye.z);
-    rhi_set_uniform_float("uHighlight",  highlight);
-    rhi_set_uniform_float("uUseTexture", use_texture);
-    if (use_texture > 0.5f) {
-        rhi_bind_texture(tex, 0);
-        rhi_set_uniform_int("uTexture", 0);     /* sampler -> texture unit 0 */
+    rhi_set_uniform_mat4("uModel",        model.m);
+    rhi_set_uniform_mat4("uView",         view.m);
+    rhi_set_uniform_mat4("uProj",         proj.m);
+    rhi_set_uniform_mat3("uNormalMatrix", nrm.m);
+    rhi_set_uniform_vec3("uViewPos",      eye.x, eye.y, eye.z);
+    rhi_set_uniform_float("uHighlight",   highlight);
+
+    rhi_set_uniform_vec3("uBaseColor",    mat.base_color.x, mat.base_color.y, mat.base_color.z);
+    rhi_set_uniform_float("uMetallic",    mat.metallic);
+    rhi_set_uniform_float("uRoughness",   mat.roughness);
+    rhi_set_uniform_float("uUseAlbedoTex", mat.albedo_tex.id ? 1.0f : 0.0f);
+    if (mat.albedo_tex.id) {
+        rhi_bind_texture(mat.albedo_tex, 0);
+        rhi_set_uniform_int("uAlbedoTex", 0);   /* sampler -> texture unit 0 */
     }
+
     rhi_bind_vertex_buffer(mesh.vbuffer);
     rhi_bind_index_buffer(mesh.ibuffer);
     rhi_draw_indexed(0, mesh.index_count);
@@ -558,16 +617,13 @@ static void render(AppState *state) {
     /* iterate the scene — each object's WORLD matrix (parent * local) */
     for (i = 0; i < state->scene.count; i++) {
         const SceneObject *o = &state->scene.objects[i];
-        mat4       model;
-        float      hl, use;
-        RhiTexture tex;
+        mat4  model;
+        float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         model = scene_world_matrix(&state->scene, o);
         hl    = (sel_root != 0 && group_root(&state->scene, o->handle) == sel_root)
               ? 1.0f : 0.0f;                       /* light the whole selected group */
-        tex = o->texture;                      /* per-object material (item 5c) */
-        use = tex.id ? 1.0f : 0.0f;
-        draw_mesh(state, o->mesh, model, view, proj, eye, hl, tex, use);
+        draw_mesh(state, o->mesh, model, view, proj, eye, hl, o->material);
     }
 
     rhi_end_pass();

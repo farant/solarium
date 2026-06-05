@@ -374,6 +374,11 @@ void rhi_set_uniform_mat4(const char *name, const float *m) {
     glUniformMatrix4fv(loc, 1, GL_FALSE, m);
 }
 
+void rhi_set_uniform_mat3(const char *name, const float *m) {
+    GLint loc = glGetUniformLocation(g_current->program, name);
+    glUniformMatrix3fv(loc, 1, GL_FALSE, m);   /* column-major, no transpose */
+}
+
 void rhi_set_uniform_vec3(const char *name, float x, float y, float z) {
     GLint loc = glGetUniformLocation(g_current->program, name);
     glUniform3f(loc, x, y, z);

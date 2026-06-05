@@ -25,6 +25,9 @@ vec3  vec3_normalize(vec3 v);
 mat4  mat4_identity(void);
 mat4  mat4_mul(mat4 a, mat4 b);   /* C = A * B; applied to a vector, B happens first */
 
+/* ---- mat3 (normals; item 8) ---- */
+mat3  mat3_normal_matrix(mat4 model);   /* inverse-transpose of model's upper-left 3x3 */
+
 /* ---- mat4 model transforms ---- */
 mat4  mat4_translate(vec3 t);
 mat4  mat4_scale(vec3 s);

@@ -199,6 +199,33 @@ vec3 mat4_mul_dir(mat4 m, vec3 d) {
     return r;
 }
 
+/* The normal matrix: the inverse-transpose of a model matrix's upper-left 3x3.
+   For a 3x3 with columns (a,b,c), the inverse-transpose columns are
+   (b x c, c x a, a x b) / det — so normals stay perpendicular under non-uniform
+   scale, where the naive mat3(model) skews them. Computed via cross products,
+   no general matrix inverse needed. */
+mat3 mat3_normal_matrix(mat4 model) {
+    vec3  a, b, c, n0, n1, n2;
+    float det, inv;
+    mat3  r;
+
+    a = vec3_make(model.m[0], model.m[1], model.m[2]);   /* upper-left 3x3 columns */
+    b = vec3_make(model.m[4], model.m[5], model.m[6]);
+    c = vec3_make(model.m[8], model.m[9], model.m[10]);
+
+    n0 = vec3_cross(b, c);
+    n1 = vec3_cross(c, a);
+    n2 = vec3_cross(a, b);
+
+    det = vec3_dot(a, n0);                               /* = det of the 3x3 */
+    inv = (det != 0.0f) ? 1.0f / det : 0.0f;
+
+    r.m[0] = n0.x*inv; r.m[1] = n0.y*inv; r.m[2] = n0.z*inv;   /* col 0 */
+    r.m[3] = n1.x*inv; r.m[4] = n1.y*inv; r.m[5] = n1.z*inv;   /* col 1 */
+    r.m[6] = n2.x*inv; r.m[7] = n2.y*inv; r.m[8] = n2.z*inv;   /* col 2 */
+    return r;
+}
+
 /* Transform an AABB: take the AABB of its 8 transformed corners. For a rotated
    box this is the (slightly loose) enclosing axis-aligned box — fine as a pick
    broad phase, and exact for axis-aligned boxes. */

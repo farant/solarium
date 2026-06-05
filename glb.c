@@ -201,6 +201,37 @@ static RhiTexture get_albedo(JsonValue *g, const unsigned char *bin, sol_u32 bin
     return none;
 }
 
+/* Resolve a full PBR material: the base-color texture (above) plus the scalar
+   factors. Absent factors fall back to the glTF spec defaults (white, metal 1,
+   rough 1). 8b-8d add the MR / normal / AO maps. */
+static Material get_material(JsonValue *g, const unsigned char *bin, sol_u32 bin_len,
+                             int mat_idx, RhiTexture *cache, sol_u32 img_count) {
+    Material   out;
+    JsonValue *mat, *pbr, *bcf;
+
+    out.albedo_tex.id = 0;
+    out.base_color    = vec3_make(1.0f, 1.0f, 1.0f);
+    out.metallic      = 1.0f;     /* glTF spec defaults when a factor is absent */
+    out.roughness     = 1.0f;
+    if (mat_idx < 0) return out;
+
+    mat = json_index(json_member(g, "materials"), (sol_u32)mat_idx);
+    pbr = json_member(mat, "pbrMetallicRoughness");
+
+    out.metallic  = (float)json_number(json_member(pbr, "metallicFactor"),  1.0);
+    out.roughness = (float)json_number(json_member(pbr, "roughnessFactor"), 1.0);
+
+    bcf = json_member(pbr, "baseColorFactor");
+    if (json_count(bcf) >= 3) {                  /* RGBA array; take RGB (linear) */
+        out.base_color = vec3_make((float)json_number(json_index(bcf, 0), 1.0),
+                                   (float)json_number(json_index(bcf, 1), 1.0),
+                                   (float)json_number(json_index(bcf, 2), 1.0));
+    }
+
+    out.albedo_tex = get_albedo(g, bin, bin_len, mat_idx, cache, img_count);
+    return out;
+}
+
 /* A node's local transform: a "matrix" (16 column-major floats, same order as
    our mat4) if present, else composed from translation/rotation/scale (defaults
    identity). */
@@ -244,7 +275,7 @@ typedef struct {
     sol_u32              cap;
 } GlbCtx;
 
-static void ctx_add(GlbCtx *c, Mesh mesh, RhiTexture albedo) {
+static void ctx_add(GlbCtx *c, Mesh mesh, Material material) {
     if (c->count == c->cap) {
         sol_u32  cap   = c->cap ? c->cap * 2 : 8;
         GlbPart *grown = (GlbPart *)realloc(c->parts, (size_t)cap * sizeof(GlbPart));
@@ -252,8 +283,8 @@ static void ctx_add(GlbCtx *c, Mesh mesh, RhiTexture albedo) {
         c->parts = grown;
         c->cap   = cap;
     }
-    c->parts[c->count].mesh   = mesh;
-    c->parts[c->count].albedo = albedo;
+    c->parts[c->count].mesh     = mesh;
+    c->parts[c->count].material = material;
     c->count++;
 }
 
@@ -279,11 +310,9 @@ static void process_node(GlbCtx *c, int node_idx, mat4 parent, int depth) {
             JsonValue *prim = json_index(prims, p);
             Mesh       m;
             if (build_primitive(c->g, c->bin, c->bin_len, prim, world, &m)) {
-                RhiTexture alb;
                 int mat_idx = (int)json_number(json_member(prim, "material"), -1.0);
-                alb.id = 0;
-                if (c->cache) alb = get_albedo(c->g, c->bin, c->bin_len, mat_idx, c->cache, c->img_count);
-                ctx_add(c, m, alb);
+                Material mat = get_material(c->g, c->bin, c->bin_len, mat_idx, c->cache, c->img_count);
+                ctx_add(c, m, mat);
             }
         }
     }

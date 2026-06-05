@@ -12,6 +12,10 @@ typedef struct { float x, y, z, w; } vec4;
    which is how OpenGL wants it, so upload is transpose=GL_FALSE. */
 typedef struct { float m[16]; } mat4;
 
+/* mat3: 9 floats, COLUMN-MAJOR — element (row, col) at m[col*3 + row].
+   Used for the normal matrix (item 8) and tangent-space TBN (item 8d). */
+typedef struct { float m[9]; } mat3;
+
 typedef struct { float x, y, z, w; } quat;   /* unit quaternion = a rotation */
 
 typedef struct { vec3 origin, dir; } Ray;    /* dir kept unit in practice */
