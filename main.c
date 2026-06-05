@@ -21,6 +21,7 @@ static const char *VERTEX_SRC =
     "layout (location = 0) in vec3 aPos;\n"
     "layout (location = 1) in vec3 aNormal;\n"
     "layout (location = 2) in vec2 aUV;\n"
+    "layout (location = 3) in vec4 aTangent;\n"           /* xyz + handedness w (item 8d) */
     "uniform mat4 uModel;\n"
     "uniform mat4 uView;\n"
     "uniform mat4 uProj;\n"
@@ -28,12 +29,14 @@ static const char *VERTEX_SRC =
     "out vec3 vNormal;\n"
     "out vec3 vWorldPos;\n"
     "out vec2 vUV;\n"
+    "out vec4 vTangent;\n"
     "void main() {\n"
     "    vec4 worldPos = uModel * vec4(aPos, 1.0);\n"
     "    gl_Position = uProj * uView * worldPos;\n"
     "    vNormal = uNormalMatrix * aNormal;\n"   /* covector transform: correct under non-uniform scale */
     "    vWorldPos = worldPos.xyz;\n"
-    "    vUV = aUV;\n"                          /* plumbed for item 5; unused now */
+    "    vUV = aUV;\n"
+    "    vTangent = vec4(mat3(uModel) * aTangent.xyz, aTangent.w);\n"  /* tangent vector: model linear part */
     "}\n";
 
 static const char *FRAGMENT_SRC =
@@ -41,6 +44,7 @@ static const char *FRAGMENT_SRC =
     "in vec3 vNormal;\n"
     "in vec3 vWorldPos;\n"
     "in vec2 vUV;\n"
+    "in vec4 vTangent;\n"
     "uniform vec3  uViewPos;\n"
     "uniform float uHighlight;\n"                            /* 0 = normal, 1 = selected */
     "uniform sampler2D uAlbedoTex;\n"
@@ -50,6 +54,9 @@ static const char *FRAGMENT_SRC =
     "uniform sampler2D uAOTex;\n"
     "uniform float uUseAOTex;\n"
     "uniform float uAOStrength;\n"
+    "uniform sampler2D uNormalTex;\n"
+    "uniform float uUseNormalTex;\n"
+    "uniform float uNormalScale;\n"
     "uniform vec3  uBaseColor;\n"                            /* baseColorFactor (linear) */
     "uniform float uMetallic;\n"
     "uniform float uRoughness;\n"
@@ -85,6 +92,13 @@ static const char *FRAGMENT_SRC =
     "    roughness = max(roughness, 0.04);\n"                 /* clamp AFTER compositing */
     "\n"
     "    vec3 N = normalize(vNormal);\n"                       /* renormalize after interp */
+    "    if (uUseNormalTex > 0.5) {\n"
+    "        vec3 T = normalize(vTangent.xyz - dot(vTangent.xyz, N) * N);\n"  /* re-orthogonalize vs N */
+    "        vec3 B = cross(N, T) * vTangent.w;\n"             /* bitangent (handedness) */
+    "        vec3 n = texture(uNormalTex, vUV).rgb * 2.0 - 1.0;\n"  /* decode [0,1] -> [-1,1] */
+    "        n.xy *= uNormalScale;\n"                          /* bump strength */
+    "        N = normalize(mat3(T, B, N) * n);\n"              /* tangent space -> world */
+    "    }\n"
     "    vec3 V = normalize(uViewPos - vWorldPos);\n"          /* direction TO the camera */
     "    vec3 L = normalize(vec3(0.4, 1.0, 0.6));\n"           /* directional light: dir TO light */
     "    vec3 H = normalize(L + V);\n"
@@ -638,6 +652,12 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     if (mat.ao_tex.id) {
         rhi_bind_texture(mat.ao_tex, 2);        /* may be the same GL texture as unit 1 (ORM) — fine */
         rhi_set_uniform_int("uAOTex", 2);       /* sampler -> texture unit 2 */
+    }
+    rhi_set_uniform_float("uUseNormalTex", mat.normal_tex.id ? 1.0f : 0.0f);
+    rhi_set_uniform_float("uNormalScale",  mat.normal_scale);
+    if (mat.normal_tex.id) {
+        rhi_bind_texture(mat.normal_tex, 3);
+        rhi_set_uniform_int("uNormalTex", 3);   /* sampler -> texture unit 3 */
     }
 
     rhi_bind_vertex_buffer(mesh.vbuffer);

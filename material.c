@@ -7,11 +7,13 @@ Material material_default(void) {
     m.albedo_tex.id = 0;
     m.mr_tex.id     = 0;
     m.ao_tex.id     = 0;
+    m.normal_tex.id = 0;
     m.base_color.x  = 1.0f;
     m.base_color.y  = 1.0f;
     m.base_color.z  = 1.0f;
     m.metallic      = 0.0f;     /* dielectric */
     m.roughness     = 0.6f;     /* mid — most of our procedural surfaces */
     m.ao_strength   = 1.0f;
+    m.normal_scale  = 1.0f;
     return m;
 }
