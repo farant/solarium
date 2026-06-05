@@ -5,11 +5,15 @@
 #define GLB_H
 
 #include "sol_base.h"
+#include "rhi.h"
 #include "mesh.h"
 
+/* one glTF primitive: geometry + its base-color texture (albedo.id 0 = none) */
+typedef struct { Mesh mesh; RhiTexture albedo; } GlbPart;
+
 typedef struct {
-    Mesh    *meshes;       /* one per glTF primitive, uploaded to the GPU */
-    sol_u32  mesh_count;
+    GlbPart *parts;
+    sol_u32  count;
 } GlbModel;
 
 sol_bool glb_load(const char *path, GlbModel *out);   /* SOL_FALSE on any failure */

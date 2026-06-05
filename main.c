@@ -98,8 +98,8 @@ static Aabb union_bounds(const GlbModel *model) {
     sol_u32 m;
     b.min = vec3_make( 1e30f,  1e30f,  1e30f);
     b.max = vec3_make(-1e30f, -1e30f, -1e30f);
-    for (m = 0; m < model->mesh_count; m++) {
-        Aabb e = model->meshes[m].bounds;
+    for (m = 0; m < model->count; m++) {
+        Aabb e = model->parts[m].mesh.bounds;
         if (e.min.x < b.min.x) b.min.x = e.min.x;
         if (e.min.y < b.min.y) b.min.y = e.min.y;
         if (e.min.z < b.min.z) b.min.z = e.min.z;
@@ -353,11 +353,12 @@ static int init_scene(AppState *state) {
             if (ext.z > maxdim) maxdim = ext.z;
             scale = (maxdim > 0.0001f) ? (1.2f / maxdim) : 1.0f;     /* longest side -> ~1.2 units */
             pos   = vec3_sub(vec3_make(2.0f, 1.0f, 0.0f), vec3_scale(center, scale));  /* center it there */
-            printf("glb: book.glb -> %u mesh(es), autoscale %.4f\n",
-                   (unsigned)model.mesh_count, scale);
-            for (m = 0; m < model.mesh_count; m++) {
-                scene_add(&state->scene, 0, model.meshes[m], pos, quat_identity(),
-                          vec3_make(scale, scale, scale));
+            printf("glb: book.glb -> %u part(s), autoscale %.4f\n",
+                   (unsigned)model.count, scale);
+            for (m = 0; m < model.count; m++) {
+                sol_u32 h = scene_add(&state->scene, 0, model.parts[m].mesh, pos,
+                                      quat_identity(), vec3_make(scale, scale, scale));
+                scene_texture_set(&state->scene, h, model.parts[m].albedo);
             }
             glb_free(&model);
         } else {

@@ -2,6 +2,8 @@
 
 #include "glb.h"
 #include "json.h"
+#include "rhi.h"
+#include "image.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -152,6 +154,47 @@ static int build_primitive(JsonValue *g, const unsigned char *bin, sol_u32 bin_l
     return 1;
 }
 
+/* Resolve a material's base-color texture to an uploaded sRGB texture, decoding
+   the embedded image once (cached by glTF image index). Returns a 0 handle when
+   there is no base-color texture or the image can't be reached. */
+static RhiTexture get_albedo(JsonValue *g, const unsigned char *bin, sol_u32 bin_len,
+                             int mat_idx, RhiTexture *cache, sol_u32 img_count) {
+    RhiTexture none;
+    JsonValue *mat, *bct, *tex, *img, *bv;
+    int        tex_idx, img_idx, bv_idx;
+    size_t     bvoff, bvlen;
+    Image      decoded;
+
+    none.id = 0;
+    if (mat_idx < 0) return none;
+    mat = json_index(json_member(g, "materials"), (sol_u32)mat_idx);
+    if (!mat) return none;
+    bct = json_member(json_member(mat, "pbrMetallicRoughness"), "baseColorTexture");
+    tex_idx = (int)json_number(json_member(bct, "index"), -1.0);
+    if (tex_idx < 0) return none;
+
+    tex = json_index(json_member(g, "textures"), (sol_u32)tex_idx);
+    img_idx = (int)json_number(json_member(tex, "source"), -1.0);
+    if (img_idx < 0 || (sol_u32)img_idx >= img_count) return none;
+    if (cache[img_idx].id) return cache[img_idx];          /* decoded earlier */
+
+    img = json_index(json_member(g, "images"), (sol_u32)img_idx);
+    bv_idx = (int)json_number(json_member(img, "bufferView"), -1.0);
+    if (bv_idx < 0) return none;                            /* external/data-uri: unsupported */
+    bv = json_index(json_member(g, "bufferViews"), (sol_u32)bv_idx);
+    bvoff = (size_t)json_number(json_member(bv, "byteOffset"), 0.0);
+    bvlen = (size_t)json_number(json_member(bv, "byteLength"), 0.0);
+    if (bvoff + bvlen > (size_t)bin_len) return none;
+
+    if (image_load_from_memory(bin + bvoff, (int)bvlen, &decoded)) {
+        RhiTexture t = rhi_create_texture(decoded.pixels, decoded.w, decoded.h, RHI_TEX_SRGB8);
+        image_free(&decoded);
+        cache[img_idx] = t;
+        return t;
+    }
+    return none;
+}
+
 static unsigned char *slurp_file(const char *path, long *out_size) {
     FILE          *f;
     long           size;
@@ -182,8 +225,8 @@ sol_bool glb_load(const char *path, GlbModel *out) {
     JsonValue           *g, *meshes;
     sol_u32              prim_total, written;
 
-    out->meshes = (Mesh *)0;
-    out->mesh_count = 0;
+    out->parts = (GlbPart *)0;
+    out->count = 0;
 
     buf = slurp_file(path, &size);
     if (!buf) return SOL_FALSE;
@@ -226,24 +269,36 @@ sol_bool glb_load(const char *path, GlbModel *out) {
     }
     if (prim_total == 0) { json_free(g); free(buf); return SOL_FALSE; }
 
-    out->meshes = (Mesh *)malloc((size_t)prim_total * sizeof(Mesh));
-    if (!out->meshes) { json_free(g); free(buf); return SOL_FALSE; }
+    out->parts = (GlbPart *)malloc((size_t)prim_total * sizeof(GlbPart));
+    if (!out->parts) { json_free(g); free(buf); return SOL_FALSE; }
 
     written = 0;
     {
-        sol_u32 n = json_count(meshes), k, p, np;
+        sol_u32     img_count = json_count(json_member(g, "images"));
+        RhiTexture *cache     = (RhiTexture *)0;
+        sol_u32     n = json_count(meshes), k, p, np;
+        if (img_count) cache = (RhiTexture *)calloc(img_count, sizeof(RhiTexture));  /* id 0 = uncached */
         for (k = 0; k < n; k++) {
             JsonValue *prims = json_member(json_index(meshes, k), "primitives");
             np = json_count(prims);
             for (p = 0; p < np; p++) {
-                Mesh m;
-                if (build_primitive(g, bin, bin_len, json_index(prims, p), &m)) {
-                    out->meshes[written++] = m;
+                JsonValue *prim = json_index(prims, p);
+                Mesh       m;
+                if (build_primitive(g, bin, bin_len, prim, &m)) {
+                    int mat_idx = (int)json_number(json_member(prim, "material"), -1.0);
+                    out->parts[written].mesh = m;
+                    if (cache) {
+                        out->parts[written].albedo = get_albedo(g, bin, bin_len, mat_idx, cache, img_count);
+                    } else {
+                        out->parts[written].albedo.id = 0;   /* no images -> no albedo */
+                    }
+                    written++;
                 }
             }
         }
+        free(cache);                          /* CPU bookkeeping; the GPU textures persist */
     }
-    out->mesh_count = written;
+    out->count = written;
 
     json_free(g);
     free(buf);
@@ -251,7 +306,7 @@ sol_bool glb_load(const char *path, GlbModel *out) {
 }
 
 void glb_free(GlbModel *out) {
-    free(out->meshes);
-    out->meshes = (Mesh *)0;
-    out->mesh_count = 0;
+    free(out->parts);
+    out->parts = (GlbPart *)0;
+    out->count = 0;
 }

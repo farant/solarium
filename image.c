@@ -39,6 +39,20 @@ sol_bool image_load(const char *path, Image *out) {
     return SOL_TRUE;
 }
 
+sol_bool image_load_from_memory(const unsigned char *data, int len, Image *out) {
+    int            w, h, ch;
+    unsigned char *px;
+
+    stbi_set_flip_vertically_on_load(1);
+    px = stbi_load_from_memory(data, len, &w, &h, &ch, 4);   /* force RGBA8 */
+    if (!px) return SOL_FALSE;
+
+    out->pixels = px;
+    out->w = w;
+    out->h = h;
+    return SOL_TRUE;
+}
+
 void image_free(Image *img) {
     if (img->pixels) {
         stbi_image_free(img->pixels);

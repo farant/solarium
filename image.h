@@ -11,7 +11,8 @@ typedef struct {
     int            w, h;
 } Image;
 
-sol_bool image_load(const char *path, Image *out);   /* SOL_FALSE on failure */
+sol_bool image_load(const char *path, Image *out);                          /* from a file */
+sol_bool image_load_from_memory(const unsigned char *data, int len, Image *out);  /* embedded bytes */
 void     image_free(Image *img);
 
 #endif /* IMAGE_H */
