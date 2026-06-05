@@ -10,6 +10,7 @@
 #include "sol_math.h"
 #include "camera.h"
 #include "image.h"
+#include "glb.h"
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -89,6 +90,25 @@ typedef struct {
     sol_bool    lmb_was_down;
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
 } AppState;
+
+/* Union AABB over all of a model's meshes (local space) — for auto-fitting an
+   arbitrary-scale imported asset to the room. */
+static Aabb union_bounds(const GlbModel *model) {
+    Aabb    b;
+    sol_u32 m;
+    b.min = vec3_make( 1e30f,  1e30f,  1e30f);
+    b.max = vec3_make(-1e30f, -1e30f, -1e30f);
+    for (m = 0; m < model->mesh_count; m++) {
+        Aabb e = model->meshes[m].bounds;
+        if (e.min.x < b.min.x) b.min.x = e.min.x;
+        if (e.min.y < b.min.y) b.min.y = e.min.y;
+        if (e.min.z < b.min.z) b.min.z = e.min.z;
+        if (e.max.x > b.max.x) b.max.x = e.max.x;
+        if (e.max.y > b.max.y) b.max.y = e.max.y;
+        if (e.max.z > b.max.z) b.max.z = e.max.z;
+    }
+    return b;
+}
 
 /* World-space position of an object (its world matrix's translation column),
    falling back to the scene focus if the handle is gone. */
@@ -317,6 +337,33 @@ static int init_scene(AppState *state) {
               vec3_make(-2.0f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     scene_texture_set(&state->scene, page, state->albedo_tex);
     state->page_handle = page;
+
+    /* item 6b: load a real glTF model, auto-fit it to the room, stand it up */
+    {
+        GlbModel model;
+        if (glb_load("book.glb", &model)) {
+            Aabb    b      = union_bounds(&model);
+            vec3    center = vec3_scale(vec3_add(b.min, b.max), 0.5f);
+            vec3    ext    = vec3_sub(b.max, b.min);
+            float   maxdim = ext.x;
+            float   scale;
+            vec3    pos;
+            sol_u32 m;
+            if (ext.y > maxdim) maxdim = ext.y;
+            if (ext.z > maxdim) maxdim = ext.z;
+            scale = (maxdim > 0.0001f) ? (1.2f / maxdim) : 1.0f;     /* longest side -> ~1.2 units */
+            pos   = vec3_sub(vec3_make(2.0f, 1.0f, 0.0f), vec3_scale(center, scale));  /* center it there */
+            printf("glb: book.glb -> %u mesh(es), autoscale %.4f\n",
+                   (unsigned)model.mesh_count, scale);
+            for (m = 0; m < model.mesh_count; m++) {
+                scene_add(&state->scene, 0, model.meshes[m], pos, quat_identity(),
+                          vec3_make(scale, scale, scale));
+            }
+            glb_free(&model);
+        } else {
+            fprintf(stderr, "glb load failed: book.glb\n");
+        }
+    }
 
     /* geometry by reference: the asset name regenerates the mesh on load */
     scene_mesh_ref_set(&state->scene, floor, "grid");
