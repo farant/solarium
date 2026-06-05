@@ -51,7 +51,7 @@ static const char *FRAGMENT_SRC =
     "    vec3 V = normalize(uViewPos - vWorldPos);\n"          /* direction TO the camera */
     "    vec3 H = normalize(L + V);\n"                         /* half-vector */
     "\n"
-    "    vec3 lightColor = vec3(1.0, 0.98, 0.92);\n"
+    "    vec3 lightColor = vec3(1.0, 0.98, 0.92) * 2.0;\n"    /* >1 intensity: real HDR highlights for ACES to roll off (temporary until item-9 lights) */
     "    vec3 baseColor  = vec3(0.85, 0.45, 0.35);\n"          /* the object's color */
     "    vec3 albedo = (uUseTexture > 0.5)\n"
     "                ? texture(uTexture, vUV).rgb\n"           /* sRGB tex -> linear on sample */
@@ -84,12 +84,16 @@ static const char *POST_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vUV;\n"
     "uniform sampler2D uHdr;\n"
+    "uniform float uExposure;\n"
     "out vec4 FragColor;\n"
+    "vec3 aces(vec3 x) {\n"                                  /* Narkowicz ACES filmic fit */
+    "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
+    "}\n"
     "void main() {\n"
-    "    vec3 hdr = texture(uHdr, vUV).rgb;\n"               /* linear scene color */
-    "    /* 7c inserts ACES tonemapping here */\n"
-    "    vec3 ldr = pow(hdr, vec3(1.0 / 2.2));\n"            /* linear -> sRGB for display */
-    "    FragColor = vec4(ldr, 1.0);\n"
+    "    vec3 hdr    = texture(uHdr, vUV).rgb * uExposure;\n"  /* linear radiance * exposure */
+    "    vec3 mapped = aces(hdr);\n"                           /* tonemap: roll off HDR -> [0,1] */
+    "    vec3 ldr    = pow(mapped, vec3(1.0 / 2.2));\n"        /* linear -> sRGB for display */
+    "    FragColor   = vec4(ldr, 1.0);\n"
     "}\n";
 
 typedef struct {
@@ -106,6 +110,7 @@ typedef struct {
     /* offscreen HDR pass (item 7) */
     RhiRenderTarget hdr_rt;          /* scene renders here, then to the window */
     int             rt_width, rt_height;  /* size hdr_rt was built at; recreate on resize */
+    float           exposure;        /* HDR exposure (item 7c); '[' / ']' scrub it live */
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -329,6 +334,18 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     if (f_now && !st->f_was_down && st->camera.mode != CAMERA_ORBIT)
         st->camera.mode = (st->camera.mode == CAMERA_WALK) ? CAMERA_FLY : CAMERA_WALK;
     st->f_was_down = f_now;
+
+    /* exposure scrub: '[' down, ']' up (held; dt-scaled), with a live title readout */
+    {
+        float erate = (float)dt * 1.5f;
+        char  title[48];
+        if (glfwGetKey(w, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) st->exposure += erate;
+        if (glfwGetKey(w, GLFW_KEY_LEFT_BRACKET)  == GLFW_PRESS) st->exposure -= erate;
+        if (st->exposure < 0.1f) st->exposure = 0.1f;
+        if (st->exposure > 8.0f) st->exposure = 8.0f;
+        sprintf(title, "solarium  exposure %.2f", (double)st->exposure);
+        glfwSetWindowTitle(w, title);
+    }
 }
 
 /* Decode a page image with stb (via image.c) and upload it as an sRGB texture.
@@ -454,6 +471,7 @@ static int init_scene(AppState *state) {
     camera_init(&state->camera, vec3_make(0.0f, 2.5f, 5.0f),
                 sol_radians(-90.0f), sol_radians(-20.0f));
     state->f_was_down = SOL_FALSE;
+    state->exposure   = 1.0f;
 
     printf("scene: %u objects (1 empty anchor)\n", (unsigned)state->scene.count);
     printf("box meta: title=\"%s\", author=\"%s\"; %u relations\n",
@@ -562,6 +580,7 @@ static void render(AppState *state) {
         rhi_set_pipeline(state->post_pipeline);
         rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
         rhi_set_uniform_int("uHdr", 0);                 /* sampler -> texture unit 0 */
+        rhi_set_uniform_float("uExposure", state->exposure);
         rhi_draw(0, 3);
     }
 }
