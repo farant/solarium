@@ -484,14 +484,25 @@ recursive-descent JSON parser (+jsontest); 6b GLB container + accessor decode �
 decode, cached by image index); 6d node-tree traversal with world transforms BAKED into
 geometry (book + candle stand in the room), OBJ retired. Static subset only; MR/normal maps
 parsed-path not used until Item 8.
+**Item 7 complete** — offscreen render targets + HDR pipeline (first multi-pass): 7a RHI
+render-target abstraction (FBO + RGBA16F color texture + depth renderbuffer, completeness-
+checked) behind RhiRenderTarget; rhi_begin_frame generalized to rhi_begin_pass/rhi_end_pass
+(a zero target = the window, backend queries its own size); scene renders offscreen then a
+blit copies to screen (image unchanged). 7b fullscreen-triangle post pass (gl_VertexID, no
+vertex buffer) replaces the blit and the gamma encode moves out of the object shader into it
+(HDR buffer now holds true linear radiance); blit retired. 7c Narkowicz ACES filmic tonemap
++ live exposure uniform ('[' / ']', shown in the window title), light bumped 2x for real HDR
+content. All framebuffer GL stays in rhi_gl.c (§1.2). Plus a side-fix: multi-part glTF imports
+now group under one empty anchor so the whole model is one selectable object (highlight by
+group root). **Next: Item 8 — PBR materials (Cook-Torrance metallic-roughness, normal matrix,
+read glTF MR maps; honor the sRGB-vs-linear sampling distinction).**
 **Item 5 complete (★ first dogfoodable palace)** — textures + a readable surface: 5a fleshed
 out RhiTexture (create/bind/sample, handle table) with a color-space format enum
 (RHI_TEX_SRGB8 vs RHI_TEX_RGBA8) + rhi_set_uniform_int, shader samples an albedo; 5b stb_image
 decode (image.c quarantined TU, vendor/stb_image.h, §1.3-amended) → sRGB texture; 5c per-object
 material (SceneObject.texture + scene_texture_set) + the parchment reading quad (purpose-built
 upright vertical quad); 5d click the page → camera_focus frames a head-on reading view. See
-SCENE_FORMAT.md and git history. **Next: Item 7 — offscreen render targets + HDR pipeline
-(first multi-pass; moves the gamma encode out of the object shader into a final pass).**
+SCENE_FORMAT.md and git history.
 
 Known boundaries deferred out of Item 2 (not bugs — scoped follow-ups):
 - `scene_load` restores `mesh_ref` (the name) but not GL geometry; wiring ref→generator
