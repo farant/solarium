@@ -80,13 +80,8 @@ void rhi_draw(int first_vertex, int vertex_count);
 void rhi_draw_indexed(int first_index, int index_count);
 
 /* The render target's color attachment as a bindable texture, so a later pass
-   can sample what was just rendered (used by the tonemap pass in 7b). */
+   can sample what was just rendered (the fullscreen tonemap pass samples this). */
 RhiTexture rhi_render_target_texture(RhiRenderTarget rt);
-
-/* Copy a render target's color straight to the window — a raw GL blit, no shader.
-   Temporary scaffolding for 7a (proves the FBO round-trip); the tonemap pass in
-   7b supersedes it. */
-void rhi_blit_to_screen(RhiRenderTarget rt);
 
 void rhi_present(void);
 

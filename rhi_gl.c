@@ -316,18 +316,6 @@ RhiTexture rhi_render_target_texture(RhiRenderTarget rt) {
     return g_render_targets[rt.id - 1].color;
 }
 
-void rhi_blit_to_screen(RhiRenderTarget rt) {
-    const GlRenderTarget *r = &g_render_targets[rt.id - 1];
-    int w, h;
-    glfwGetFramebufferSize(g_window, &w, &h);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);  /* copy FROM our FBO ... */
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);        /* ... TO the window     */
-    glBlitFramebuffer(0, 0, r->width, r->height, 0, 0, w, h,
-                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    gl_check("rhi_blit_to_screen");
-}
-
 /* ---- per frame ---- */
 void rhi_begin_pass(RhiRenderTarget target, float r, float g, float b, float a) {
     int w, h;

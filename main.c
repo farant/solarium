@@ -64,14 +64,38 @@ static const char *FRAGMENT_SRC =
     "    vec3 color = albedo * ambient\n"
     "               + albedo * lightColor * diff\n"
     "               + lightColor * spec;\n"                    /* Blinn-Phong highlight */
-    "    color = pow(color, vec3(1.0 / 2.2));\n"              /* linear -> sRGB for display */
-    "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* gold when selected */
-    "    FragColor = vec4(color, 1.0);\n"
+    "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* gold when selected (linear) */
+    "    FragColor = vec4(color, 1.0);\n"                     /* TRUE LINEAR -> the HDR buffer; gamma is in the post pass */
+    "}\n";
+
+/* --- the fullscreen tonemap/encode pass (item 7b): samples the HDR buffer and
+   writes the display image to the window. The vertex shader synthesizes one
+   screen-covering triangle from gl_VertexID, so it needs no vertex buffer. --- */
+static const char *POST_VERTEX_SRC =
+    "#version 330 core\n"
+    "out vec2 vUV;\n"
+    "void main() {\n"
+    "    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"  /* (0,0) (2,0) (0,2) */
+    "    vUV = p;\n"                                                  /* 0..2, interps 0..1 on screen */
+    "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"             /* (-1,-1) (3,-1) (-1,3) */
+    "}\n";
+
+static const char *POST_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uHdr;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    vec3 hdr = texture(uHdr, vUV).rgb;\n"               /* linear scene color */
+    "    /* 7c inserts ACES tonemapping here */\n"
+    "    vec3 ldr = pow(hdr, vec3(1.0 / 2.2));\n"            /* linear -> sRGB for display */
+    "    FragColor = vec4(ldr, 1.0);\n"
     "}\n";
 
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
+    RhiPipeline post_pipeline;  /* fullscreen tonemap/encode pass (item 7b) */
     RhiTexture  albedo_tex;     /* decoded page image (item 5b); 0 if load failed */
     Scene       scene;
     sol_u32     box_handle;     /* so update() can animate the box object */
@@ -324,6 +348,20 @@ static int init_scene(AppState *state) {
     desc.depth_test = SOL_TRUE;
     state->pipeline = rhi_create_pipeline(&desc);
 
+    /* the fullscreen post pass: no vertex attributes (gl_VertexID builds the
+       triangle), no depth test (it's a screen-space overlay) */
+    {
+        RhiShader       post_shader;
+        RhiPipelineDesc post_desc;
+        post_shader = rhi_create_shader(POST_VERTEX_SRC, POST_FRAGMENT_SRC);
+        if (!post_shader.id) return 0;
+        post_desc.shader     = post_shader;
+        post_desc.attr_count = 0;
+        post_desc.stride     = 0;
+        post_desc.depth_test = SOL_FALSE;
+        state->post_pipeline = rhi_create_pipeline(&post_desc);
+    }
+
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* meshes (shared assets the scene objects reference) */
@@ -490,9 +528,16 @@ static void render(AppState *state) {
 
     rhi_end_pass();
 
-    /* ---- 7a: raw-copy the HDR color to the window. No shader, no tonemap yet;
-       the fullscreen tonemap pass in 7b replaces this blit. ---- */
-    rhi_blit_to_screen(state->hdr_rt);
+    /* ---- pass 2: fullscreen pass to the window — sample the HDR buffer, encode
+       linear->sRGB (7c adds the tonemap). One triangle, no vertex buffer. ---- */
+    {
+        RhiRenderTarget screen = {0};   /* {0} = default framebuffer (declaration init, not a compound literal) */
+        rhi_begin_pass(screen, 0.0f, 0.0f, 0.0f, 1.0f);
+        rhi_set_pipeline(state->post_pipeline);
+        rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
+        rhi_set_uniform_int("uHdr", 0);                 /* sampler -> texture unit 0 */
+        rhi_draw(0, 3);
+    }
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
