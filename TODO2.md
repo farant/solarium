@@ -496,8 +496,21 @@ vertex buffer) replaces the blit and the gamma encode moves out of the object sh
 + live exposure uniform ('[' / ']', shown in the window title), light bumped 2x for real HDR
 content. All framebuffer GL stays in rhi_gl.c (§1.2). Plus a side-fix: multi-part glTF imports
 now group under one empty anchor so the whole model is one selectable object (highlight by
-group root). **Next: Item 8 — PBR materials (Cook-Torrance metallic-roughness, normal matrix,
-read glTF MR maps; honor the sRGB-vs-linear sampling distinction).**
+group root).
+**Item 8 complete** — PBR materials (Cook-Torrance metallic-roughness; replaces Blinn-Phong):
+8a swapped in the BRDF (GGX D / Smith-Schlick G / Schlick Fresnel F, Lambert·(1−metallic),
+F0=mix(0.04,albedo,metallic)) + a real inverse-transpose normal matrix (new mat3 type +
+mat3_normal_matrix + rhi_set_uniform_mat3) + the Material struct (material.h/.c; SceneObject.texture
+→ .material; glb reads metallic/roughness/baseColor factors). 8b read the metallicRoughnessTexture
+(G=rough, B=metal) per-pixel — get_albedo generalized to decode_texture(tex-ref, color-space);
+added sword.glb (real ORM asset: blade metal, grip dielectric). 8c occlusionTexture (R=AO) → ambient
+term (ORM map fully consumed). 8d normal mapping: 8d-1 grew the canonical vertex 8→12 floats
+(+tangent4) with mb_compute_tangents (UV-gradient, run in mesh_from_builder; §1.6 amended) +
+RHI_FORMAT_FLOAT4 — render-identical; 8d-2 sampled the normalTexture through a TBN (candle gains
+relief). **CRITICAL color-space rule honored: albedo sRGB; MR/AO/normal linear.** Texture units:
+0 albedo, 1 MR, 2 AO, 3 normal. Plus a showcase-staging commit (center-anchored glTF imports +
+a precessing sword). **Next: Item 9 — shadow mapping (one spot light; depth-only pass reusing the
+Item-7 RT abstraction; depth bias + 3×3 PCF; explicitly one light, no cascades/cube shadows).**
 **Item 5 complete (★ first dogfoodable palace)** — textures + a readable surface: 5a fleshed
 out RhiTexture (create/bind/sample, handle table) with a color-space format enum
 (RHI_TEX_SRGB8 vs RHI_TEX_RGBA8) + rhi_set_uniform_int, shader samples an albedo; 5b stb_image
