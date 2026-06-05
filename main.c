@@ -427,8 +427,10 @@ static int init_scene(AppState *state) {
     desc.attrs[1].offset = 3 * sizeof(float);
     desc.attrs[2].location = 2; desc.attrs[2].format = RHI_FORMAT_FLOAT2;
     desc.attrs[2].offset = 6 * sizeof(float);
-    desc.attr_count = 3;
-    desc.stride     = 8 * sizeof(float);
+    desc.attrs[3].location = 3; desc.attrs[3].format = RHI_FORMAT_FLOAT4;
+    desc.attrs[3].offset = 8 * sizeof(float);   /* tangent (item 8d); unused by the shader until 8d-2 */
+    desc.attr_count = 4;
+    desc.stride     = 12 * sizeof(float);
     desc.depth_test = SOL_TRUE;
     state->pipeline = rhi_create_pipeline(&desc);
 

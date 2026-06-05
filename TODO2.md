@@ -153,13 +153,15 @@ Do not build these now. Just do not foreclose them:
 To prevent re-tooling at items 5/6/8, fix the interleaved vertex layout now:
 
 ```
-position (3 floats), normal (3 floats), uv (2 floats)  =  8 floats / 32 bytes
+position (3 floats), normal (3 floats), uv (2 floats), tangent (4 floats)  =  12 floats / 48 bytes
 ```
 
-- Tangent (4 floats) is **reserved** for normal-mapped PBR but **not added yet**; design the
-  mesh builder and RHI attribute setup so adding it later is a clean extension, not a rewrite.
+- Tangent (4 floats: xyz + handedness w) **added in item 8d** for normal-mapped PBR — the clean
+  extension the layout was designed for. Computed by `mb_compute_tangents` (the mesh-builder
+  chokepoint, run inside `mesh_from_builder`), at attribute location 3, format `RHI_FORMAT_FLOAT4`.
+  *(Originally 8 floats / 32 bytes through items 1–7; tangent was reserved-but-unbuilt until 8d.)*
 - **Index type is `sol_u32`** everywhere.
-- The current shader's vertex inputs (`aPos`, `aNormal`) extend to include `aUV` at location 2.
+- Shader vertex inputs: `aPos` (0), `aNormal` (1), `aUV` (2), `aTangent` (3).
 
 ### 1.7 Definition of done (applies to every item)
 

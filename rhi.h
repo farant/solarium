@@ -17,7 +17,7 @@ typedef struct { sol_u32 id; } RhiRenderTarget;
 
 /* ---- enums ---- */
 typedef enum { RHI_BUFFER_VERTEX, RHI_BUFFER_INDEX } RhiBufferType;
-typedef enum { RHI_FORMAT_FLOAT2, RHI_FORMAT_FLOAT3 } RhiVertexFormat;
+typedef enum { RHI_FORMAT_FLOAT2, RHI_FORMAT_FLOAT3, RHI_FORMAT_FLOAT4 } RhiVertexFormat;
 
 /* Color space / precision is part of a texture's identity (decided at creation,
    per §1.5):

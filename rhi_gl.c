@@ -122,7 +122,9 @@ static GLuint link_program(GLuint vs, GLuint fs) {
 }
 
 static int format_components(RhiVertexFormat f) {
-    return (f == RHI_FORMAT_FLOAT2) ? 2 : 3;
+    if (f == RHI_FORMAT_FLOAT2) return 2;
+    if (f == RHI_FORMAT_FLOAT4) return 4;
+    return 3;
 }
 
 /* ---- lifecycle ---- */

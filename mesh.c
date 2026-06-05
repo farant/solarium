@@ -4,6 +4,7 @@
 #include "mesh.h"
 
 #include <stdlib.h>
+#include <math.h>
 
 void mb_init(MeshBuilder *b) {
     b->vertices = NULL; b->vertex_count = 0; b->vertex_cap = 0;
@@ -20,12 +21,14 @@ sol_u32 mb_push_vertex(MeshBuilder *b, sol_f32 px, sol_f32 py, sol_f32 pz,
     sol_u32 base;
     if (b->vertex_count == b->vertex_cap) {
         b->vertex_cap = b->vertex_cap ? b->vertex_cap * 2 : 64;
-        b->vertices = realloc(b->vertices, (size_t)b->vertex_cap * 8 * sizeof(sol_f32));
+        b->vertices = realloc(b->vertices, (size_t)b->vertex_cap * 12 * sizeof(sol_f32));
     }
-    base = b->vertex_count * 8;
+    base = b->vertex_count * 12;
     b->vertices[base+0] = px; b->vertices[base+1] = py; b->vertices[base+2] = pz;
     b->vertices[base+3] = nx; b->vertices[base+4] = ny; b->vertices[base+5] = nz;
     b->vertices[base+6] = u;  b->vertices[base+7] = v;
+    b->vertices[base+8] = 0.0f; b->vertices[base+9]  = 0.0f;    /* tangent: filled later */
+    b->vertices[base+10]= 0.0f; b->vertices[base+11] = 0.0f;    /* by mb_compute_tangents */
     return b->vertex_count++;                 /* index of the vertex just added */
 }
 
@@ -106,15 +109,75 @@ void make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d) {
     make_grid(b, w, d, 1);   /* the degenerate grid: a single quad */
 }
 
-Mesh mesh_from_builder(const MeshBuilder *b) {
+/* Per-vertex tangents from the UV gradient: for each triangle, solve for the
+   world direction of +U (tangent) and +V (bitangent), accumulate onto its 3
+   vertices, then per vertex Gram-Schmidt against the normal, normalize, and
+   record handedness w (= sign of dot(cross(N,T), bitangent)) for B=cross(N,T)*w. */
+void mb_compute_tangents(MeshBuilder *b) {
+    sol_f32 *tan, *bitan;
+    sol_u32  i, v;
+
+    if (b->vertex_count == 0) return;
+    tan   = (sol_f32 *)calloc((size_t)b->vertex_count * 3, sizeof(sol_f32));
+    bitan = (sol_f32 *)calloc((size_t)b->vertex_count * 3, sizeof(sol_f32));
+    if (!tan || !bitan) { free(tan); free(bitan); return; }
+
+    for (i = 0; i + 2 < b->index_count; i += 3) {
+        sol_u32  ix[3];
+        int      k;
+        sol_f32 *p0 = &b->vertices[b->indices[i]   * 12];
+        sol_f32 *p1 = &b->vertices[b->indices[i+1] * 12];
+        sol_f32 *p2 = &b->vertices[b->indices[i+2] * 12];
+        sol_f32  e1x=p1[0]-p0[0], e1y=p1[1]-p0[1], e1z=p1[2]-p0[2];   /* edges */
+        sol_f32  e2x=p2[0]-p0[0], e2y=p2[1]-p0[1], e2z=p2[2]-p0[2];
+        sol_f32  du1=p1[6]-p0[6], dv1=p1[7]-p0[7];                    /* UV deltas */
+        sol_f32  du2=p2[6]-p0[6], dv2=p2[7]-p0[7];
+        sol_f32  det=du1*dv2 - du2*dv1, f, tx,ty,tz, bx,by,bz;
+        if (det > -1e-12f && det < 1e-12f) continue;                 /* degenerate UVs */
+        f = 1.0f / det;
+        tx=f*(dv2*e1x - dv1*e2x); ty=f*(dv2*e1y - dv1*e2y); tz=f*(dv2*e1z - dv1*e2z);
+        bx=f*(du1*e2x - du2*e1x); by=f*(du1*e2y - du2*e1y); bz=f*(du1*e2z - du2*e1z);
+        ix[0]=b->indices[i]; ix[1]=b->indices[i+1]; ix[2]=b->indices[i+2];
+        for (k = 0; k < 3; k++) {
+            sol_u32 j = ix[k];
+            tan[j*3+0]+=tx;   tan[j*3+1]+=ty;   tan[j*3+2]+=tz;
+            bitan[j*3+0]+=bx; bitan[j*3+1]+=by; bitan[j*3+2]+=bz;
+        }
+    }
+
+    for (v = 0; v < b->vertex_count; v++) {
+        sol_f32 *vert = &b->vertices[v*12];
+        sol_f32  nx=vert[3], ny=vert[4], nz=vert[5];
+        sol_f32  tx=tan[v*3+0], ty=tan[v*3+1], tz=tan[v*3+2];
+        sol_f32  ndt, len, cx, cy, cz, w;
+        ndt = nx*tx + ny*ty + nz*tz;                                 /* Gram-Schmidt vs N */
+        tx -= nx*ndt; ty -= ny*ndt; tz -= nz*ndt;
+        len = (sol_f32)sqrt((double)(tx*tx + ty*ty + tz*tz));
+        if (len > 1e-8f) { tx/=len; ty/=len; tz/=len; }
+        else {                                                       /* no usable UVs: any perp to N */
+            if (nx*nx < 0.9f) { tx=1.0f-nx*nx; ty=-nx*ny; tz=-nx*nz; }
+            else              { tx=-ny*nx; ty=1.0f-ny*ny; tz=-ny*nz; }
+            len = (sol_f32)sqrt((double)(tx*tx + ty*ty + tz*tz));
+            if (len > 1e-8f) { tx/=len; ty/=len; tz/=len; }
+        }
+        cx = ny*tz - nz*ty; cy = nz*tx - nx*tz; cz = nx*ty - ny*tx;  /* cross(N,T) */
+        w  = (cx*bitan[v*3+0] + cy*bitan[v*3+1] + cz*bitan[v*3+2]) < 0.0f ? -1.0f : 1.0f;
+        vert[8]=tx; vert[9]=ty; vert[10]=tz; vert[11]=w;
+    }
+
+    free(tan); free(bitan);
+}
+
+Mesh mesh_from_builder(MeshBuilder *b) {
     Mesh m;
+    mb_compute_tangents(b);                  /* finalize tangents before upload */
     m.vbuffer = rhi_create_buffer(RHI_BUFFER_VERTEX, b->vertices,
-                    (size_t)b->vertex_count * 8 * sizeof(sol_f32));
+                    (size_t)b->vertex_count * 12 * sizeof(sol_f32));
     m.ibuffer = rhi_create_buffer(RHI_BUFFER_INDEX, b->indices,
                     (size_t)b->index_count * sizeof(sol_u32));
     m.index_count = (int)b->index_count;
 
-    /* local-space AABB over the vertex positions (floats [i*8 + 0..2]) */
+    /* local-space AABB over the vertex positions (floats [i*12 + 0..2]) */
     if (b->vertex_count == 0) {
         m.bounds.min.x = m.bounds.min.y = m.bounds.min.z = 0.0f;
         m.bounds.max = m.bounds.min;
@@ -125,7 +188,7 @@ Mesh mesh_from_builder(const MeshBuilder *b) {
         miny = maxy = b->vertices[1];
         minz = maxz = b->vertices[2];
         for (i = 1; i < b->vertex_count; i++) {
-            sol_f32 x = b->vertices[i*8+0], y = b->vertices[i*8+1], z = b->vertices[i*8+2];
+            sol_f32 x = b->vertices[i*12+0], y = b->vertices[i*12+1], z = b->vertices[i*12+2];
             if (x < minx) minx = x;  if (x > maxx) maxx = x;
             if (y < miny) miny = y;  if (y > maxy) maxy = y;
             if (z < minz) minz = z;  if (z > maxz) maxz = z;
