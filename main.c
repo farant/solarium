@@ -150,6 +150,8 @@ typedef struct {
     sol_u32     box_handle;     /* so update() can animate the box object */
     sol_u32     anchor_handle;  /* the empty the box is parented to */
     sol_u32     page_handle;    /* the readable parchment surface (item 5d) */
+    sol_u32     sword_handle;   /* the showcase sword: stood upright, spun in update() */
+    sol_u32     sword_precess_handle;  /* invisible anchor the sword orbits (precession) */
     float       angle;
     Camera      camera;
     /* offscreen HDR pass (item 7) */
@@ -188,15 +190,17 @@ static Aabb union_bounds(const GlbModel *model) {
 }
 
 /* Load a glTF .glb, auto-fit it (longest side ~1.2 units), and stand it on the
-   floor centered at (x,z). Node transforms are already baked by the loader. */
-static void add_glb_to_scene(AppState *state, const char *path, float x, float z) {
+   floor centered at (x,z). Node transforms are already baked by the loader.
+   Returns the group anchor's handle (0 on failure) so the caller can re-pose it. */
+static sol_u32 add_glb_to_scene(AppState *state, const char *path, float x, float z) {
     GlbModel model;
     Aabb     b;
-    vec3     center, ext, pos;
+    vec3     center, ext;
     float    maxdim, scale;
-    sol_u32  m;
+    sol_u32  m, anchor;
+    Mesh     empty = {0};
 
-    if (!glb_load(path, &model)) { fprintf(stderr, "glb load failed: %s\n", path); return; }
+    if (!glb_load(path, &model)) { fprintf(stderr, "glb load failed: %s\n", path); return 0; }
 
     b      = union_bounds(&model);
     center = vec3_scale(vec3_add(b.min, b.max), 0.5f);
@@ -205,25 +209,24 @@ static void add_glb_to_scene(AppState *state, const char *path, float x, float z
     if (ext.y > maxdim) maxdim = ext.y;
     if (ext.z > maxdim) maxdim = ext.z;
     scale  = (maxdim > 0.0001f) ? (1.2f / maxdim) : 1.0f;
-    pos    = vec3_make(x - scale * center.x, -scale * b.min.y, z - scale * center.z);  /* base on floor */
 
     printf("glb: %s -> %u part(s), autoscale %.4f\n", path, (unsigned)model.count, scale);
 
-    /* group the parts under one empty anchor so the model is a single selectable
-       object: the anchor carries the fit transform (pos + scale); the parts are
-       its children at local identity, so each part's WORLD matrix is unchanged. */
-    {
-        Mesh    empty  = {0};
-        sol_u32 anchor = scene_add(&state->scene, 0, empty, pos,
-                                   quat_identity(), vec3_make(scale, scale, scale));
-        for (m = 0; m < model.count; m++) {
-            sol_u32 h = scene_add(&state->scene, anchor, model.parts[m].mesh,
-                                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(),
-                                  vec3_make(1.0f, 1.0f, 1.0f));
-            scene_material_set(&state->scene, h, model.parts[m].material);
-        }
+    /* group the parts under one empty anchor placed at the model's CENTER (so the
+       anchor's rotation pivots the model in place); the anchor's y lifts the model
+       so it sits on the floor at (x,z). Parts are children offset by -center, so
+       each part's WORLD matrix is unchanged from a corner-anchored layout. */
+    anchor = scene_add(&state->scene, 0, empty,
+                       vec3_make(x, scale * (center.y - b.min.y), z),
+                       quat_identity(), vec3_make(scale, scale, scale));
+    for (m = 0; m < model.count; m++) {
+        sol_u32 h = scene_add(&state->scene, anchor, model.parts[m].mesh,
+                              vec3_make(-center.x, -center.y, -center.z),
+                              quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_material_set(&state->scene, h, model.parts[m].material);
     }
     glb_free(&model);
+    return anchor;
 }
 
 /* World-space position of an object (its world matrix's translation column),
@@ -515,8 +518,27 @@ static int init_scene(AppState *state) {
 
     /* item 6: real glTF models standing in the room */
     add_glb_to_scene(state, "book.glb",   2.0f,  0.0f);
-    add_glb_to_scene(state, "candle.glb", 0.0f,  2.0f);   /* front-centre, clear of the page */
-    add_glb_to_scene(state, "sword.glb", -1.5f, -1.5f);   /* item 8b: real metallic-roughness map */
+    add_glb_to_scene(state, "candle.glb", 2.0f,  2.0f);   /* corner, clear of the centred sword */
+
+    /* the showcase sword (item 8b/8d): it orbits an invisible point at a tight
+       radius, leaning 15deg out, while spinning on its own long axis — so the
+       metal sweeps the directional light. An outer 'precession' anchor does the
+       orbit; the sword group hangs off it at a small radial offset (update() sets
+       the precession spin + the sword's standup/lean/axial-spin). */
+    {
+        Mesh        empty   = {0};
+        sol_u32     precess = scene_add(&state->scene, 0, empty,
+                                        vec3_make(0.0f, 1.3f, 0.0f),   /* the invisible point */
+                                        quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        SceneObject *sw;
+        state->sword_precess_handle = precess;
+        state->sword_handle = add_glb_to_scene(state, "sword.glb", 0.0f, 0.0f);
+        sw = scene_get(&state->scene, state->sword_handle);
+        if (sw) {
+            sw->parent = precess;                       /* orbit the precession anchor */
+            sw->pos    = vec3_make(0.3f, 0.0f, 0.0f);   /* tight radius (the cube's is 1.5) */
+        }
+    }
 
     /* geometry by reference: the asset name regenerates the mesh on load */
     scene_mesh_ref_set(&state->scene, floor, "grid");
@@ -549,7 +571,7 @@ static int init_scene(AppState *state) {
 }
 
 static void update(AppState *state, double dt) {
-    SceneObject *box, *anchor;
+    SceneObject *box, *anchor, *sword;
     quat qy, qx;
 
     state->angle += (float)dt * 0.8f;
@@ -564,6 +586,24 @@ static void update(AppState *state, double dt) {
         qy = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle * 1.5f);
         qx = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), state->angle * 0.75f);
         box->rot = quat_normalize(quat_mul(qy, qx));
+    }
+
+    /* the sword's precession: orbit the invisible point (tight radius) */
+    {
+        SceneObject *precess = scene_get(&state->scene, state->sword_precess_handle);
+        if (precess) precess->rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                                         state->angle * 0.5f);
+    }
+
+    /* the sword itself: stand upright (blade +Z -> world +Y), spin on that long
+       axis, then lean 15deg out (toward +X = radially outward as the parent
+       precesses). Compose tilt * spin * standup (applied standup -> spin -> tilt). */
+    sword = scene_get(&state->scene, state->sword_handle);
+    if (sword) {
+        quat standup = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), sol_radians(-90.0f));
+        quat spin    = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle * 0.8f);
+        quat tilt    = quat_from_axis_angle(vec3_make(0.0f, 0.0f, 1.0f), sol_radians(-15.0f));
+        sword->rot = quat_normalize(quat_mul(quat_mul(tilt, spin), standup));
     }
 }
 
