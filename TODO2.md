@@ -509,8 +509,16 @@ term (ORM map fully consumed). 8d normal mapping: 8d-1 grew the canonical vertex
 RHI_FORMAT_FLOAT4 — render-identical; 8d-2 sampled the normalTexture through a TBN (candle gains
 relief). **CRITICAL color-space rule honored: albedo sRGB; MR/AO/normal linear.** Texture units:
 0 albedo, 1 MR, 2 AO, 3 normal. Plus a showcase-staging commit (center-anchored glTF imports +
-a precessing sword). **Next: Item 9 — shadow mapping (one spot light; depth-only pass reusing the
-Item-7 RT abstraction; depth bias + 3×3 PCF; explicitly one light, no cascades/cube shadows).**
+a precessing sword). **Item 9 complete — shadow mapping (one spot light), which COMPLETES THE
+PHASE-2 BRIEF (items 0–9).** 9a converted the directional light to a positioned SPOT (per-fragment
+L, inverse-square attenuation, smooth cone; BRDF untouched; light defined once in AppState so the
+shadow matrix agrees). 9b built the SHADOW MAP — a depth-only render from the light's POV into a new
+RHI depth-only target (samplable depth texture, no color; rhi_create_depth_target); the spot's
+perspective frustum IS the light matrix; verified with an 'M'-toggle shadow-map inspector. 9c
+SAMPLED it in the lighting pass — slope-scaled depth bias (kills acne w/o peter-panning) + 3×3 PCF
+(soft edges); only direct light is shadowed, ambient fill untouched. Retired the Item-7 temporary
+×3 light bump. **Next phase is the owner's to architect (deferred Part-5): IBL is the natural next
+lighting rung; or the real text/reading subsystem; or baked GI.**
 **Item 5 complete (★ first dogfoodable palace)** — textures + a readable surface: 5a fleshed
 out RhiTexture (create/bind/sample, handle table) with a color-space format enum
 (RHI_TEX_SRGB8 vs RHI_TEX_RGBA8) + rhi_set_uniform_int, shader samples an albedo; 5b stb_image
