@@ -280,6 +280,43 @@ static const char *SKYBOX_CUBE_FRAGMENT_SRC =
     "    FragColor = vec4(texture(uEnvCube, dir).rgb, 1.0);\n"
     "}\n";
 
+/* --- the diffuse irradiance convolution (B2): for each output direction N (a
+   surface normal), integrate the cosine-weighted hemisphere of incoming light
+   from the env cubemap. Run once per face into a tiny 32^2 cubemap. cos*sin =
+   Lambert cosine * solid-angle Jacobian; the pi folds in the 1/pi BRDF so the
+   lighting pass is just diffuse = irradiance * albedo. --- */
+static const char *IRRADIANCE_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vNdc;\n"
+    "uniform vec3  uCamForward;\n"
+    "uniform vec3  uCamRight;\n"
+    "uniform vec3  uCamUp;\n"
+    "uniform float uTanHalfFovY;\n"
+    "uniform float uAspect;\n"
+    "uniform samplerCube uEnvCube;\n"
+    "out vec4 FragColor;\n"
+    "const float PI = 3.14159265359;\n"
+    "void main() {\n"
+    "    vec3 N = normalize(uCamForward\n"
+    "           + vNdc.x * uTanHalfFovY * uAspect * uCamRight\n"
+    "           + vNdc.y * uTanHalfFovY * uCamUp);\n"
+    "    vec3 up    = abs(N.y) < 0.999 ? vec3(0.0,1.0,0.0) : vec3(1.0,0.0,0.0);\n"
+    "    vec3 right = normalize(cross(up, N));\n"            /* tangent basis around N */
+    "    up = cross(N, right);\n"
+    "    vec3  irradiance = vec3(0.0);\n"
+    "    float nrSamples  = 0.0;\n"
+    "    float delta = 0.025;\n"
+    "    for (float phi = 0.0; phi < 2.0*PI; phi += delta)\n"
+    "        for (float theta = 0.0; theta < 0.5*PI; theta += delta) {\n"
+    "            vec3 t = vec3(sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta));\n"  /* tangent space */
+    "            vec3 w = t.x*right + t.y*up + t.z*N;\n"     /* -> world */
+    "            vec3 radiance = min(texture(uEnvCube, w).rgb, vec3(50.0));\n"  /* clamp the sun: an inf/huge sample else saturates the integral (hard step) */
+    "            irradiance += radiance * cos(theta) * sin(theta);\n"
+    "            nrSamples  += 1.0;\n"
+    "        }\n"
+    "    FragColor = vec4(PI * irradiance / nrSamples, 1.0);\n"
+    "}\n";
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
@@ -316,6 +353,10 @@ typedef struct {
     RhiPipeline skybox_pipeline;       /* fullscreen-triangle equirect draw (A2; also the equirect->cube tool) */
     RhiTexture  env_cubemap;           /* equirect baked into a cubemap (B1); 0 if none */
     RhiPipeline skybox_cube_pipeline;  /* on-screen skybox sampling the cubemap (B1) */
+    RhiTexture  irradiance_cubemap;    /* diffuse irradiance convolution (B2) */
+    RhiPipeline irradiance_pipeline;   /* the convolution pass */
+    sol_bool    show_irradiance;       /* 'I' toggles the skybox source: env vs irradiance */
+    sol_bool    i_was_down;            /* edge-detect the inspector toggle */
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -453,7 +494,7 @@ static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
    triggered so it fires once per press. */
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool f_now, tab_now, m_now, dragging, fp;
+    sol_bool f_now, tab_now, m_now, i_now, dragging, fp;
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
@@ -547,6 +588,12 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->show_shadow_map = !st->show_shadow_map;
     st->m_was_down = m_now;
 
+    /* I toggles the skybox source: env cubemap vs irradiance map (B2, edge) */
+    i_now = glfwGetKey(w, GLFW_KEY_I) == GLFW_PRESS;
+    if (i_now && !st->i_was_down && st->irradiance_cubemap.id)
+        st->show_irradiance = !st->show_irradiance;
+    st->i_was_down = i_now;
+
     /* exposure scrub: '[' down, ']' up (held; dt-scaled), with a live title readout */
     {
         float erate = (float)dt * 1.5f;
@@ -575,26 +622,29 @@ static RhiTexture load_texture(const char *path) {
     return tex;
 }
 
-#define ENV_CUBE_SIZE 1024   /* per-face resolution of the environment cubemap */
+#define ENV_CUBE_SIZE   1024   /* per-face resolution of the environment cubemap */
+#define IRRADIANCE_SIZE 32     /* irradiance is very low-frequency: tiny is plenty */
+
+/* The six cubemap face bases (B1). The (forward, up) pairs are the standard
+   cubemap convention; right = cross(fwd, up) makes dir = fwd + ndc.x*right +
+   ndc.y*up the exact inverse of how texture(cube, dir) reads each face. Shared
+   by every render-to-cubemap pass (env conversion, irradiance, later prefilter). */
+static const vec3 g_face_fwd[6] = {
+    { 1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+    { 0.0f, 1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f},
+    { 0.0f, 0.0f, 1.0f}, { 0.0f, 0.0f,-1.0f}
+};
+static const vec3 g_face_up[6] = {
+    { 0.0f,-1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f},
+    { 0.0f, 0.0f, 1.0f}, { 0.0f, 0.0f,-1.0f},
+    { 0.0f,-1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f}
+};
 
 /* Bake the equirectangular HDR into a cubemap (B1): render each of the 6 faces
-   with the equirect skybox shader, fed that face's fixed camera basis. The six
-   (forward, up) pairs are the standard cubemap convention; right = cross(fwd,up)
-   makes dir = fwd + ndc.x*right + ndc.y*up the exact inverse of how
-   texture(cube, dir) reads each face. 90deg FOV -> tan(45)=1, square aspect. */
+   with the equirect skybox shader, fed that face's fixed camera basis. 90deg
+   FOV -> tan(45)=1, square aspect. */
 static void build_env_cubemap(AppState *state) {
-    static const vec3 fwd[6] = {
-        { 1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
-        { 0.0f, 1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f},
-        { 0.0f, 0.0f, 1.0f}, { 0.0f, 0.0f,-1.0f}
-    };
-    static const vec3 up[6] = {
-        { 0.0f,-1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f},
-        { 0.0f, 0.0f, 1.0f}, { 0.0f, 0.0f,-1.0f},
-        { 0.0f,-1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f}
-    };
     int f;
-
     state->env_cubemap = rhi_create_cubemap(ENV_CUBE_SIZE, SOL_TRUE);
 
     /* the equirect skybox shader is the conversion tool: bind it + the equirect
@@ -605,15 +655,38 @@ static void build_env_cubemap(AppState *state) {
     rhi_set_uniform_float("uTanHalfFovY", 1.0f);
     rhi_set_uniform_float("uAspect",      1.0f);
     for (f = 0; f < 6; f++) {
-        vec3 r = vec3_cross(fwd[f], up[f]);
+        vec3 r = vec3_cross(g_face_fwd[f], g_face_up[f]);
         rhi_begin_cubemap_face(state->env_cubemap, f, 0, ENV_CUBE_SIZE);
-        rhi_set_uniform_vec3("uCamForward", fwd[f].x, fwd[f].y, fwd[f].z);
+        rhi_set_uniform_vec3("uCamForward", g_face_fwd[f].x, g_face_fwd[f].y, g_face_fwd[f].z);
         rhi_set_uniform_vec3("uCamRight",   r.x, r.y, r.z);
-        rhi_set_uniform_vec3("uCamUp",      up[f].x, up[f].y, up[f].z);
+        rhi_set_uniform_vec3("uCamUp",      g_face_up[f].x, g_face_up[f].y, g_face_up[f].z);
         rhi_draw(0, 3);
         rhi_end_pass();
     }
     rhi_cubemap_generate_mips(state->env_cubemap);
+}
+
+/* Convolve the env cubemap into a diffuse irradiance cubemap (B2): same per-face
+   loop, but the shader integrates the cosine-weighted hemisphere around each
+   output direction. Tiny target, no mips. */
+static void build_irradiance_map(AppState *state) {
+    int f;
+    state->irradiance_cubemap = rhi_create_cubemap(IRRADIANCE_SIZE, SOL_FALSE);
+
+    rhi_set_pipeline(state->irradiance_pipeline);
+    rhi_bind_texture(state->env_cubemap, 0);          /* the B1 cubemap is the input */
+    rhi_set_uniform_int  ("uEnvCube", 0);
+    rhi_set_uniform_float("uTanHalfFovY", 1.0f);
+    rhi_set_uniform_float("uAspect",      1.0f);
+    for (f = 0; f < 6; f++) {
+        vec3 r = vec3_cross(g_face_fwd[f], g_face_up[f]);
+        rhi_begin_cubemap_face(state->irradiance_cubemap, f, 0, IRRADIANCE_SIZE);
+        rhi_set_uniform_vec3("uCamForward", g_face_fwd[f].x, g_face_fwd[f].y, g_face_fwd[f].z);
+        rhi_set_uniform_vec3("uCamRight",   r.x, r.y, r.z);
+        rhi_set_uniform_vec3("uCamUp",      g_face_up[f].x, g_face_up[f].y, g_face_up[f].z);
+        rhi_draw(0, 3);
+        rhi_end_pass();
+    }
 }
 
 /* One-time setup: build the pipeline + meshes, populate the scene. */
@@ -707,6 +780,19 @@ static int init_scene(AppState *state) {
         cube_desc.stride     = 0;
         cube_desc.depth_test = SOL_FALSE;
         state->skybox_cube_pipeline = rhi_create_pipeline(&cube_desc);
+    }
+
+    /* the irradiance convolution pipeline (B2): fullscreen triangle, depth off */
+    {
+        RhiShader       irr_shader;
+        RhiPipelineDesc irr_desc;
+        irr_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, IRRADIANCE_FRAGMENT_SRC);
+        if (!irr_shader.id) return 0;
+        irr_desc.shader     = irr_shader;
+        irr_desc.attr_count = 0;
+        irr_desc.stride     = 0;
+        irr_desc.depth_test = SOL_FALSE;
+        state->irradiance_pipeline = rhi_create_pipeline(&irr_desc);
     }
 
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
@@ -842,7 +928,8 @@ static int init_scene(AppState *state) {
                    sky.w, sky.h, (double)maxv);
             state->skybox_tex = rhi_create_texture_hdr(sky.pixels, sky.w, sky.h);
             image_hdr_free(&sky);
-            build_env_cubemap(state);    /* bake equirect -> cubemap (B1) */
+            build_env_cubemap(state);     /* bake equirect -> cubemap (B1) */
+            build_irradiance_map(state);  /* convolve -> irradiance cubemap (B2) */
         } else {
             printf("skybox HDR: load failed (skybox disabled)\n");
         }
@@ -1035,8 +1122,10 @@ static void render(AppState *state) {
         vec3  right = vec3_normalize(vec3_cross(fwd, vec3_make(0.0f, 1.0f, 0.0f)));
         vec3  up    = vec3_cross(right, fwd);
         float thf   = tanf(state->camera.fov * 0.5f);
+        RhiTexture skytex = state->show_irradiance    /* 'I' inspects the irradiance map */
+                          ? state->irradiance_cubemap : state->env_cubemap;
         rhi_set_pipeline(state->skybox_cube_pipeline);
-        rhi_bind_texture(state->env_cubemap, 0);
+        rhi_bind_texture(skytex, 0);
         rhi_set_uniform_int  ("uEnvCube", 0);
         rhi_set_uniform_vec3 ("uCamForward", fwd.x, fwd.y, fwd.z);
         rhi_set_uniform_vec3 ("uCamRight",   right.x, right.y, right.z);
