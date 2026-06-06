@@ -225,6 +225,40 @@ static const char *SHADOW_DEBUG_FRAGMENT_SRC =
     "    FragColor = vec4(vec3(g), 1.0);\n"
     "}\n";
 
+/* --- the skybox (Phase A2): a fullscreen triangle that samples the
+   equirectangular HDR by the per-pixel world-space view direction. Drawn FIRST
+   into the HDR target with depth off, so it fills the background; objects then
+   draw over it. Writes linear radiance — the post pass tonemaps it like the
+   rest of the scene. --- */
+static const char *SKYBOX_VERTEX_SRC =
+    "#version 330 core\n"
+    "out vec2 vNdc;\n"
+    "void main() {\n"
+    "    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"  /* (0,0)(2,0)(0,2) */
+    "    vNdc = p * 2.0 - 1.0;\n"                                    /* pixel NDC, -1..1 */
+    "    gl_Position = vec4(vNdc, 1.0, 1.0);\n"                      /* z=far (depth off anyway) */
+    "}\n";
+
+static const char *SKYBOX_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vNdc;\n"
+    "uniform vec3  uCamForward;\n"
+    "uniform vec3  uCamRight;\n"
+    "uniform vec3  uCamUp;\n"
+    "uniform float uTanHalfFovY;\n"
+    "uniform float uAspect;\n"
+    "uniform sampler2D uEquirect;\n"
+    "out vec4 FragColor;\n"
+    "const float PI = 3.14159265359;\n"
+    "void main() {\n"
+    "    vec3 dir = normalize(uCamForward\n"
+    "             + vNdc.x * uTanHalfFovY * uAspect * uCamRight\n"
+    "             + vNdc.y * uTanHalfFovY * uCamUp);\n"
+    "    float u = atan(dir.z, dir.x) / (2.0 * PI) + 0.5;\n"         /* longitude (wraps) */
+    "    float v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI;\n"      /* latitude (up = sky) */
+    "    FragColor = vec4(texture(uEquirect, vec2(u, v)).rgb, 1.0);\n"  /* linear HDR -> hdr_rt */
+    "}\n";
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
@@ -258,6 +292,7 @@ typedef struct {
     sol_bool    m_was_down;            /* edge-detect the inspector toggle */
     /* environment / skybox (Phase A): equirectangular HDR, linear radiance */
     RhiTexture  skybox_tex;            /* 0 if the .hdr failed to load */
+    RhiPipeline skybox_pipeline;       /* fullscreen-triangle equirect draw (A2) */
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -584,6 +619,19 @@ static int init_scene(AppState *state) {
         state->shadow_debug_pipeline = rhi_create_pipeline(&dbg_desc);
     }
 
+    /* the skybox pipeline (Phase A2): fullscreen triangle, no attrs, depth off */
+    {
+        RhiShader       sky_shader;
+        RhiPipelineDesc sky_desc;
+        sky_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_FRAGMENT_SRC);
+        if (!sky_shader.id) return 0;
+        sky_desc.shader     = sky_shader;
+        sky_desc.attr_count = 0;
+        sky_desc.stride     = 0;
+        sky_desc.depth_test = SOL_FALSE;
+        state->skybox_pipeline = rhi_create_pipeline(&sky_desc);
+    }
+
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* meshes (shared assets the scene objects reference) */
@@ -900,6 +948,25 @@ static void render(AppState *state) {
     eye  = state->camera.pos;                       /* camera drives the view now */
     view = camera_view(&state->camera);
     proj = camera_proj(&state->camera, aspect);
+
+    /* skybox first (Phase A2): fills the background by sampling the equirect HDR
+       per-pixel via the world view ray. Depth off -> writes color, not depth, so
+       the object loop below draws over it normally. */
+    if (state->skybox_tex.id) {
+        vec3  fwd   = camera_forward(&state->camera);
+        vec3  right = vec3_normalize(vec3_cross(fwd, vec3_make(0.0f, 1.0f, 0.0f)));
+        vec3  up    = vec3_cross(right, fwd);
+        float thf   = tanf(state->camera.fov * 0.5f);
+        rhi_set_pipeline(state->skybox_pipeline);
+        rhi_bind_texture(state->skybox_tex, 0);
+        rhi_set_uniform_int  ("uEquirect", 0);
+        rhi_set_uniform_vec3 ("uCamForward", fwd.x, fwd.y, fwd.z);
+        rhi_set_uniform_vec3 ("uCamRight",   right.x, right.y, right.z);
+        rhi_set_uniform_vec3 ("uCamUp",      up.x, up.y, up.z);
+        rhi_set_uniform_float("uTanHalfFovY", thf);
+        rhi_set_uniform_float("uAspect",      aspect);
+        rhi_draw(0, 3);
+    }
 
     /* iterate the scene — each object's WORLD matrix (parent * local) */
     for (i = 0; i < state->scene.count; i++) {
