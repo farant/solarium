@@ -16,6 +16,10 @@
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
 
+#define SHADOW_MAP_SIZE   2048     /* the light's depth-map resolution (item 9b) */
+#define SHADOW_NEAR       1.0f     /* light frustum near/far: bracket the scene  */
+#define SHADOW_FAR        20.0f    /* (also set depth precision)                 */
+
 /* --- shaders: GLSL source handed to the backend (still app-authored) --- */
 static const char *VERTEX_SRC =
     "#version 330 core\n"
@@ -167,6 +171,40 @@ static const char *POST_FRAGMENT_SRC =
     "    FragColor   = vec4(ldr, 1.0);\n"
     "}\n";
 
+/* --- the shadow (depth-only) pass (item 9b): render the scene from the light's
+   POV, writing only depth into the shadow map. No color work; position only,
+   reading just attr 0 of the 12-float vertex. --- */
+static const char *SHADOW_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPos;\n"
+    "uniform mat4 uModel;\n"
+    "uniform mat4 uLightVP;\n"                               /* light proj * light view */
+    "void main() {\n"
+    "    gl_Position = uLightVP * uModel * vec4(aPos, 1.0);\n"
+    "}\n";
+
+static const char *SHADOW_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "void main() {}\n";                                      /* depth written automatically */
+
+/* --- debug view (item 9b): show the shadow map full-screen as linearized
+   grayscale (near=dark, far=white), so we can confirm the light's-eye depth
+   render is correct before 9c samples it. Reuses the fullscreen-triangle VS. --- */
+static const char *SHADOW_DEBUG_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uDepth;\n"
+    "uniform float uNear;\n"
+    "uniform float uFar;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    float d   = texture(uDepth, vUV).r;\n"               /* [0,1] nonlinear (perspective) */
+    "    float ndc = d * 2.0 - 1.0;\n"
+    "    float z   = (2.0 * uNear * uFar) / (uFar + uNear - ndc * (uFar - uNear));\n"  /* view-space dist */
+    "    float g   = (z - uNear) / (uFar - uNear);\n"         /* -> [0,1] linear for display */
+    "    FragColor = vec4(vec3(g), 1.0);\n"
+    "}\n";
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
@@ -192,6 +230,12 @@ typedef struct {
     float       light_intensity; /* high: inverse-square falloff at room scale */
     float       light_inner_deg; /* full-bright within this half-angle */
     float       light_outer_deg; /* fades to black by this half-angle */
+    /* shadow map (item 9b): depth from the light's POV; fixed size, not resized */
+    RhiRenderTarget shadow_rt;
+    RhiPipeline shadow_pipeline;       /* the depth-only pass */
+    RhiPipeline shadow_debug_pipeline; /* fullscreen depth-map inspector */
+    sol_bool    show_shadow_map;       /* 'M' toggles the inspector view */
+    sol_bool    m_was_down;            /* edge-detect the inspector toggle */
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -329,7 +373,7 @@ static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
    triggered so it fires once per press. */
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool f_now, tab_now, dragging, fp;
+    sol_bool f_now, tab_now, m_now, dragging, fp;
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
@@ -417,6 +461,12 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->camera.mode = (st->camera.mode == CAMERA_WALK) ? CAMERA_FLY : CAMERA_WALK;
     st->f_was_down = f_now;
 
+    /* M toggles the shadow-map inspector (item 9b, edge) */
+    m_now = glfwGetKey(w, GLFW_KEY_M) == GLFW_PRESS;
+    if (m_now && !st->m_was_down)
+        st->show_shadow_map = !st->show_shadow_map;
+    st->m_was_down = m_now;
+
     /* exposure scrub: '[' down, ']' up (held; dt-scaled), with a live title readout */
     {
         float erate = (float)dt * 1.5f;
@@ -483,6 +533,33 @@ static int init_scene(AppState *state) {
         post_desc.stride     = 0;
         post_desc.depth_test = SOL_FALSE;
         state->post_pipeline = rhi_create_pipeline(&post_desc);
+    }
+
+    /* the shadow map + its two pipelines (item 9b): a depth-only pass that reads
+       just position, and a fullscreen inspector that shows the depth map. */
+    {
+        RhiShader       sh_shader, dbg_shader;
+        RhiPipelineDesc sh_desc, dbg_desc;
+
+        state->shadow_rt = rhi_create_depth_target(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+        if (!state->shadow_rt.id) return 0;
+
+        sh_shader = rhi_create_shader(SHADOW_VERTEX_SRC, SHADOW_FRAGMENT_SRC);
+        if (!sh_shader.id) return 0;
+        sh_desc.shader     = sh_shader;
+        sh_desc.attrs[0].location = 0; sh_desc.attrs[0].format = RHI_FORMAT_FLOAT3; sh_desc.attrs[0].offset = 0;
+        sh_desc.attr_count = 1;                 /* position only */
+        sh_desc.stride     = 12 * sizeof(float);  /* same VBO; skip the other 9 floats */
+        sh_desc.depth_test = SOL_TRUE;
+        state->shadow_pipeline = rhi_create_pipeline(&sh_desc);
+
+        dbg_shader = rhi_create_shader(POST_VERTEX_SRC, SHADOW_DEBUG_FRAGMENT_SRC);
+        if (!dbg_shader.id) return 0;
+        dbg_desc.shader     = dbg_shader;
+        dbg_desc.attr_count = 0;
+        dbg_desc.stride     = 0;
+        dbg_desc.depth_test = SOL_FALSE;
+        state->shadow_debug_pipeline = rhi_create_pipeline(&dbg_desc);
     }
 
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
@@ -722,6 +799,18 @@ static void ensure_render_target(AppState *state, int w, int h) {
     state->rt_height = h;
 }
 
+/* The light's view-projection (item 9b). Both the shadow pass and 9c's lighting
+   pass call this — they MUST use the identical matrix or the cast shadow won't
+   line up with the lit cone. The spot's perspective frustum IS the light matrix:
+   fovy = the cone's full angle (+ slack), square map, near/far bracket the scene. */
+static mat4 light_view_proj(const AppState *state) {
+    mat4  lview = mat4_look_at(state->light_pos, state->light_target,
+                               vec3_make(0.0f, 1.0f, 0.0f));
+    float lfovy = sol_radians(2.0f * state->light_outer_deg + 6.0f);
+    mat4  lproj = mat4_perspective(lfovy, 1.0f, SHADOW_NEAR, SHADOW_FAR);
+    return mat4_mul(lproj, lview);
+}
+
 static void render(AppState *state) {
     float   aspect;
     vec3    eye;
@@ -732,6 +821,25 @@ static void render(AppState *state) {
     ensure_render_target(state, state->fb_width, state->fb_height);
 
     sel_root = group_root(&state->scene, state->selected_handle);  /* 0 if nothing selected */
+
+    /* ---- pass 0: depth from the light's POV -> the shadow map (item 9b) ---- */
+    {
+        mat4 lvp = light_view_proj(state);
+        rhi_begin_pass(state->shadow_rt, 0.0f, 0.0f, 0.0f, 1.0f);  /* clears depth to 1.0 */
+        rhi_set_pipeline(state->shadow_pipeline);
+        rhi_set_uniform_mat4("uLightVP", lvp.m);
+        for (i = 0; i < state->scene.count; i++) {
+            const SceneObject *o = &state->scene.objects[i];
+            mat4 model;
+            if (o->mesh.index_count == 0) continue;   /* empties cast nothing */
+            model = scene_world_matrix(&state->scene, o);
+            rhi_set_uniform_mat4("uModel", model.m);
+            rhi_bind_vertex_buffer(o->mesh.vbuffer);
+            rhi_bind_index_buffer(o->mesh.ibuffer);
+            rhi_draw_indexed(0, o->mesh.index_count);
+        }
+        rhi_end_pass();
+    }
 
     /* ---- pass 1: render the scene into the offscreen HDR target ---- */
     rhi_begin_pass(state->hdr_rt, 0.10f, 0.12f, 0.15f, 1.0f);
@@ -762,10 +870,19 @@ static void render(AppState *state) {
     {
         RhiRenderTarget screen = {0};   /* {0} = default framebuffer (declaration init, not a compound literal) */
         rhi_begin_pass(screen, 0.0f, 0.0f, 0.0f, 1.0f);
-        rhi_set_pipeline(state->post_pipeline);
-        rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
-        rhi_set_uniform_int("uHdr", 0);                 /* sampler -> texture unit 0 */
-        rhi_set_uniform_float("uExposure", state->exposure);
+        if (state->show_shadow_map) {
+            /* inspector: the shadow map as linearized grayscale (item 9b debug) */
+            rhi_set_pipeline(state->shadow_debug_pipeline);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt), 0);
+            rhi_set_uniform_int("uDepth", 0);
+            rhi_set_uniform_float("uNear", SHADOW_NEAR);
+            rhi_set_uniform_float("uFar",  SHADOW_FAR);
+        } else {
+            rhi_set_pipeline(state->post_pipeline);
+            rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
+            rhi_set_uniform_int("uHdr", 0);             /* sampler -> texture unit 0 */
+            rhi_set_uniform_float("uExposure", state->exposure);
+        }
         rhi_draw(0, 3);
     }
 }
@@ -856,6 +973,7 @@ int main(void) {
 
     scene_free(&state.scene);
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
+    if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);
     rhi_shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();

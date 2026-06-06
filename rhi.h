@@ -61,6 +61,12 @@ RhiTexture  rhi_create_texture(const void *pixels, int width, int height, RhiTex
    in the backend (§1.2). Returns id 0 on failure. */
 RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat color_format);
 
+/* A depth-only render target: a framebuffer whose sole attachment is a
+   *samplable* depth texture (no color buffer). The shadow map (item 9b)
+   renders the scene's depth from the light's POV into this; a later pass
+   samples its depth texture. Created at a fixed size. Returns id 0 on failure. */
+RhiRenderTarget rhi_create_depth_target(int width, int height);
+
 /* ---- per frame ---- */
 /* Begin a render pass targeting `target`: bind its framebuffer, set the viewport
    to its size, and clear color+depth. A zero target ({0}) means the default
@@ -83,6 +89,10 @@ void rhi_draw_indexed(int first_index, int index_count);
 /* The render target's color attachment as a bindable texture, so a later pass
    can sample what was just rendered (the fullscreen tonemap pass samples this). */
 RhiTexture rhi_render_target_texture(RhiRenderTarget rt);
+
+/* A depth target's depth attachment as a bindable texture (the shadow-map
+   sample source for the lighting pass). Returns id 0 for a color target. */
+RhiTexture rhi_render_target_depth_texture(RhiRenderTarget rt);
 
 void rhi_present(void);
 

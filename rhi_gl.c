@@ -30,8 +30,9 @@ typedef struct {
 
 typedef struct {
     GLuint     fbo;
-    GLuint     depth_rbo;   /* write-only depth; never sampled this item */
-    RhiTexture color;       /* handle into g_textures, so it binds like any texture */
+    GLuint     depth_rbo;   /* write-only depth (color targets); 0 for depth targets */
+    RhiTexture color;       /* handle into g_textures, so it binds like any texture; 0 for depth targets */
+    RhiTexture depth;       /* samplable depth texture (depth targets, item 9b); 0 for color targets */
     int        width, height;
 } GlRenderTarget;
 
@@ -304,6 +305,7 @@ RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat
     rt->fbo       = fbo;
     rt->depth_rbo = depth_rbo;
     rt->color.id  = tex_idx + 1;
+    rt->depth.id  = 0;            /* color target: depth is the rbo, not samplable */
     rt->width     = width;
     rt->height    = height;
 
@@ -312,10 +314,76 @@ RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat
     return h;
 }
 
+/* A depth-only target: one samplable depth texture, no color (item 9b). Mirrors
+   the color path, but depth is a texture (so the lighting pass can sample it),
+   and the FBO has no color buffer (glDrawBuffer/glReadBuffer = GL_NONE). */
+RhiRenderTarget rhi_create_depth_target(int width, int height) {
+    RhiRenderTarget h;
+    GlRenderTarget *rt;
+    GLuint          fbo, depth_tex;
+    GLfloat         border[4];
+    sol_u32         rt_idx, tex_idx;
+    GLenum          status;
+
+    h.id = 0;
+
+    /* the depth attachment is a SAMPLABLE texture (the shadow map). NEAREST +
+       clamp-to-border with a white (1.0) border, so fragments sampled outside
+       the light's frustum read depth 1.0 (= nothing closer = lit), not garbage. */
+    border[0] = 1.0f; border[1] = 1.0f; border[2] = 1.0f; border[3] = 1.0f;
+    glGenTextures(1, &depth_tex);
+    glBindTexture(GL_TEXTURE_2D, depth_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, (GLsizei)width, (GLsizei)height, 0,
+                 GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, depth_tex, 0);
+    glDrawBuffer(GL_NONE);                           /* no color: depth-only FBO */
+    glReadBuffer(GL_NONE);
+
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "depth target incomplete: 0x%04x\n", (unsigned)status);
+        glDeleteTextures(1, &depth_tex);
+        glDeleteFramebuffers(1, &fbo);
+        return h;
+    }
+
+    tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    g_textures[tex_idx] = depth_tex;
+
+    rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count);
+    rt = &g_render_targets[rt_idx];
+    rt->fbo       = fbo;
+    rt->depth_rbo = 0;               /* depth is the texture, not a renderbuffer */
+    rt->color.id  = 0;               /* no color attachment */
+    rt->depth.id  = tex_idx + 1;
+    rt->width     = width;
+    rt->height    = height;
+
+    h.id = rt_idx + 1;
+    gl_check("rhi_create_depth_target");
+    return h;
+}
+
 RhiTexture rhi_render_target_texture(RhiRenderTarget rt) {
     RhiTexture t;
     if (!rt.id) { t.id = 0; return t; }
     return g_render_targets[rt.id - 1].color;
+}
+
+RhiTexture rhi_render_target_depth_texture(RhiRenderTarget rt) {
+    RhiTexture t;
+    if (!rt.id) { t.id = 0; return t; }
+    return g_render_targets[rt.id - 1].depth;
 }
 
 /* ---- per frame ---- */
@@ -461,8 +529,14 @@ void rhi_destroy_render_target(RhiRenderTarget rt) {
         g_textures[tex_idx] = 0;
         slot_free(tex_idx, g_texture_free, &g_texture_free_count);
     }
+    if (r->depth.id) {                               /* depth target: release its depth texture too */
+        tex_idx = r->depth.id - 1;
+        glDeleteTextures(1, &g_textures[tex_idx]);
+        g_textures[tex_idx] = 0;
+        slot_free(tex_idx, g_texture_free, &g_texture_free_count);
+    }
 
-    r->fbo = 0; r->depth_rbo = 0; r->color.id = 0;
+    r->fbo = 0; r->depth_rbo = 0; r->color.id = 0; r->depth.id = 0;
     slot_free(idx, g_render_target_free, &g_render_target_free_count);
     gl_check("rhi_destroy_render_target");
 }
