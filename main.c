@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>                /* cosf — spot-light cone cosines (item 9a) */
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>          /* platform: window, input, time — not GL */
@@ -60,6 +61,12 @@ static const char *FRAGMENT_SRC =
     "uniform vec3  uBaseColor;\n"                            /* baseColorFactor (linear) */
     "uniform float uMetallic;\n"
     "uniform float uRoughness;\n"
+    "uniform vec3  uLightPos;\n"                             /* spot light: position (item 9a) */
+    "uniform vec3  uLightDir;\n"                             /* normalized aim, light -> scene */
+    "uniform vec3  uLightColor;\n"
+    "uniform float uLightIntensity;\n"
+    "uniform float uCosInner;\n"                             /* cos(inner half-angle) */
+    "uniform float uCosOuter;\n"                             /* cos(outer half-angle) */
     "out vec4 FragColor;\n"
     "const float PI = 3.14159265359;\n"
     "\n"
@@ -100,7 +107,9 @@ static const char *FRAGMENT_SRC =
     "        N = normalize(mat3(T, B, N) * n);\n"              /* tangent space -> world */
     "    }\n"
     "    vec3 V = normalize(uViewPos - vWorldPos);\n"          /* direction TO the camera */
-    "    vec3 L = normalize(vec3(0.4, 1.0, 0.6));\n"           /* directional light: dir TO light */
+    "    vec3 toLight = uLightPos - vWorldPos;\n"
+    "    float dist = length(toLight);\n"
+    "    vec3 L = toLight / dist;\n"                            /* spot: direction TO light */
     "    vec3 H = normalize(L + V);\n"
     "    float NoV = max(dot(N, V), 0.0001);\n"
     "    float NoL = max(dot(N, L), 0.0);\n"
@@ -116,7 +125,10 @@ static const char *FRAGMENT_SRC =
     "    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);\n"     /* energy: no diffuse where it reflected / for metals */
     "    vec3 diffuse = kD * albedo / PI;\n"
     "\n"
-    "    vec3 radiance = vec3(1.0, 0.98, 0.92) * 3.0;\n"      /* directional light color * intensity (retune by eye) */
+    "    float atten = 1.0 / (dist * dist);\n"                 /* inverse-square falloff */
+    "    float theta = dot(-L, uLightDir);\n"                  /* cos angle off the spot axis */
+    "    float cone  = smoothstep(uCosOuter, uCosInner, theta);\n"  /* 1 inside, 0 past outer */
+    "    vec3 radiance = uLightColor * uLightIntensity * atten * cone;\n"
     "    vec3 Lo = (diffuse + specular) * radiance * NoL;\n"
     "\n"
     "    float ao = 1.0;\n"
@@ -172,6 +184,14 @@ typedef struct {
     RhiRenderTarget hdr_rt;          /* scene renders here, then to the window */
     int             rt_width, rt_height;  /* size hdr_rt was built at; recreate on resize */
     float           exposure;        /* HDR exposure (item 7c); '[' / ']' scrub it live */
+    /* the one shadow-casting spot light (item 9a). Defined once here so 9b's
+       shadow matrix reads the SAME pos/dir/cone — lit cone and shadow agree. */
+    vec3        light_pos;
+    vec3        light_target;    /* aim point; dir = normalize(target - pos) */
+    vec3        light_color;
+    float       light_intensity; /* high: inverse-square falloff at room scale */
+    float       light_inner_deg; /* full-bright within this half-angle */
+    float       light_outer_deg; /* fades to black by this half-angle */
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -576,6 +596,14 @@ static int init_scene(AppState *state) {
     state->f_was_down = SOL_FALSE;
     state->exposure   = 1.0f;
 
+    /* the spot light: elevated over the cluster, warm, aimed at the table (9a) */
+    state->light_pos       = vec3_make(2.5f, 5.0f, 2.5f);
+    state->light_target    = vec3_make(0.0f, 0.5f, 0.0f);
+    state->light_color     = vec3_make(1.0f, 0.95f, 0.85f);
+    state->light_intensity = 120.0f;
+    state->light_inner_deg = 22.0f;
+    state->light_outer_deg = 38.0f;
+
     printf("scene: %u objects (1 empty anchor)\n", (unsigned)state->scene.count);
     printf("box meta: title=\"%s\", author=\"%s\"; %u relations\n",
            scene_meta_get(&state->scene, state->box_handle, "title"),
@@ -633,6 +661,20 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     rhi_set_uniform_mat3("uNormalMatrix", nrm.m);
     rhi_set_uniform_vec3("uViewPos",      eye.x, eye.y, eye.z);
     rhi_set_uniform_float("uHighlight",   highlight);
+
+    /* spot light (item 9a): constant per-frame, set per-mesh like uViewPos.
+       dir + cone cosines computed CPU-side from the AppState light fields. */
+    {
+        vec3  ldir = vec3_normalize(vec3_sub(state->light_target, state->light_pos));
+        float ci   = cosf(sol_radians(state->light_inner_deg));
+        float co   = cosf(sol_radians(state->light_outer_deg));
+        rhi_set_uniform_vec3 ("uLightPos",   state->light_pos.x, state->light_pos.y, state->light_pos.z);
+        rhi_set_uniform_vec3 ("uLightDir",   ldir.x, ldir.y, ldir.z);
+        rhi_set_uniform_vec3 ("uLightColor", state->light_color.x, state->light_color.y, state->light_color.z);
+        rhi_set_uniform_float("uLightIntensity", state->light_intensity);
+        rhi_set_uniform_float("uCosInner", ci);
+        rhi_set_uniform_float("uCosOuter", co);
+    }
 
     rhi_set_uniform_vec3("uBaseColor",    mat.base_color.x, mat.base_color.y, mat.base_color.z);
     rhi_set_uniform_float("uMetallic",    mat.metallic);
