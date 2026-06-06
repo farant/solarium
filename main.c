@@ -256,6 +256,8 @@ typedef struct {
     RhiPipeline shadow_debug_pipeline; /* fullscreen depth-map inspector */
     sol_bool    show_shadow_map;       /* 'M' toggles the inspector view */
     sol_bool    m_was_down;            /* edge-detect the inspector toggle */
+    /* environment / skybox (Phase A): equirectangular HDR, linear radiance */
+    RhiTexture  skybox_tex;            /* 0 if the .hdr failed to load */
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -700,6 +702,25 @@ static int init_scene(AppState *state) {
     state->light_intensity = 120.0f;
     state->light_inner_deg = 22.0f;
     state->light_outer_deg = 38.0f;
+
+    /* environment map (Phase A1): load the equirectangular HDR -> a linear float
+       texture. Held now, drawn as a skybox in A2. */
+    {
+        HdrImage sky;
+        if (image_load_hdr("horn-koppe_spring_4k.hdr", &sky)) {
+            /* max radiance across all channels: the definitive HDR check — a real
+               .hdr has bright spots well above 1.0; clamped LDR would cap at 1.0 */
+            long  i, n = (long)sky.w * sky.h * 4;
+            float maxv = 0.0f;
+            for (i = 0; i < n; i++) if (sky.pixels[i] > maxv) maxv = sky.pixels[i];
+            printf("skybox HDR: %dx%d, max radiance=%.2f (>1.0 confirms HDR)\n",
+                   sky.w, sky.h, (double)maxv);
+            state->skybox_tex = rhi_create_texture_hdr(sky.pixels, sky.w, sky.h);
+            image_hdr_free(&sky);
+        } else {
+            printf("skybox HDR: load failed (skybox disabled)\n");
+        }
+    }
 
     printf("scene: %u objects (1 empty anchor)\n", (unsigned)state->scene.count);
     printf("box meta: title=\"%s\", author=\"%s\"; %u relations\n",

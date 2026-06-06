@@ -59,3 +59,27 @@ void image_free(Image *img) {
         img->pixels = (unsigned char *)0;
     }
 }
+
+sol_bool image_load_hdr(const char *path, HdrImage *out) {
+    int    w, h, ch;
+    float *data;
+
+    /* No flip: equirect orientation is resolved in the skybox shader by how the
+       view direction maps to UV, not by the row order on upload. stbi_loadf
+       decodes Radiance RGBE into LINEAR float radiance (values may exceed 1.0). */
+    stbi_set_flip_vertically_on_load(0);
+    data = stbi_loadf(path, &w, &h, &ch, 4);        /* force 4 channels -> RGBA float */
+    if (!data) return SOL_FALSE;
+
+    out->pixels = data;
+    out->w = w;
+    out->h = h;
+    return SOL_TRUE;
+}
+
+void image_hdr_free(HdrImage *img) {
+    if (img->pixels) {
+        stbi_image_free(img->pixels);
+        img->pixels = (float *)0;
+    }
+}

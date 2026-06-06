@@ -11,8 +11,19 @@ typedef struct {
     int            w, h;
 } Image;
 
+/* A float (HDR) image: linear RGBA radiance, values may exceed 1.0. Used for
+   equirectangular .hdr environment maps (skybox / IBL). NOT sRGB — already
+   linear, so it goes to an RHI_TEX_RGBA16F texture, never SRGB8. */
+typedef struct {
+    float *pixels;
+    int    w, h;
+} HdrImage;
+
 sol_bool image_load(const char *path, Image *out);                          /* from a file */
 sol_bool image_load_from_memory(const unsigned char *data, int len, Image *out);  /* embedded bytes */
 void     image_free(Image *img);
+
+sol_bool image_load_hdr(const char *path, HdrImage *out);   /* Radiance .hdr -> linear float */
+void     image_hdr_free(HdrImage *img);
 
 #endif /* IMAGE_H */

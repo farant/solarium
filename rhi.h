@@ -55,6 +55,11 @@ RhiShader   rhi_create_shader(const char *vertex_src, const char *fragment_src);
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc);
 RhiTexture  rhi_create_texture(const void *pixels, int width, int height, RhiTextureFormat fmt);  /* RGBA8 source */
 
+/* An HDR texture from linear float (RGBA) source -> RHI_TEX_RGBA16F. For
+   equirectangular environment maps: wraps in S (longitude), clamps in T
+   (poles), LINEAR, no mipmaps. The source stays linear radiance (never sRGB). */
+RhiTexture  rhi_create_texture_hdr(const float *pixels, int width, int height);
+
 /* An offscreen render target: a framebuffer wiring a samplable color texture
    (color_format, typically RHI_TEX_RGBA16F) + a write-only depth renderbuffer.
    Created at a fixed size; recreate on window resize. All framebuffer GL lives

@@ -16,6 +16,8 @@
 
 # Local test assets (Sketchfab models — CC-BY / CC-BY-NC-ND; kept local, attribute if ever tracked)
 *.glb
+# Environment maps (Polyhaven HDRIs — CC0; large, kept local)
+*.hdr
 
 # Editor / tooling
 compile_commands.json

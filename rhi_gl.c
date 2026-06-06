@@ -241,6 +241,29 @@ RhiTexture rhi_create_texture(const void *pixels, int width, int height, RhiText
     return h;
 }
 
+RhiTexture rhi_create_texture_hdr(const float *pixels, int width, int height) {
+    GLuint     tex;
+    sol_u32    idx;
+    RhiTexture h;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    /* linear float source -> half-float linear store (RGBA16F). Stays LINEAR:
+       this is radiance, not sRGB color. */
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, (GLsizei)width, (GLsizei)height, 0,
+                 GL_RGBA, GL_FLOAT, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   /* no mipmaps */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);         /* longitude wraps */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);  /* clamp at the poles */
+
+    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    g_textures[idx] = tex;
+    h.id = idx + 1;
+    gl_check("rhi_create_texture_hdr");
+    return h;
+}
+
 void rhi_bind_texture(RhiTexture texture, int slot) {
     glActiveTexture((GLenum)(GL_TEXTURE0 + slot));
     glBindTexture(GL_TEXTURE_2D, texture.id ? g_textures[texture.id - 1] : 0);
