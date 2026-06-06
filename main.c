@@ -71,6 +71,8 @@ static const char *FRAGMENT_SRC =
     "uniform float uLightIntensity;\n"
     "uniform float uCosInner;\n"                             /* cos(inner half-angle) */
     "uniform float uCosOuter;\n"                             /* cos(outer half-angle) */
+    "uniform mat4  uLightVP;\n"                              /* light proj*view (item 9c); == the shadow pass's */
+    "uniform sampler2D uShadowMap;\n"                        /* depth from the light's POV (item 9b) */
     "out vec4 FragColor;\n"
     "const float PI = 3.14159265359;\n"
     "\n"
@@ -88,6 +90,23 @@ static const char *FRAGMENT_SRC =
     "}\n"
     "vec3 fresnelSchlick(float HoV, vec3 F0) {\n"            /* F: grazing reflectance */
     "    return F0 + (1.0 - F0) * pow(1.0 - HoV, 5.0);\n"
+    "}\n"
+    "float shadowFactor(vec3 worldPos, float NoL) {\n"       /* 0 = lit, 1 = fully shadowed (item 9c) */
+    "    vec4 lpos = uLightVP * vec4(worldPos, 1.0);\n"
+    "    vec3 proj = lpos.xyz / lpos.w;\n"                    /* perspective divide -> NDC */
+    "    proj = proj * 0.5 + 0.5;\n"                          /* -> [0,1] for sampling + compare */
+    "    if (proj.z > 1.0) return 0.0;\n"                     /* beyond the light's far plane = lit */
+    "    float current = proj.z;\n"
+    "    float bias = max(0.0025 * (1.0 - NoL), 0.0008);\n"   /* slope-scaled: more at grazing angles (tunable) */
+    "    vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));\n"
+    "    float sum = 0.0;\n"                                  /* 3x3 PCF: soften the edge */
+    "    int x, y;\n"
+    "    for (x = -1; x <= 1; ++x)\n"
+    "        for (y = -1; y <= 1; ++y) {\n"
+    "            float closest = texture(uShadowMap, proj.xy + vec2(x, y) * texel).r;\n"
+    "            sum += (current - bias > closest) ? 1.0 : 0.0;\n"  /* 1 = something closer to light */
+    "        }\n"
+    "    return sum / 9.0;\n"
     "}\n"
     "\n"
     "void main() {\n"
@@ -133,7 +152,8 @@ static const char *FRAGMENT_SRC =
     "    float theta = dot(-L, uLightDir);\n"                  /* cos angle off the spot axis */
     "    float cone  = smoothstep(uCosOuter, uCosInner, theta);\n"  /* 1 inside, 0 past outer */
     "    vec3 radiance = uLightColor * uLightIntensity * atten * cone;\n"
-    "    vec3 Lo = (diffuse + specular) * radiance * NoL;\n"
+    "    float shadow = shadowFactor(vWorldPos, NoL);\n"      /* item 9c: only direct light is shadowed */
+    "    vec3 Lo = (diffuse + specular) * radiance * NoL * (1.0 - shadow);\n"
     "\n"
     "    float ao = 1.0;\n"
     "    if (uUseAOTex > 0.5) ao = 1.0 + uAOStrength * (texture(uAOTex, vUV).r - 1.0);\n"
@@ -726,6 +746,18 @@ static void update(AppState *state, double dt) {
     }
 }
 
+/* The light's view-projection (item 9b). Both the shadow pass and 9c's lighting
+   pass call this — they MUST use the identical matrix or the cast shadow won't
+   line up with the lit cone. The spot's perspective frustum IS the light matrix:
+   fovy = the cone's full angle (+ slack), square map, near/far bracket the scene. */
+static mat4 light_view_proj(const AppState *state) {
+    mat4  lview = mat4_look_at(state->light_pos, state->light_target,
+                               vec3_make(0.0f, 1.0f, 0.0f));
+    float lfovy = sol_radians(2.0f * state->light_outer_deg + 6.0f);
+    mat4  lproj = mat4_perspective(lfovy, 1.0f, SHADOW_NEAR, SHADOW_FAR);
+    return mat4_mul(lproj, lview);
+}
+
 static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
                       mat4 view, mat4 proj, vec3 eye, float highlight,
                       Material mat) {
@@ -751,6 +783,15 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
         rhi_set_uniform_float("uLightIntensity", state->light_intensity);
         rhi_set_uniform_float("uCosInner", ci);
         rhi_set_uniform_float("uCosOuter", co);
+
+        /* shadow map (item 9c): the SAME light matrix as the depth pass, plus the
+           depth texture on unit 4 (0-3 are albedo/MR/AO/normal). */
+        {
+            mat4 lvp = light_view_proj(state);
+            rhi_set_uniform_mat4("uLightVP", lvp.m);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt), 4);
+            rhi_set_uniform_int("uShadowMap", 4);
+        }
     }
 
     rhi_set_uniform_vec3("uBaseColor",    mat.base_color.x, mat.base_color.y, mat.base_color.z);
@@ -797,18 +838,6 @@ static void ensure_render_target(AppState *state, int w, int h) {
     state->hdr_rt    = rhi_create_render_target(w, h, RHI_TEX_RGBA16F);
     state->rt_width  = w;
     state->rt_height = h;
-}
-
-/* The light's view-projection (item 9b). Both the shadow pass and 9c's lighting
-   pass call this — they MUST use the identical matrix or the cast shadow won't
-   line up with the lit cone. The spot's perspective frustum IS the light matrix:
-   fovy = the cone's full angle (+ slack), square map, near/far bracket the scene. */
-static mat4 light_view_proj(const AppState *state) {
-    mat4  lview = mat4_look_at(state->light_pos, state->light_target,
-                               vec3_make(0.0f, 1.0f, 0.0f));
-    float lfovy = sol_radians(2.0f * state->light_outer_deg + 6.0f);
-    mat4  lproj = mat4_perspective(lfovy, 1.0f, SHADOW_NEAR, SHADOW_FAR);
-    return mat4_mul(lproj, lview);
 }
 
 static void render(AppState *state) {
