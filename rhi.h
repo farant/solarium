@@ -60,6 +60,14 @@ RhiTexture  rhi_create_texture(const void *pixels, int width, int height, RhiTex
    (poles), LINEAR, no mipmaps. The source stays linear radiance (never sRGB). */
 RhiTexture  rhi_create_texture_hdr(const float *pixels, int width, int height);
 
+/* A cubemap (6-face RGBA16F): bind it with rhi_bind_texture like any handle (the
+   backend tracks the target). Render into a face/mip with rhi_begin_cubemap_face
+   (+ rhi_end_pass); regenerate mips after filling face 0 with generate_mips.
+   The foundation for environment maps / IBL (items B/C). */
+RhiTexture  rhi_create_cubemap(int size, sol_bool mipmapped);
+void        rhi_begin_cubemap_face(RhiTexture cube, int face, int mip, int size);
+void        rhi_cubemap_generate_mips(RhiTexture cube);
+
 /* An offscreen render target: a framebuffer wiring a samplable color texture
    (color_format, typically RHI_TEX_RGBA16F) + a write-only depth renderbuffer.
    Created at a fixed size; recreate on window resize. All framebuffer GL lives

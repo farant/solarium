@@ -259,6 +259,27 @@ static const char *SKYBOX_FRAGMENT_SRC =
     "    FragColor = vec4(texture(uEquirect, vec2(u, v)).rgb, 1.0);\n"  /* linear HDR -> hdr_rt */
     "}\n";
 
+/* --- the on-screen skybox once we have a cubemap (B1): identical to the equirect
+   version but samples a samplerCube by the view direction. Switching the live
+   skybox to this is the self-check — if the sky looks the same, the equirect->
+   cube conversion is correct. --- */
+static const char *SKYBOX_CUBE_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vNdc;\n"
+    "uniform vec3  uCamForward;\n"
+    "uniform vec3  uCamRight;\n"
+    "uniform vec3  uCamUp;\n"
+    "uniform float uTanHalfFovY;\n"
+    "uniform float uAspect;\n"
+    "uniform samplerCube uEnvCube;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    vec3 dir = normalize(uCamForward\n"
+    "             + vNdc.x * uTanHalfFovY * uAspect * uCamRight\n"
+    "             + vNdc.y * uTanHalfFovY * uCamUp);\n"
+    "    FragColor = vec4(texture(uEnvCube, dir).rgb, 1.0);\n"
+    "}\n";
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
@@ -291,8 +312,10 @@ typedef struct {
     sol_bool    show_shadow_map;       /* 'M' toggles the inspector view */
     sol_bool    m_was_down;            /* edge-detect the inspector toggle */
     /* environment / skybox (Phase A): equirectangular HDR, linear radiance */
-    RhiTexture  skybox_tex;            /* 0 if the .hdr failed to load */
-    RhiPipeline skybox_pipeline;       /* fullscreen-triangle equirect draw (A2) */
+    RhiTexture  skybox_tex;            /* equirect HDR; 0 if the .hdr failed to load */
+    RhiPipeline skybox_pipeline;       /* fullscreen-triangle equirect draw (A2; also the equirect->cube tool) */
+    RhiTexture  env_cubemap;           /* equirect baked into a cubemap (B1); 0 if none */
+    RhiPipeline skybox_cube_pipeline;  /* on-screen skybox sampling the cubemap (B1) */
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -552,6 +575,47 @@ static RhiTexture load_texture(const char *path) {
     return tex;
 }
 
+#define ENV_CUBE_SIZE 1024   /* per-face resolution of the environment cubemap */
+
+/* Bake the equirectangular HDR into a cubemap (B1): render each of the 6 faces
+   with the equirect skybox shader, fed that face's fixed camera basis. The six
+   (forward, up) pairs are the standard cubemap convention; right = cross(fwd,up)
+   makes dir = fwd + ndc.x*right + ndc.y*up the exact inverse of how
+   texture(cube, dir) reads each face. 90deg FOV -> tan(45)=1, square aspect. */
+static void build_env_cubemap(AppState *state) {
+    static const vec3 fwd[6] = {
+        { 1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+        { 0.0f, 1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f},
+        { 0.0f, 0.0f, 1.0f}, { 0.0f, 0.0f,-1.0f}
+    };
+    static const vec3 up[6] = {
+        { 0.0f,-1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f},
+        { 0.0f, 0.0f, 1.0f}, { 0.0f, 0.0f,-1.0f},
+        { 0.0f,-1.0f, 0.0f}, { 0.0f,-1.0f, 0.0f}
+    };
+    int f;
+
+    state->env_cubemap = rhi_create_cubemap(ENV_CUBE_SIZE, SOL_TRUE);
+
+    /* the equirect skybox shader is the conversion tool: bind it + the equirect
+       once, then vary only the per-face basis. */
+    rhi_set_pipeline(state->skybox_pipeline);
+    rhi_bind_texture(state->skybox_tex, 0);
+    rhi_set_uniform_int  ("uEquirect", 0);
+    rhi_set_uniform_float("uTanHalfFovY", 1.0f);
+    rhi_set_uniform_float("uAspect",      1.0f);
+    for (f = 0; f < 6; f++) {
+        vec3 r = vec3_cross(fwd[f], up[f]);
+        rhi_begin_cubemap_face(state->env_cubemap, f, 0, ENV_CUBE_SIZE);
+        rhi_set_uniform_vec3("uCamForward", fwd[f].x, fwd[f].y, fwd[f].z);
+        rhi_set_uniform_vec3("uCamRight",   r.x, r.y, r.z);
+        rhi_set_uniform_vec3("uCamUp",      up[f].x, up[f].y, up[f].z);
+        rhi_draw(0, 3);
+        rhi_end_pass();
+    }
+    rhi_cubemap_generate_mips(state->env_cubemap);
+}
+
 /* One-time setup: build the pipeline + meshes, populate the scene. */
 static int init_scene(AppState *state) {
     MeshBuilder mb;
@@ -630,6 +694,19 @@ static int init_scene(AppState *state) {
         sky_desc.stride     = 0;
         sky_desc.depth_test = SOL_FALSE;
         state->skybox_pipeline = rhi_create_pipeline(&sky_desc);
+    }
+
+    /* the cubemap skybox pipeline (B1): same fullscreen triangle, samplerCube */
+    {
+        RhiShader       cube_shader;
+        RhiPipelineDesc cube_desc;
+        cube_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_CUBE_FRAGMENT_SRC);
+        if (!cube_shader.id) return 0;
+        cube_desc.shader     = cube_shader;
+        cube_desc.attr_count = 0;
+        cube_desc.stride     = 0;
+        cube_desc.depth_test = SOL_FALSE;
+        state->skybox_cube_pipeline = rhi_create_pipeline(&cube_desc);
     }
 
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
@@ -765,6 +842,7 @@ static int init_scene(AppState *state) {
                    sky.w, sky.h, (double)maxv);
             state->skybox_tex = rhi_create_texture_hdr(sky.pixels, sky.w, sky.h);
             image_hdr_free(&sky);
+            build_env_cubemap(state);    /* bake equirect -> cubemap (B1) */
         } else {
             printf("skybox HDR: load failed (skybox disabled)\n");
         }
@@ -952,14 +1030,14 @@ static void render(AppState *state) {
     /* skybox first (Phase A2): fills the background by sampling the equirect HDR
        per-pixel via the world view ray. Depth off -> writes color, not depth, so
        the object loop below draws over it normally. */
-    if (state->skybox_tex.id) {
+    if (state->env_cubemap.id) {
         vec3  fwd   = camera_forward(&state->camera);
         vec3  right = vec3_normalize(vec3_cross(fwd, vec3_make(0.0f, 1.0f, 0.0f)));
         vec3  up    = vec3_cross(right, fwd);
         float thf   = tanf(state->camera.fov * 0.5f);
-        rhi_set_pipeline(state->skybox_pipeline);
-        rhi_bind_texture(state->skybox_tex, 0);
-        rhi_set_uniform_int  ("uEquirect", 0);
+        rhi_set_pipeline(state->skybox_cube_pipeline);
+        rhi_bind_texture(state->env_cubemap, 0);
+        rhi_set_uniform_int  ("uEnvCube", 0);
         rhi_set_uniform_vec3 ("uCamForward", fwd.x, fwd.y, fwd.z);
         rhi_set_uniform_vec3 ("uCamRight",   right.x, right.y, right.z);
         rhi_set_uniform_vec3 ("uCamUp",      up.x, up.y, up.z);

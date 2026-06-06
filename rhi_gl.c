@@ -42,8 +42,12 @@ static GLuint     g_shaders[MAX_SHADERS];
 static sol_u32    g_shader_count;
 static GlPipeline g_pipelines[MAX_PIPELINES];
 static sol_u32    g_pipeline_count;
-static GLuint     g_textures[MAX_TEXTURES];
+/* a texture entry carries its GL target so rhi_bind_texture binds the right
+   one (GL_TEXTURE_2D vs GL_TEXTURE_CUBE_MAP) — cubemaps bind like any handle. */
+typedef struct { GLuint tex; GLenum target; } GlTexture;
+static GlTexture  g_textures[MAX_TEXTURES];
 static sol_u32    g_texture_count;
+static GLuint     g_cube_fbo;     /* reusable FBO for rendering to cubemap faces */
 static GlRenderTarget g_render_targets[MAX_RENDER_TARGETS];
 static sol_u32        g_render_target_count;
 
@@ -150,6 +154,7 @@ sol_bool rhi_init(struct GLFWwindow *window) {
     glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
     printf("CORE PROFILE  : %s\n", (profile & GL_CONTEXT_CORE_PROFILE_BIT) ? "yes" : "no");
     printf("FWD COMPATIBLE: %s\n", (flags & GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT) ? "yes" : "no");
+    glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);   /* filter across cube face edges (IBL) */
     return SOL_TRUE;
 }
 
@@ -235,7 +240,8 @@ RhiTexture rhi_create_texture(const void *pixels, int width, int height, RhiText
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
     idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
-    g_textures[idx] = tex;
+    g_textures[idx].tex = tex;
+    g_textures[idx].target = GL_TEXTURE_2D;
     h.id = idx + 1;
     gl_check("rhi_create_texture");
     return h;
@@ -258,15 +264,65 @@ RhiTexture rhi_create_texture_hdr(const float *pixels, int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);  /* clamp at the poles */
 
     idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
-    g_textures[idx] = tex;
+    g_textures[idx].tex = tex;
+    g_textures[idx].target = GL_TEXTURE_2D;
     h.id = idx + 1;
     gl_check("rhi_create_texture_hdr");
     return h;
 }
 
+RhiTexture rhi_create_cubemap(int size, sol_bool mipmapped) {
+    GLuint     tex;
+    sol_u32    idx;
+    RhiTexture h;
+    int        f;
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+    for (f = 0; f < 6; f++)                          /* allocate all 6 faces (NULL data) */
+        glTexImage2D((GLenum)(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f), 0, GL_RGBA16F,
+                     (GLsizei)size, (GLsizei)size, 0, GL_RGBA, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER,
+                    mipmapped ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    if (mipmapped) glGenerateMipmap(GL_TEXTURE_CUBE_MAP);  /* allocate the mip chain */
+
+    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    g_textures[idx].tex = tex;
+    g_textures[idx].target = GL_TEXTURE_CUBE_MAP;
+    h.id = idx + 1;
+    gl_check("rhi_create_cubemap");
+    return h;
+}
+
+void rhi_begin_cubemap_face(RhiTexture cube, int face, int mip, int size) {
+    if (!g_cube_fbo) glGenFramebuffers(1, &g_cube_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_cube_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           (GLenum)(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face),
+                           g_textures[cube.id - 1].tex, mip);
+    glViewport(0, 0, (GLsizei)size, (GLsizei)size);
+    glClear(GL_COLOR_BUFFER_BIT);
+    /* paired with rhi_end_pass(), which restores the window framebuffer */
+}
+
+void rhi_cubemap_generate_mips(RhiTexture cube) {
+    glBindTexture(GL_TEXTURE_CUBE_MAP, g_textures[cube.id - 1].tex);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    gl_check("rhi_cubemap_generate_mips");
+}
+
 void rhi_bind_texture(RhiTexture texture, int slot) {
     glActiveTexture((GLenum)(GL_TEXTURE0 + slot));
-    glBindTexture(GL_TEXTURE_2D, texture.id ? g_textures[texture.id - 1] : 0);
+    if (texture.id) {
+        const GlTexture *t = &g_textures[texture.id - 1];
+        glBindTexture(t->target, t->tex);    /* 2D or cubemap, per the handle */
+    } else {
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
 }
 
 RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat color_format) {
@@ -321,7 +377,8 @@ RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat
     /* register the color texture in the texture table so rhi_bind_texture and
        rhi_render_target_texture treat it as an ordinary texture handle */
     tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
-    g_textures[tex_idx] = color_tex;
+    g_textures[tex_idx].tex = color_tex;
+    g_textures[tex_idx].target = GL_TEXTURE_2D;
 
     rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count);
     rt = &g_render_targets[rt_idx];
@@ -381,7 +438,8 @@ RhiRenderTarget rhi_create_depth_target(int width, int height) {
     }
 
     tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
-    g_textures[tex_idx] = depth_tex;
+    g_textures[tex_idx].tex = depth_tex;
+    g_textures[tex_idx].target = GL_TEXTURE_2D;
 
     rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count);
     rt = &g_render_targets[rt_idx];
@@ -531,7 +589,7 @@ void rhi_destroy_texture(RhiTexture texture) {
     sol_u32 idx;
     if (!texture.id) return;
     idx = texture.id - 1;
-    glDeleteTextures(1, &g_textures[idx]);
+    glDeleteTextures(1, &g_textures[idx].tex);
     slot_free(idx, g_texture_free, &g_texture_free_count);
     gl_check("rhi_destroy_texture");
 }
@@ -548,14 +606,14 @@ void rhi_destroy_render_target(RhiRenderTarget rt) {
 
     if (r->color.id) {                               /* release the color texture slot too */
         tex_idx = r->color.id - 1;
-        glDeleteTextures(1, &g_textures[tex_idx]);
-        g_textures[tex_idx] = 0;
+        glDeleteTextures(1, &g_textures[tex_idx].tex);
+        g_textures[tex_idx].tex = 0;
         slot_free(tex_idx, g_texture_free, &g_texture_free_count);
     }
     if (r->depth.id) {                               /* depth target: release its depth texture too */
         tex_idx = r->depth.id - 1;
-        glDeleteTextures(1, &g_textures[tex_idx]);
-        g_textures[tex_idx] = 0;
+        glDeleteTextures(1, &g_textures[tex_idx].tex);
+        g_textures[tex_idx].tex = 0;
         slot_free(tex_idx, g_texture_free, &g_texture_free_count);
     }
 
