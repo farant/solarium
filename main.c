@@ -20,6 +20,11 @@
 #define SHADOW_NEAR       1.0f     /* light frustum near/far: bracket the scene  */
 #define SHADOW_FAR        20.0f    /* (also set depth precision)                 */
 
+#define ENV_CUBE_SIZE   1024   /* per-face resolution of the environment cubemap */
+#define IRRADIANCE_SIZE 32     /* irradiance is very low-frequency: tiny is plenty */
+#define PREFILTER_SIZE  128    /* specular prefilter base (mip 0 = sharpest reflection) */
+#define PREFILTER_MIPS  5      /* roughness levels 0..1 across mips 0..4 */
+
 /* --- shaders: GLSL source handed to the backend (still app-authored) --- */
 static const char *VERTEX_SRC =
     "#version 330 core\n"
@@ -286,12 +291,13 @@ static const char *SKYBOX_CUBE_FRAGMENT_SRC =
     "uniform float uTanHalfFovY;\n"
     "uniform float uAspect;\n"
     "uniform samplerCube uEnvCube;\n"
+    "uniform float uLod;\n"                                  /* 0 = sharp; >0 inspects prefilter mips (C1) */
     "out vec4 FragColor;\n"
     "void main() {\n"
     "    vec3 dir = normalize(uCamForward\n"
     "             + vNdc.x * uTanHalfFovY * uAspect * uCamRight\n"
     "             + vNdc.y * uTanHalfFovY * uCamUp);\n"
-    "    FragColor = vec4(texture(uEnvCube, dir).rgb, 1.0);\n"
+    "    FragColor = vec4(textureLod(uEnvCube, dir, uLod).rgb, 1.0);\n"
     "}\n";
 
 /* --- the diffuse irradiance convolution (B2): for each output direction N (a
@@ -329,6 +335,76 @@ static const char *IRRADIANCE_FRAGMENT_SRC =
     "            nrSamples  += 1.0;\n"
     "        }\n"
     "    FragColor = vec4(PI * irradiance / nrSamples, 1.0);\n"
+    "}\n";
+
+/* --- specular prefilter convolution (C1): for each output direction (= the
+   reflection vector R, assuming V=N=R), GGX-importance-sample the env cube and
+   average. Rendered once per mip, each at a higher roughness -> the roughness
+   mip chain. Hammersley + GGX inverse-CDF gives samples clustered in the lobe
+   (far fewer needed than uniform). The per-sample mip pick (solid-angle ratio)
+   pre-blurs bright spots so the sun can't firefly a glossy reflection. --- */
+static const char *PREFILTER_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vNdc;\n"
+    "uniform vec3  uCamForward;\n"
+    "uniform vec3  uCamRight;\n"
+    "uniform vec3  uCamUp;\n"
+    "uniform float uTanHalfFovY;\n"
+    "uniform float uAspect;\n"
+    "uniform samplerCube uEnvCube;\n"
+    "uniform float uRoughness;\n"
+    "out vec4 FragColor;\n"
+    "const float PI = 3.14159265359;\n"
+    "const float ENV_SIZE = 1024.0;\n"                       /* env cube face resolution */
+    "float distributionGGX(float NoH, float rough) {\n"
+    "    float a = rough*rough; float a2 = a*a;\n"
+    "    float d = NoH*NoH*(a2 - 1.0) + 1.0;\n"
+    "    return a2 / (PI * d * d);\n"
+    "}\n"
+    "float radicalInverse(uint bits) {\n"                    /* van der Corput (no bitfieldReverse in 330) */
+    "    bits = (bits << 16u) | (bits >> 16u);\n"
+    "    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);\n"
+    "    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);\n"
+    "    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);\n"
+    "    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);\n"
+    "    return float(bits) * 2.3283064365386963e-10;\n"     /* / 2^32 */
+    "}\n"
+    "vec2 hammersley(uint i, uint n) { return vec2(float(i)/float(n), radicalInverse(i)); }\n"
+    "vec3 importanceSampleGGX(vec2 Xi, vec3 N, float rough) {\n"
+    "    float a = rough*rough;\n"
+    "    float phi = 2.0*PI*Xi.x;\n"
+    "    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0)*Xi.y));\n"  /* GGX inverse-CDF */
+    "    float sinTheta = sqrt(1.0 - cosTheta*cosTheta);\n"
+    "    vec3 H = vec3(sinTheta*cos(phi), sinTheta*sin(phi), cosTheta);\n"   /* tangent space */
+    "    vec3 up = abs(N.z) < 0.999 ? vec3(0.0,0.0,1.0) : vec3(1.0,0.0,0.0);\n"
+    "    vec3 tangent = normalize(cross(up, N));\n"
+    "    vec3 bitan = cross(N, tangent);\n"
+    "    return normalize(tangent*H.x + bitan*H.y + N*H.z);\n"
+    "}\n"
+    "void main() {\n"
+    "    vec3 N = normalize(uCamForward\n"
+    "           + vNdc.x * uTanHalfFovY * uAspect * uCamRight\n"
+    "           + vNdc.y * uTanHalfFovY * uCamUp);\n"
+    "    vec3 R = N; vec3 V = N;\n"                           /* split-sum assumption: V=N=R */
+    "    const uint SAMPLES = 1024u;\n"
+    "    vec3  sum = vec3(0.0); float wsum = 0.0;\n"
+    "    for (uint i = 0u; i < SAMPLES; i++) {\n"
+    "        vec2 Xi = hammersley(i, SAMPLES);\n"
+    "        vec3 H  = importanceSampleGGX(Xi, N, uRoughness);\n"
+    "        vec3 L  = normalize(2.0 * dot(V, H) * H - V);\n"  /* reflect V about H */
+    "        float NoL = max(dot(N, L), 0.0);\n"
+    "        if (NoL > 0.0) {\n"
+    "            float NoH = max(dot(N, H), 0.0);\n"
+    "            float D   = distributionGGX(NoH, uRoughness);\n"
+    "            float pdf = D * 0.25 + 0.0001;\n"            /* HoV==NoH under V=N -> D/4 */
+    "            float saTexel  = 4.0*PI / (6.0 * ENV_SIZE * ENV_SIZE);\n"
+    "            float saSample = 1.0 / (float(SAMPLES) * pdf + 0.0001);\n"
+    "            float mip = uRoughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel);\n"
+    "            sum  += textureLod(uEnvCube, L, mip).rgb * NoL;\n"
+    "            wsum += NoL;\n"
+    "        }\n"
+    "    }\n"
+    "    FragColor = vec4(sum / wsum, 1.0);\n"
     "}\n";
 
 typedef struct {
@@ -371,6 +447,11 @@ typedef struct {
     RhiPipeline irradiance_pipeline;   /* the convolution pass */
     sol_bool    show_irradiance;       /* 'I' toggles the skybox source: env vs irradiance */
     sol_bool    i_was_down;            /* edge-detect the inspector toggle */
+    RhiTexture  prefilter_cubemap;     /* specular prefilter, roughness mip chain (C1) */
+    RhiPipeline prefilter_pipeline;    /* the GGX importance-sampling pass */
+    sol_bool    show_prefilter;        /* 'P' cycles the prefilter-mip inspector */
+    int         prefilter_mip;         /* which roughness level the inspector shows */
+    sol_bool    p_was_down;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -508,7 +589,7 @@ static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
    triggered so it fires once per press. */
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool f_now, tab_now, m_now, i_now, dragging, fp;
+    sol_bool f_now, tab_now, m_now, i_now, p_now, dragging, fp;
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
@@ -608,6 +689,17 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->show_irradiance = !st->show_irradiance;
     st->i_was_down = i_now;
 
+    /* P cycles the prefilter inspector: off -> roughness 0 -> .. -> 1 -> off (C1) */
+    p_now = glfwGetKey(w, GLFW_KEY_P) == GLFW_PRESS;
+    if (p_now && !st->p_was_down && st->prefilter_cubemap.id) {
+        if (!st->show_prefilter) { st->show_prefilter = SOL_TRUE; st->prefilter_mip = 0; }
+        else {
+            st->prefilter_mip++;
+            if (st->prefilter_mip >= PREFILTER_MIPS) st->show_prefilter = SOL_FALSE;
+        }
+    }
+    st->p_was_down = p_now;
+
     /* exposure scrub: '[' down, ']' up (held; dt-scaled), with a live title readout */
     {
         float erate = (float)dt * 1.5f;
@@ -635,9 +727,6 @@ static RhiTexture load_texture(const char *path) {
     }
     return tex;
 }
-
-#define ENV_CUBE_SIZE   1024   /* per-face resolution of the environment cubemap */
-#define IRRADIANCE_SIZE 32     /* irradiance is very low-frequency: tiny is plenty */
 
 /* The six cubemap face bases (B1). The (forward, up) pairs are the standard
    cubemap convention; right = cross(fwd, up) makes dir = fwd + ndc.x*right +
@@ -700,6 +789,34 @@ static void build_irradiance_map(AppState *state) {
         rhi_set_uniform_vec3("uCamUp",      g_face_up[f].x, g_face_up[f].y, g_face_up[f].z);
         rhi_draw(0, 3);
         rhi_end_pass();
+    }
+}
+
+/* Build the specular prefilter cubemap (C1): each mip is the env convolved with
+   the GGX lobe for an increasing roughness. Same per-face loop, but now also per
+   mip (a roughness level), rendering into that mip via rhi_begin_cubemap_face. */
+static void build_prefilter_map(AppState *state) {
+    int mip, f;
+    state->prefilter_cubemap = rhi_create_cubemap(PREFILTER_SIZE, SOL_TRUE);
+
+    rhi_set_pipeline(state->prefilter_pipeline);
+    rhi_bind_texture(state->env_cubemap, 0);          /* sample the (mipmapped, finite) env cube */
+    rhi_set_uniform_int  ("uEnvCube", 0);
+    rhi_set_uniform_float("uTanHalfFovY", 1.0f);
+    rhi_set_uniform_float("uAspect",      1.0f);
+    for (mip = 0; mip < PREFILTER_MIPS; mip++) {
+        int   sz    = PREFILTER_SIZE >> mip;
+        float rough = (float)mip / (float)(PREFILTER_MIPS - 1);
+        rhi_set_uniform_float("uRoughness", rough);
+        for (f = 0; f < 6; f++) {
+            vec3 r = vec3_cross(g_face_fwd[f], g_face_up[f]);
+            rhi_begin_cubemap_face(state->prefilter_cubemap, f, mip, sz);
+            rhi_set_uniform_vec3("uCamForward", g_face_fwd[f].x, g_face_fwd[f].y, g_face_fwd[f].z);
+            rhi_set_uniform_vec3("uCamRight",   r.x, r.y, r.z);
+            rhi_set_uniform_vec3("uCamUp",      g_face_up[f].x, g_face_up[f].y, g_face_up[f].z);
+            rhi_draw(0, 3);
+            rhi_end_pass();
+        }
     }
 }
 
@@ -807,6 +924,19 @@ static int init_scene(AppState *state) {
         irr_desc.stride     = 0;
         irr_desc.depth_test = SOL_FALSE;
         state->irradiance_pipeline = rhi_create_pipeline(&irr_desc);
+    }
+
+    /* the specular prefilter pipeline (C1): fullscreen triangle, depth off */
+    {
+        RhiShader       pre_shader;
+        RhiPipelineDesc pre_desc;
+        pre_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, PREFILTER_FRAGMENT_SRC);
+        if (!pre_shader.id) return 0;
+        pre_desc.shader     = pre_shader;
+        pre_desc.attr_count = 0;
+        pre_desc.stride     = 0;
+        pre_desc.depth_test = SOL_FALSE;
+        state->prefilter_pipeline = rhi_create_pipeline(&pre_desc);
     }
 
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
@@ -944,6 +1074,7 @@ static int init_scene(AppState *state) {
             image_hdr_free(&sky);
             build_env_cubemap(state);     /* bake equirect -> cubemap (B1) */
             build_irradiance_map(state);  /* convolve -> irradiance cubemap (B2) */
+            build_prefilter_map(state);   /* GGX prefilter -> roughness mips (C1) */
         } else {
             printf("skybox HDR: load failed (skybox disabled)\n");
         }
@@ -1143,11 +1274,18 @@ static void render(AppState *state) {
         vec3  right = vec3_normalize(vec3_cross(fwd, vec3_make(0.0f, 1.0f, 0.0f)));
         vec3  up    = vec3_cross(right, fwd);
         float thf   = tanf(state->camera.fov * 0.5f);
-        RhiTexture skytex = state->show_irradiance    /* 'I' inspects the irradiance map */
-                          ? state->irradiance_cubemap : state->env_cubemap;
+        RhiTexture skytex = state->env_cubemap;       /* default: the sharp environment */
+        float      skylod = 0.0f;
+        if (state->show_prefilter) {                  /* 'P' inspects a prefilter roughness level */
+            skytex = state->prefilter_cubemap;
+            skylod = (float)state->prefilter_mip;
+        } else if (state->show_irradiance) {          /* 'I' inspects the irradiance map */
+            skytex = state->irradiance_cubemap;
+        }
         rhi_set_pipeline(state->skybox_cube_pipeline);
         rhi_bind_texture(skytex, 0);
         rhi_set_uniform_int  ("uEnvCube", 0);
+        rhi_set_uniform_float("uLod", skylod);
         rhi_set_uniform_vec3 ("uCamForward", fwd.x, fwd.y, fwd.z);
         rhi_set_uniform_vec3 ("uCamRight",   right.x, right.y, right.z);
         rhi_set_uniform_vec3 ("uCamUp",      up.x, up.y, up.z);
