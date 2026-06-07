@@ -73,6 +73,8 @@ static const char *FRAGMENT_SRC =
     "uniform float uCosOuter;\n"                             /* cos(outer half-angle) */
     "uniform mat4  uLightVP;\n"                              /* light proj*view (item 9c); == the shadow pass's */
     "uniform sampler2D uShadowMap;\n"                        /* depth from the light's POV (item 9b) */
+    "uniform samplerCube uIrradianceMap;\n"                  /* diffuse IBL (B3) */
+    "uniform float uUseIBL;\n"                               /* 0 = flat ambient fallback */
     "out vec4 FragColor;\n"
     "const float PI = 3.14159265359;\n"
     "\n"
@@ -90,6 +92,9 @@ static const char *FRAGMENT_SRC =
     "}\n"
     "vec3 fresnelSchlick(float HoV, vec3 F0) {\n"            /* F: grazing reflectance */
     "    return F0 + (1.0 - F0) * pow(1.0 - HoV, 5.0);\n"
+    "}\n"
+    "vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float rough) {\n"  /* ambient F (no half-vector): view angle + roughness (B3) */
+    "    return F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - cosTheta, 5.0);\n"
     "}\n"
     "float shadowFactor(vec3 worldPos, float NoL) {\n"       /* 0 = lit, 1 = fully shadowed (item 9c) */
     "    vec4 lpos = uLightVP * vec4(worldPos, 1.0);\n"
@@ -157,7 +162,15 @@ static const char *FRAGMENT_SRC =
     "\n"
     "    float ao = 1.0;\n"
     "    if (uUseAOTex > 0.5) ao = 1.0 + uAOStrength * (texture(uAOTex, vUV).r - 1.0);\n"
-    "    vec3 ambient = 0.03 * albedo * ao;\n"                /* AO modulates indirect only; direct Lo untouched */
+    "    vec3 ambient;\n"                                     /* indirect light (AO modulates this only; direct Lo untouched) */
+    "    if (uUseIBL > 0.5) {\n"
+    "        vec3 kS_amb = fresnelSchlickRoughness(NoV, F0, roughness);\n"
+    "        vec3 kD_amb = (1.0 - kS_amb) * (1.0 - metallic);\n"
+    "        vec3 irr    = texture(uIrradianceMap, N).rgb;\n"  /* environment diffuse (B2 baked the 1/PI) */
+    "        ambient = (kD_amb * irr * albedo) * ao;\n"        /* directional, environment-colored */
+    "    } else {\n"
+    "        ambient = 0.03 * albedo * ao;\n"                  /* fallback if the .hdr didn't load */
+    "    }\n"
     "    vec3 color = ambient + Lo;\n"
     "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* selection tint (linear) */
     "    FragColor = vec4(color, 1.0);\n"                     /* LINEAR -> the HDR buffer; 7c tonemaps + encodes */
@@ -256,7 +269,8 @@ static const char *SKYBOX_FRAGMENT_SRC =
     "             + vNdc.y * uTanHalfFovY * uCamUp);\n"
     "    float u = atan(dir.z, dir.x) / (2.0 * PI) + 0.5;\n"         /* longitude (wraps) */
     "    float v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI;\n"      /* latitude (up = sky) */
-    "    FragColor = vec4(texture(uEquirect, vec2(u, v)).rgb, 1.0);\n"  /* linear HDR -> hdr_rt */
+    "    vec3 c = min(texture(uEquirect, vec2(u, v)).rgb, vec3(60000.0));\n"  /* finite (no inf in 16F) so mips can average the sun (IBL) */
+    "    FragColor = vec4(c, 1.0);\n"                                /* linear HDR -> hdr_rt / env cube */
     "}\n";
 
 /* --- the on-screen skybox once we have a cubemap (B1): identical to the equirect
@@ -310,7 +324,7 @@ static const char *IRRADIANCE_FRAGMENT_SRC =
     "        for (float theta = 0.0; theta < 0.5*PI; theta += delta) {\n"
     "            vec3 t = vec3(sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta));\n"  /* tangent space */
     "            vec3 w = t.x*right + t.y*up + t.z*N;\n"     /* -> world */
-    "            vec3 radiance = min(texture(uEnvCube, w).rgb, vec3(50.0));\n"  /* clamp the sun: an inf/huge sample else saturates the integral (hard step) */
+    "            vec3 radiance = textureLod(uEnvCube, w, 4.0).rgb;\n"  /* high mip: sun pre-spread -> warm AND smooth (no firefly step) */
     "            irradiance += radiance * cos(theta) * sin(theta);\n"
     "            nrSamples  += 1.0;\n"
     "        }\n"
@@ -1025,6 +1039,13 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
             rhi_set_uniform_mat4("uLightVP", lvp.m);
             rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt), 4);
             rhi_set_uniform_int("uShadowMap", 4);
+        }
+
+        /* diffuse IBL (B3): the irradiance cubemap on unit 5 (0-3 textures, 4 shadow) */
+        rhi_set_uniform_float("uUseIBL", state->irradiance_cubemap.id ? 1.0f : 0.0f);
+        if (state->irradiance_cubemap.id) {
+            rhi_bind_texture(state->irradiance_cubemap, 5);
+            rhi_set_uniform_int("uIrradianceMap", 5);
         }
     }
 
