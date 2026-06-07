@@ -18,6 +18,8 @@
 *.glb
 # Environment maps (Polyhaven HDRIs — CC0; large, kept local)
 *.hdr
+# Debug screenshots (kept local; paper-picture.png is a real asset, so only .jpg)
+*.jpg
 
 # Editor / tooling
 compile_commands.json
