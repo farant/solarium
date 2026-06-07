@@ -24,6 +24,7 @@
 #define IRRADIANCE_SIZE 32     /* irradiance is very low-frequency: tiny is plenty */
 #define PREFILTER_SIZE  128    /* specular prefilter base (mip 0 = sharpest reflection) */
 #define PREFILTER_MIPS  5      /* roughness levels 0..1 across mips 0..4 */
+#define BRDF_LUT_SIZE   512    /* BRDF integration LUT (NoV x roughness) */
 
 /* --- shaders: GLSL source handed to the backend (still app-authored) --- */
 static const char *VERTEX_SRC =
@@ -407,6 +408,69 @@ static const char *PREFILTER_FRAGMENT_SRC =
     "    FragColor = vec4(sum / wsum, 1.0);\n"
     "}\n";
 
+/* --- the BRDF integration LUT (C2): the second split-sum factor. For each
+   (NoV, roughness) it integrates the specular geometry+Fresnel over the GGX
+   lobe, factored so F0 separates -> R = scale on F0, G = bias. A 2D fullscreen
+   render; environment-independent (bake once). Uses the same Hammersley + GGX
+   importance sampling as C1, but the IBL geometry remap (k = rough^2 / 2). --- */
+static const char *BRDF_LUT_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "out vec4 FragColor;\n"
+    "const float PI = 3.14159265359;\n"
+    "float radicalInverse(uint bits) {\n"
+    "    bits = (bits << 16u) | (bits >> 16u);\n"
+    "    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);\n"
+    "    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);\n"
+    "    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);\n"
+    "    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);\n"
+    "    return float(bits) * 2.3283064365386963e-10;\n"
+    "}\n"
+    "vec2 hammersley(uint i, uint n) { return vec2(float(i)/float(n), radicalInverse(i)); }\n"
+    "vec3 importanceSampleGGX(vec2 Xi, vec3 N, float rough) {\n"
+    "    float a = rough*rough;\n"
+    "    float phi = 2.0*PI*Xi.x;\n"
+    "    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0)*Xi.y));\n"
+    "    float sinTheta = sqrt(1.0 - cosTheta*cosTheta);\n"
+    "    vec3 H = vec3(sinTheta*cos(phi), sinTheta*sin(phi), cosTheta);\n"
+    "    vec3 up = abs(N.z) < 0.999 ? vec3(0.0,0.0,1.0) : vec3(1.0,0.0,0.0);\n"
+    "    vec3 tangent = normalize(cross(up, N));\n"
+    "    vec3 bitan = cross(N, tangent);\n"
+    "    return normalize(tangent*H.x + bitan*H.y + N*H.z);\n"
+    "}\n"
+    "float geometrySchlickGGX(float NdotX, float rough) {\n"  /* IBL remap: k = rough^2 / 2 */
+    "    float k = (rough*rough) / 2.0;\n"
+    "    return NdotX / (NdotX*(1.0 - k) + k);\n"
+    "}\n"
+    "float geometrySmith(vec3 N, vec3 V, vec3 L, float rough) {\n"
+    "    return geometrySchlickGGX(max(dot(N,V),0.0), rough) * geometrySchlickGGX(max(dot(N,L),0.0), rough);\n"
+    "}\n"
+    "vec2 integrateBRDF(float NoV, float rough) {\n"
+    "    vec3 V = vec3(sqrt(1.0 - NoV*NoV), 0.0, NoV);\n"     /* view in tangent space */
+    "    vec3 N = vec3(0.0, 0.0, 1.0);\n"
+    "    float A = 0.0; float B = 0.0;\n"
+    "    const uint SAMPLES = 1024u;\n"
+    "    for (uint i = 0u; i < SAMPLES; i++) {\n"
+    "        vec2 Xi = hammersley(i, SAMPLES);\n"
+    "        vec3 H  = importanceSampleGGX(Xi, N, rough);\n"
+    "        vec3 L  = normalize(2.0 * dot(V, H) * H - V);\n"
+    "        float NoL = max(L.z, 0.0);\n"
+    "        float NoH = max(H.z, 0.0);\n"
+    "        float VoH = max(dot(V, H), 0.0);\n"
+    "        if (NoL > 0.0) {\n"
+    "            float G    = geometrySmith(N, V, L, rough);\n"
+    "            float Gvis = (G * VoH) / (NoH * NoV);\n"
+    "            float Fc   = pow(1.0 - VoH, 5.0);\n"          /* Fresnel with F0 factored out */
+    "            A += (1.0 - Fc) * Gvis;\n"                    /* scale on F0 */
+    "            B += Fc * Gvis;\n"                            /* bias */
+    "        }\n"
+    "    }\n"
+    "    return vec2(A, B) / float(SAMPLES);\n"
+    "}\n"
+    "void main() {\n"
+    "    FragColor = vec4(integrateBRDF(max(vUV.x, 0.001), vUV.y), 0.0, 1.0);\n"  /* guard NoV=0 */
+    "}\n";
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
@@ -452,6 +516,8 @@ typedef struct {
     sol_bool    show_prefilter;        /* 'P' cycles the prefilter-mip inspector */
     int         prefilter_mip;         /* which roughness level the inspector shows */
     sol_bool    p_was_down;
+    RhiRenderTarget brdf_lut_rt;       /* BRDF integration LUT, 2D RG (C2) */
+    RhiPipeline     brdf_lut_pipeline;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -820,6 +886,17 @@ static void build_prefilter_map(AppState *state) {
     }
 }
 
+/* Bake the BRDF integration LUT (C2): a single 2D fullscreen pass into a render
+   target; its color texture is the LUT (R=F0 scale, G=bias). Environment-
+   independent, so this runs once and never changes. */
+static void build_brdf_lut(AppState *state) {
+    state->brdf_lut_rt = rhi_create_render_target(BRDF_LUT_SIZE, BRDF_LUT_SIZE, RHI_TEX_RGBA16F);
+    rhi_begin_pass(state->brdf_lut_rt, 0.0f, 0.0f, 0.0f, 1.0f);
+    rhi_set_pipeline(state->brdf_lut_pipeline);
+    rhi_draw(0, 3);
+    rhi_end_pass();
+}
+
 /* One-time setup: build the pipeline + meshes, populate the scene. */
 static int init_scene(AppState *state) {
     MeshBuilder mb;
@@ -937,6 +1014,19 @@ static int init_scene(AppState *state) {
         pre_desc.stride     = 0;
         pre_desc.depth_test = SOL_FALSE;
         state->prefilter_pipeline = rhi_create_pipeline(&pre_desc);
+    }
+
+    /* the BRDF LUT pipeline (C2): fullscreen triangle, depth off */
+    {
+        RhiShader       brdf_shader;
+        RhiPipelineDesc brdf_desc;
+        brdf_shader = rhi_create_shader(POST_VERTEX_SRC, BRDF_LUT_FRAGMENT_SRC);
+        if (!brdf_shader.id) return 0;
+        brdf_desc.shader     = brdf_shader;
+        brdf_desc.attr_count = 0;
+        brdf_desc.stride     = 0;
+        brdf_desc.depth_test = SOL_FALSE;
+        state->brdf_lut_pipeline = rhi_create_pipeline(&brdf_desc);
     }
 
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
@@ -1075,6 +1165,7 @@ static int init_scene(AppState *state) {
             build_env_cubemap(state);     /* bake equirect -> cubemap (B1) */
             build_irradiance_map(state);  /* convolve -> irradiance cubemap (B2) */
             build_prefilter_map(state);   /* GGX prefilter -> roughness mips (C1) */
+            build_brdf_lut(state);        /* BRDF integration LUT (C2) */
         } else {
             printf("skybox HDR: load failed (skybox disabled)\n");
         }
