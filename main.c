@@ -81,6 +81,8 @@ static const char *FRAGMENT_SRC =
     "uniform sampler2D uShadowMap;\n"                        /* depth from the light's POV (item 9b) */
     "uniform samplerCube uIrradianceMap;\n"                  /* diffuse IBL (B3) */
     "uniform float uUseIBL;\n"                               /* 0 = flat ambient fallback */
+    "uniform samplerCube uPrefilterMap;\n"                   /* specular IBL: prefiltered env (C3) */
+    "uniform sampler2D   uBrdfLUT;\n"                        /* specular IBL: BRDF integration */
     "out vec4 FragColor;\n"
     "const float PI = 3.14159265359;\n"
     "\n"
@@ -173,7 +175,12 @@ static const char *FRAGMENT_SRC =
     "        vec3 kS_amb = fresnelSchlickRoughness(NoV, F0, roughness);\n"
     "        vec3 kD_amb = (1.0 - kS_amb) * (1.0 - metallic);\n"
     "        vec3 irr    = texture(uIrradianceMap, N).rgb;\n"  /* environment diffuse (B2 baked the 1/PI) */
-    "        ambient = (kD_amb * irr * albedo) * ao;\n"        /* directional, environment-colored */
+    "        vec3 diffuseIBL = irr * albedo;\n"
+    "        vec3 R = reflect(-V, N);\n"                        /* specular IBL (C3): mirror direction */
+    "        vec3 prefiltered = textureLod(uPrefilterMap, R, roughness * 4.0).rgb;\n"  /* roughness -> mip */
+    "        vec2 brdf = texture(uBrdfLUT, vec2(NoV, roughness)).rg;\n"
+    "        vec3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y);\n"  /* split-sum recombine */
+    "        ambient = (kD_amb * diffuseIBL + specularIBL) * ao;\n"
     "    } else {\n"
     "        ambient = 0.03 * albedo * ao;\n"                  /* fallback if the .hdr didn't load */
     "    }\n"
@@ -1263,11 +1270,16 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
             rhi_set_uniform_int("uShadowMap", 4);
         }
 
-        /* diffuse IBL (B3): the irradiance cubemap on unit 5 (0-3 textures, 4 shadow) */
+        /* IBL: irradiance (diffuse, B3) unit 5; prefilter + BRDF LUT (specular, C3)
+           units 6/7. (0-3 material textures, 4 shadow.) */
         rhi_set_uniform_float("uUseIBL", state->irradiance_cubemap.id ? 1.0f : 0.0f);
         if (state->irradiance_cubemap.id) {
             rhi_bind_texture(state->irradiance_cubemap, 5);
             rhi_set_uniform_int("uIrradianceMap", 5);
+            rhi_bind_texture(state->prefilter_cubemap, 6);
+            rhi_set_uniform_int("uPrefilterMap", 6);
+            rhi_bind_texture(rhi_render_target_texture(state->brdf_lut_rt), 7);
+            rhi_set_uniform_int("uBrdfLUT", 7);
         }
     }
 
