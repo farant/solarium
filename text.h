@@ -34,4 +34,18 @@ int text_shape(const Font *f, const char *utf8, ShapedGlyph *out, int max);
 void ui_text(const Font *f, const char *utf8, float x, float y, float scale,
              float r, float g, float b, float a);
 
+/* Measured extent at scale: *out_w = the widest line, *out_h = line count *
+   line height (an empty string still measures one line high). Either out
+   pointer may be NULL. */
+void text_measure(const Font *f, const char *utf8, float scale,
+                  float *out_w, float *out_h);
+
+/* Greedy word wrap: draw utf8 with lines broken at spaces so no line
+   exceeds max_width px. A single word wider than that gets its own line,
+   unbroken; runs of separating spaces collapse at breaks; '\n' passes
+   through. Returns the number of lines drawn. */
+int ui_text_wrapped(const Font *f, const char *utf8, float x, float y,
+                    float scale, float max_width,
+                    float r, float g, float b, float a);
+
 #endif /* TEXT_H */

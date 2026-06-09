@@ -5,6 +5,8 @@
 #include "text.h"
 #include "ui.h"
 
+#include <string.h>
+
 /* ----------------------------------------------------------------- UTF-8 */
 /* Decode one UTF-8 sequence at p into *cp; return the byte after it. The
    encoding is self-synchronizing: lead bytes declare their length by their
@@ -77,6 +79,23 @@ int text_shape(const Font *f, const char *utf8, ShapedGlyph *out, int max) {
 /* ------------------------------------------------------------- drawing */
 #define TEXT_MAX_GLYPHS 1024    /* per ui_text call; longer strings truncate */
 
+void text_measure(const Font *f, const char *utf8, float scale,
+                  float *out_w, float *out_h) {
+    ShapedGlyph shaped[TEXT_MAX_GLYPHS];
+    int         n, i;
+    float       w = 0.0f, max_y = 0.0f;
+
+    n = text_shape(f, utf8, shaped, TEXT_MAX_GLYPHS);
+    for (i = 0; i < n; i++) {
+        const FontGlyph *g = font_glyph(f, shaped[i].glyph);
+        float e = shaped[i].x + (g ? g->advance : 0.0f);
+        if (e > w) w = e;
+        if (shaped[i].y > max_y) max_y = shaped[i].y;
+    }
+    if (out_w) *out_w = w * scale;
+    if (out_h) *out_h = (max_y + font_line_height(f)) * scale;
+}
+
 void ui_text(const Font *f, const char *utf8, float x, float y, float scale,
              float r, float g, float b, float a) {
     ShapedGlyph shaped[TEXT_MAX_GLYPHS];
@@ -94,4 +113,63 @@ void ui_text(const Font *f, const char *utf8, float x, float y, float scale,
                       gl->u0, gl->v0, gl->u1, gl->v1,
                       r, g, b, a);
     }
+}
+
+/* ------------------------------------------------------------- wrapping */
+/* Layout sits ABOVE the seam: wrapping is a string -> string transform
+   (inserting '\n' at greedy break points), measured per word through
+   text_measure, then drawn by the ordinary ui_text. No glyph access of its
+   own — the HarfBuzz swap doesn't touch this. */
+#define WRAP_BUF 2048
+#define WORD_BUF 256
+
+int ui_text_wrapped(const Font *f, const char *utf8, float x, float y,
+                    float scale, float max_width,
+                    float r, float g, float b, float a) {
+    char        out[WRAP_BUF];
+    char        word[WORD_BUF];
+    const char *p = utf8;
+    size_t      oi = 0;
+    float       line_w, space_w, limit;
+    int         lines = 1;
+
+    if (!f || max_width <= 0.0f || scale <= 0.0f) return 0;
+    text_measure(f, " ", 1.0f, &space_w, (float *)0);
+    limit  = max_width / scale;        /* compare in base-size units */
+    line_w = 0.0f;
+
+    while (*p != '\0' && oi + WORD_BUF + 2 < WRAP_BUF) {
+        size_t wl = 0;
+        float  ww;
+
+        if (*p == '\n') {                       /* explicit break passes through */
+            out[oi++] = '\n';
+            lines++;
+            line_w = 0.0f;
+            p++;
+            continue;
+        }
+        if (*p == ' ') { p++; continue; }       /* separators collapse at breaks */
+
+        while (*p != '\0' && *p != ' ' && *p != '\n' && wl < WORD_BUF - 1)
+            word[wl++] = *p++;
+        word[wl] = '\0';
+        text_measure(f, word, 1.0f, &ww, (float *)0);
+
+        if (line_w > 0.0f && line_w + space_w + ww > limit) {
+            out[oi++] = '\n';                   /* break instead of the space */
+            lines++;
+            line_w = 0.0f;
+        } else if (line_w > 0.0f) {
+            out[oi++] = ' ';
+            line_w += space_w;
+        }
+        /* a single word wider than the limit gets its own line, unbroken */
+        memcpy(out + oi, word, wl);
+        oi += wl;
+        line_w += ww;
+    }
+    out[oi] = '\0';
+    ui_text(f, out, x, y, scale, r, g, b, a);
+    return lines;
 }

@@ -532,6 +532,7 @@ typedef struct {
     sol_bool    l_was_down;     /* edge-detect the scene-reload key (P3 item 1) */
     /* text (P3 item 3) */
     Font       *ui_font;        /* DejaVu Sans, SDF atlas; NULL if load failed */
+    Font       *mono_font;      /* DejaVu Sans Mono — code + aligned readouts */
     int         text_inspect;   /* 'T' cycles: 0 off, 1 atlas, 2 type specimen */
     sol_bool    t_was_down;
     /* mouse-look / cursor state (item 3c/3d) */
@@ -813,16 +814,14 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     }
     st->l_was_down = l_now;
 
-    /* exposure scrub: '[' down, ']' up (held; dt-scaled), with a live title readout */
+    /* exposure scrub: '[' down, ']' up (held; dt-scaled). The readout lives
+       in the debug panel now (3c) — the window-title hack is retired. */
     {
         float erate = (float)dt * 1.5f;
-        char  title[48];
         if (glfwGetKey(w, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) st->exposure += erate;
         if (glfwGetKey(w, GLFW_KEY_LEFT_BRACKET)  == GLFW_PRESS) st->exposure -= erate;
         if (st->exposure < 0.1f) st->exposure = 0.1f;
         if (st->exposure > 8.0f) st->exposure = 8.0f;
-        sprintf(title, "solarium  exposure %.2f", (double)st->exposure);
-        glfwSetWindowTitle(w, title);
     }
 }
 
@@ -1492,21 +1491,44 @@ static void render(AppState *state) {
     ui_begin(state->fb_width, state->fb_height);
     us = (float)state->fb_height / 1080.0f;
 
-    /* the debug readout panel — first real type in the engine (3b; live
-       readouts arrive in 3c). ui_text positions the BASELINE, hence ascent. */
-    ui_quad(8.0f * us, 8.0f * us, 280.0f * us, 84.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
-    ui_quad_outline(8.0f * us, 8.0f * us, 280.0f * us, 84.0f * us,
+    /* the debug readout panel — live state, monospace-aligned (3c; this
+       retired the window-title sprintf hack). ui_text positions BASELINES. */
+    ui_quad(8.0f * us, 8.0f * us, 300.0f * us, 104.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
+    ui_quad_outline(8.0f * us, 8.0f * us, 300.0f * us, 104.0f * us,
                     1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
     if (state->ui_font) {
         float ts   = 0.45f * us;
-        float base = 16.0f * us + font_ascent(state->ui_font) * ts;
+        float base = 14.0f * us + font_ascent(state->ui_font) * ts;
         ui_text(state->ui_font, "solarium", 20.0f * us, base, ts,
                 0.95f, 0.80f, 0.45f, 1.0f);
-        ui_text(state->ui_font,
-                "\xce\xb4\xce\xbf\xce\xba\xce\xb9\xce\xbc\xce\xae"
-                " \xce\xba\xce\xb5\xce\xb9\xce\xbc\xce\xad\xce\xbd\xce\xbf\xcf\x85",
-                20.0f * us, base + font_line_height(state->ui_font) * ts, ts,
-                1.0f, 1.0f, 1.0f, 0.85f);            /* Greek: "text test" */
+        if (state->mono_font) {
+            char        line[96];
+            const char *mode = state->camera.mode == CAMERA_ORBIT ? "orbit"
+                             : state->camera.mode == CAMERA_FLY   ? "fly  " : "walk ";
+            float       ms = 0.36f * us;
+            float       mb = base + font_line_height(state->ui_font) * ts;
+            SceneObject *sel = scene_get(&state->scene, state->selected_handle);
+
+            /* C89 has no snprintf; the bounded buffer is checked by eye and
+               the macOS deprecation nag is silenced locally (the shelved fix) */
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+            sprintf(line, "cam %s  exposure %.2f", mode, (double)state->exposure);
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 1.0f, 1.0f, 1.0f, 0.85f);
+            mb += font_line_height(state->mono_font) * ms;
+            if (sel) {
+                sprintf(line, "sel #%-3u %s", (unsigned)state->selected_handle,
+                        sel->mesh_ref ? sel->mesh_ref : "(import)");
+            } else {
+                sprintf(line, "sel none");
+            }
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 1.0f, 1.0f, 1.0f, 0.85f);
+        }
     }
 
     /* first-person crosshair at the pick point (screen centre, via the
@@ -1556,6 +1578,35 @@ static void render(AppState *state) {
                         0.95f, 0.80f, 0.45f, 1.0f);
             }
             yy += (font_line_height(state->ui_font) - font_ascent(state->ui_font)) * s + 14.0f * us;
+        }
+
+        /* monospace: code wants every advance identical (alignment is the
+           typeface's job, not the layout's) */
+        if (state->mono_font) {
+            float cs = 0.55f * us;
+            yy += font_ascent(state->mono_font) * cs;
+            ui_text(state->mono_font,
+                    "if (x < 10 && y > 5) { return SOL_TRUE; }   /* mono */",
+                    ui_vw(6.0f), yy, cs, 0.65f, 0.95f, 0.65f, 1.0f);
+            yy += (font_line_height(state->mono_font) - font_ascent(state->mono_font)) * cs
+                + 14.0f * us;
+        }
+
+        /* wrap-to-width (3c acceptance): greedy word wrap against the white
+           guide line's width — resize the window and the breaks move */
+        {
+            float ws = 0.5f * us;
+            float wrap_w = ui_vw(55.0f);
+            yy += 6.0f * us;
+            ui_line(ui_vw(6.0f), yy, ui_vw(6.0f) + wrap_w, yy,
+                    1.0f * us, 1.0f, 1.0f, 1.0f, 0.35f);
+            ui_text_wrapped(state->ui_font,
+                    "The palace must reload exactly, or object permanence is "
+                    "a lie. Geometry is reconstructed by reference, text is "
+                    "thresholded distance, and every line you are reading "
+                    "broke against the guide above at a word boundary.",
+                    ui_vw(6.0f), yy + 8.0f * us + font_ascent(state->ui_font) * ws,
+                    ws, wrap_w, 1.0f, 1.0f, 1.0f, 0.95f);
         }
     }
 
@@ -1700,6 +1751,9 @@ int main(void) {
     state.ui_font = font_load("fonts/DejaVuSans.ttf", 48.0f);
     if (!state.ui_font)
         fprintf(stderr, "font: fonts/DejaVuSans.ttf failed to load — text disabled\n");
+    state.mono_font = font_load("fonts/DejaVuSansMono.ttf", 48.0f);
+    if (!state.mono_font)
+        fprintf(stderr, "font: fonts/DejaVuSansMono.ttf failed to load — mono disabled\n");
 
     last = glfwGetTime();
 
@@ -1723,6 +1777,7 @@ int main(void) {
         rhi_present();
     }
 
+    font_destroy(state.mono_font);
     font_destroy(state.ui_font);
     ui_shutdown();
     scene_free(&state.scene);
