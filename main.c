@@ -1482,6 +1482,26 @@ static void render(AppState *state) {
         ui_line(cx - 9.0f, cy, cx + 9.0f, cy, 1.5f, 1.0f, 1.0f, 1.0f, 0.7f);
         ui_line(cx, cy - 9.0f, cx, cy + 9.0f, 1.5f, 1.0f, 1.0f, 1.0f, 0.7f);
     }
+
+    /* a billboarded mark pinned to the selected object: its WORLD position is
+       projected through the same view-proj the scene used, then drawn in
+       screen space — constant pixel size, always crisp, faces the camera by
+       construction. Culled when behind the camera (w<=0: see
+       mat4_project_point). The tag quad is the item-3 label's seat. */
+    if (state->selected_handle != 0 &&
+        scene_get(&state->scene, state->selected_handle)) {
+        vec3 world = object_world_pos(&state->scene, state->selected_handle);
+        vec3 ndc;
+        if (mat4_project_point(mat4_mul(proj, view), world, &ndc)) {
+            float sx = (ndc.x * 0.5f + 0.5f) * (float)state->fb_width;
+            float sy = (0.5f - ndc.y * 0.5f) * (float)state->fb_height;   /* NDC y-up -> UI y-down */
+            float tw = 64.0f, th = 20.0f;                /* the tag, sat above the point */
+            float tx = sx - tw * 0.5f, ty = sy - 46.0f;
+            ui_line(sx, sy, sx, ty + th, 1.5f, 0.95f, 0.80f, 0.45f, 0.9f);   /* leader */
+            ui_quad(tx, ty, tw, th, 0.05f, 0.07f, 0.10f, 0.75f);
+            ui_quad_outline(tx, ty, tw, th, 1.0f, 0.95f, 0.80f, 0.45f, 0.9f);
+        }
+    }
     ui_end();
 }
 

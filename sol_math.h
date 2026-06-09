@@ -49,6 +49,7 @@ mat4  mat4_from_trs(vec3 pos, quat rot, vec3 scale);
 /* ---- ray casting (item 4 picking) ---- */
 vec3     mat4_mul_point(mat4 m, vec3 p);                 /* affine point transform (w=1) */
 vec3     mat4_mul_dir(mat4 m, vec3 d);                   /* direction transform (no translation) */
+sol_bool mat4_project_point(mat4 m, vec3 p, vec3 *ndc);  /* full mul + perspective divide; FALSE if w<=0 (behind camera) */
 Aabb     aabb_transform(mat4 m, Aabb box);               /* AABB of the transformed corners */
 sol_bool ray_vs_aabb(Ray ray, Aabb box, float *t_out);  /* slab test; *t_out = entry distance */
 

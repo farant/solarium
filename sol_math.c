@@ -188,6 +188,26 @@ vec3 mat4_mul_point(mat4 m, vec3 p) {
     return r;
 }
 
+/* Project a world point through a view-projection matrix to NDC: the full
+   4-component multiply (w out), then the PERSPECTIVE DIVIDE — the one place
+   w earns its keep (distant points have larger w, so they shrink toward the
+   center). Returns SOL_FALSE when clip w <= 0 (point at/behind the camera
+   plane): dividing by negative w flips both axes, projecting a plausible but
+   WRONG screen position — the classic mirrored-label-behind-you bug. Cull
+   BEFORE the divide. The inverse direction of camera_ray. */
+sol_bool mat4_project_point(mat4 m, vec3 p, vec3 *ndc_out) {
+    float cx, cy, cz, cw;
+    cx = m.m[0]*p.x + m.m[4]*p.y + m.m[8]*p.z  + m.m[12];
+    cy = m.m[1]*p.x + m.m[5]*p.y + m.m[9]*p.z  + m.m[13];
+    cz = m.m[2]*p.x + m.m[6]*p.y + m.m[10]*p.z + m.m[14];
+    cw = m.m[3]*p.x + m.m[7]*p.y + m.m[11]*p.z + m.m[15];
+    if (cw <= 0.0f) return SOL_FALSE;
+    ndc_out->x = cx / cw;
+    ndc_out->y = cy / cw;
+    ndc_out->z = cz / cw;
+    return SOL_TRUE;
+}
+
 /* Transform a direction by the upper 3x3 (no translation). For normals this is
    exact under rotation + uniform scale; under non-uniform scale it's an
    approximation (the strictly-correct form is the inverse-transpose). */

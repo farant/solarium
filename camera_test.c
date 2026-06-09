@@ -101,6 +101,29 @@ int main(void) {
         if (!approx(f.z, -1.0f)) { printf("FAIL: focus should look back along -Z\n"); return 1; }
     }
 
+    /* mat4_project_point: the inverse direction of camera_ray. A point dead
+       ahead of the camera projects to NDC (0,0); a point behind it must be
+       culled (w<=0), never mirrored onto the screen. */
+    camera_init(&c, vec3_make(0.0f, 0.0f, 5.0f), sol_radians(-90.0f), 0.0f);
+    {
+        mat4 vp = mat4_mul(camera_proj(&c, 1.777f), camera_view(&c));
+        vec3 ndc;
+        if (!mat4_project_point(vp, vec3_make(0.0f, 0.0f, 0.0f), &ndc)) {
+            printf("FAIL: point ahead of camera rejected\n");
+            return 1;
+        }
+        printf("project center: ndc=(%.4f, %.4f, %.4f)\n", ndc.x, ndc.y, ndc.z);
+        if (!approx(ndc.x, 0.0f) || !approx(ndc.y, 0.0f)) {
+            printf("FAIL: dead-ahead point should project to ndc (0,0)\n");
+            return 1;
+        }
+        if (mat4_project_point(vp, vec3_make(0.0f, 0.0f, 10.0f), &ndc)) {
+            printf("FAIL: point behind the camera must be culled (w<=0)\n");
+            return 1;
+        }
+        printf("behind-camera point culled: ok\n");
+    }
+
     printf("camera_test: OK\n");
     return 0;
 }
