@@ -33,6 +33,7 @@ typedef struct {
     int           attr_count;
     GLsizei       stride;
     sol_bool      depth_test;
+    sol_bool      blend;        /* straight-alpha "over" */
 } GlPipeline;
 
 typedef struct {
@@ -196,6 +197,15 @@ RhiBuffer rhi_create_buffer(RhiBufferType type, const void *data, size_t size) {
     return h;
 }
 
+void rhi_update_buffer(RhiBuffer buffer, const void *data, size_t size) {
+    glBindBuffer(GL_COPY_WRITE_BUFFER, g_buffers[buffer.id - 1]);   /* neutral: no VAO state */
+    /* full re-specification, not glBufferSubData: the driver can orphan the
+       old storage instead of stalling while the GPU still reads it (the
+       per-frame stream idiom). STREAM_DRAW hints written-once-drawn-once. */
+    glBufferData(GL_COPY_WRITE_BUFFER, (GLsizeiptr)size, data, GL_STREAM_DRAW);
+    gl_check("rhi_update_buffer");
+}
+
 RhiShader rhi_create_shader(const char *vertex_src, const char *fragment_src) {
     RhiShader h;
     GLuint vs, fs, program;
@@ -233,6 +243,7 @@ RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
     for (i = 0; i < desc->attr_count; i++) p->attrs[i] = desc->attrs[i];
     p->stride     = (GLsizei)desc->stride;
     p->depth_test = desc->depth_test;
+    p->blend      = desc->blend;
 
     glGenVertexArrays(1, &p->vao);   /* attribs are bound when a buffer is set */
 
@@ -512,8 +523,9 @@ RhiTexture rhi_render_target_depth_texture(RhiRenderTarget rt) {
 }
 
 /* ---- per frame ---- */
-void rhi_begin_pass(RhiRenderTarget target, float r, float g, float b, float a) {
-    int w, h;
+void rhi_begin_pass(RhiRenderTarget target, int clear_flags, float r, float g, float b, float a) {
+    int        w, h;
+    GLbitfield mask = 0;
     if (target.id != 0) {
         const GlRenderTarget *rt = &g_render_targets[target.id - 1];
         glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
@@ -524,8 +536,12 @@ void rhi_begin_pass(RhiRenderTarget target, float r, float g, float b, float a) 
         glfwGetFramebufferSize(g_window, &w, &h);    /* backend owns the window ptr */
     }
     glViewport(0, 0, w, h);                          /* viewport does NOT follow the bind */
-    glClearColor(r, g, b, a);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (clear_flags & RHI_CLEAR_COLOR) {
+        glClearColor(r, g, b, a);
+        mask |= GL_COLOR_BUFFER_BIT;
+    }
+    if (clear_flags & RHI_CLEAR_DEPTH) mask |= GL_DEPTH_BUFFER_BIT;
+    if (mask) glClear(mask);                         /* RHI_CLEAR_NONE = a load pass */
 }
 
 void rhi_end_pass(void) {
@@ -540,6 +556,12 @@ void rhi_set_pipeline(RhiPipeline pipeline) {
     glBindVertexArray(p->vao);
     if (p->depth_test) glEnable(GL_DEPTH_TEST);
     else               glDisable(GL_DEPTH_TEST);
+    if (p->blend) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   /* straight-alpha "over" */
+    } else {
+        glDisable(GL_BLEND);
+    }
 }
 
 void rhi_bind_vertex_buffer(RhiBuffer buffer) {

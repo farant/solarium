@@ -12,6 +12,7 @@
 #include "camera.h"
 #include "image.h"
 #include "glb.h"
+#include "ui.h"                  /* the 2D overlay (P3 item 2) */
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -923,7 +924,7 @@ static void build_prefilter_map(AppState *state) {
    independent, so this runs once and never changes. */
 static void build_brdf_lut(AppState *state) {
     state->brdf_lut_rt = rhi_create_render_target(BRDF_LUT_SIZE, BRDF_LUT_SIZE, RHI_TEX_RGBA16F);
-    rhi_begin_pass(state->brdf_lut_rt, 0.0f, 0.0f, 0.0f, 1.0f);
+    rhi_begin_pass(state->brdf_lut_rt, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);
     rhi_set_pipeline(state->brdf_lut_pipeline);
     rhi_draw(0, 3);
     rhi_end_pass();
@@ -955,7 +956,7 @@ static void scene_resolve_meshes(Scene *s) {
 /* One-time setup: build the pipeline + meshes, populate the scene. */
 static int init_scene(AppState *state) {
     RhiShader shader;
-    RhiPipelineDesc desc;
+    RhiPipelineDesc desc = {0};  /* {0} all descs: a future field defaults off, not garbage */
     Mesh empty = {0};            /* zero mesh -> an empty (transform-only) */
     sol_u32 anchor, floor, page;
 
@@ -974,19 +975,21 @@ static int init_scene(AppState *state) {
     desc.attr_count = 4;
     desc.stride     = 12 * sizeof(float);
     desc.depth_test = SOL_TRUE;
+    desc.blend      = SOL_FALSE;
     state->pipeline = rhi_create_pipeline(&desc);
 
     /* the fullscreen post pass: no vertex attributes (gl_VertexID builds the
        triangle), no depth test (it's a screen-space overlay) */
     {
         RhiShader       post_shader;
-        RhiPipelineDesc post_desc;
+        RhiPipelineDesc post_desc = {0};
         post_shader = rhi_create_shader(POST_VERTEX_SRC, POST_FRAGMENT_SRC);
         if (!post_shader.id) return 0;
         post_desc.shader     = post_shader;
         post_desc.attr_count = 0;
         post_desc.stride     = 0;
         post_desc.depth_test = SOL_FALSE;
+        post_desc.blend      = SOL_FALSE;
         state->post_pipeline = rhi_create_pipeline(&post_desc);
     }
 
@@ -994,7 +997,7 @@ static int init_scene(AppState *state) {
        just position, and a fullscreen inspector that shows the depth map. */
     {
         RhiShader       sh_shader, dbg_shader;
-        RhiPipelineDesc sh_desc, dbg_desc;
+        RhiPipelineDesc sh_desc = {0}, dbg_desc = {0};
 
         state->shadow_rt = rhi_create_depth_target(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
         if (!state->shadow_rt.id) return 0;
@@ -1006,6 +1009,7 @@ static int init_scene(AppState *state) {
         sh_desc.attr_count = 1;                 /* position only */
         sh_desc.stride     = 12 * sizeof(float);  /* same VBO; skip the other 9 floats */
         sh_desc.depth_test = SOL_TRUE;
+        sh_desc.blend      = SOL_FALSE;
         state->shadow_pipeline = rhi_create_pipeline(&sh_desc);
 
         dbg_shader = rhi_create_shader(POST_VERTEX_SRC, SHADOW_DEBUG_FRAGMENT_SRC);
@@ -1014,71 +1018,77 @@ static int init_scene(AppState *state) {
         dbg_desc.attr_count = 0;
         dbg_desc.stride     = 0;
         dbg_desc.depth_test = SOL_FALSE;
+        dbg_desc.blend      = SOL_FALSE;
         state->shadow_debug_pipeline = rhi_create_pipeline(&dbg_desc);
     }
 
     /* the skybox pipeline (Phase A2): fullscreen triangle, no attrs, depth off */
     {
         RhiShader       sky_shader;
-        RhiPipelineDesc sky_desc;
+        RhiPipelineDesc sky_desc = {0};
         sky_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_FRAGMENT_SRC);
         if (!sky_shader.id) return 0;
         sky_desc.shader     = sky_shader;
         sky_desc.attr_count = 0;
         sky_desc.stride     = 0;
         sky_desc.depth_test = SOL_FALSE;
+        sky_desc.blend      = SOL_FALSE;
         state->skybox_pipeline = rhi_create_pipeline(&sky_desc);
     }
 
     /* the cubemap skybox pipeline (B1): same fullscreen triangle, samplerCube */
     {
         RhiShader       cube_shader;
-        RhiPipelineDesc cube_desc;
+        RhiPipelineDesc cube_desc = {0};
         cube_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_CUBE_FRAGMENT_SRC);
         if (!cube_shader.id) return 0;
         cube_desc.shader     = cube_shader;
         cube_desc.attr_count = 0;
         cube_desc.stride     = 0;
         cube_desc.depth_test = SOL_FALSE;
+        cube_desc.blend      = SOL_FALSE;
         state->skybox_cube_pipeline = rhi_create_pipeline(&cube_desc);
     }
 
     /* the irradiance convolution pipeline (B2): fullscreen triangle, depth off */
     {
         RhiShader       irr_shader;
-        RhiPipelineDesc irr_desc;
+        RhiPipelineDesc irr_desc = {0};
         irr_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, IRRADIANCE_FRAGMENT_SRC);
         if (!irr_shader.id) return 0;
         irr_desc.shader     = irr_shader;
         irr_desc.attr_count = 0;
         irr_desc.stride     = 0;
         irr_desc.depth_test = SOL_FALSE;
+        irr_desc.blend      = SOL_FALSE;
         state->irradiance_pipeline = rhi_create_pipeline(&irr_desc);
     }
 
     /* the specular prefilter pipeline (C1): fullscreen triangle, depth off */
     {
         RhiShader       pre_shader;
-        RhiPipelineDesc pre_desc;
+        RhiPipelineDesc pre_desc = {0};
         pre_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, PREFILTER_FRAGMENT_SRC);
         if (!pre_shader.id) return 0;
         pre_desc.shader     = pre_shader;
         pre_desc.attr_count = 0;
         pre_desc.stride     = 0;
         pre_desc.depth_test = SOL_FALSE;
+        pre_desc.blend      = SOL_FALSE;
         state->prefilter_pipeline = rhi_create_pipeline(&pre_desc);
     }
 
     /* the BRDF LUT pipeline (C2): fullscreen triangle, depth off */
     {
         RhiShader       brdf_shader;
-        RhiPipelineDesc brdf_desc;
+        RhiPipelineDesc brdf_desc = {0};
         brdf_shader = rhi_create_shader(POST_VERTEX_SRC, BRDF_LUT_FRAGMENT_SRC);
         if (!brdf_shader.id) return 0;
         brdf_desc.shader     = brdf_shader;
         brdf_desc.attr_count = 0;
         brdf_desc.stride     = 0;
         brdf_desc.depth_test = SOL_FALSE;
+        brdf_desc.blend      = SOL_FALSE;
         state->brdf_lut_pipeline = rhi_create_pipeline(&brdf_desc);
     }
 
@@ -1367,7 +1377,7 @@ static void render(AppState *state) {
     /* ---- pass 0: depth from the light's POV -> the shadow map (item 9b) ---- */
     {
         mat4 lvp = light_view_proj(state);
-        rhi_begin_pass(state->shadow_rt, 0.0f, 0.0f, 0.0f, 1.0f);  /* clears depth to 1.0 */
+        rhi_begin_pass(state->shadow_rt, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);  /* clears depth to 1.0 */
         rhi_set_pipeline(state->shadow_pipeline);
         rhi_set_uniform_mat4("uLightVP", lvp.m);
         for (i = 0; i < state->scene.count; i++) {
@@ -1384,7 +1394,7 @@ static void render(AppState *state) {
     }
 
     /* ---- pass 1: render the scene into the offscreen HDR target ---- */
-    rhi_begin_pass(state->hdr_rt, 0.10f, 0.12f, 0.15f, 1.0f);
+    rhi_begin_pass(state->hdr_rt, RHI_CLEAR_ALL, 0.10f, 0.12f, 0.15f, 1.0f);
 
     aspect = (state->fb_height > 0)
            ? (float)state->fb_width / (float)state->fb_height
@@ -1439,7 +1449,7 @@ static void render(AppState *state) {
        linear->sRGB (7c adds the tonemap). One triangle, no vertex buffer. ---- */
     {
         RhiRenderTarget screen = {0};   /* {0} = default framebuffer (declaration init, not a compound literal) */
-        rhi_begin_pass(screen, 0.0f, 0.0f, 0.0f, 1.0f);
+        rhi_begin_pass(screen, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);
         if (state->show_shadow_map) {
             /* inspector: the shadow map as linearized grayscale (item 9b debug) */
             rhi_set_pipeline(state->shadow_debug_pipeline);
@@ -1455,6 +1465,24 @@ static void render(AppState *state) {
         }
         rhi_draw(0, 3);
     }
+
+    /* ---- pass 3: the 2D overlay (item 2) — display-referred sRGB colors
+       composited OVER the tonemapped image in a no-clear (load) pass. After
+       the tonemap on purpose: ACES would roll UI white down to ~0.8 gray. ---- */
+    ui_begin(state->fb_width, state->fb_height);
+
+    /* reserved debug-readout panel (item 3 puts text in it) + its border */
+    ui_quad(8.0f, 8.0f, 280.0f, 84.0f, 0.05f, 0.07f, 0.10f, 0.55f);
+    ui_quad_outline(8.0f, 8.0f, 280.0f, 84.0f, 1.0f, 0.95f, 0.80f, 0.45f, 0.9f);
+
+    /* first-person crosshair at the pick point (screen centre, via the
+       viewport-relative units) — orbit mode picks at the cursor instead */
+    if (state->camera.mode != CAMERA_ORBIT) {
+        float cx = ui_vw(50.0f), cy = ui_vh(50.0f);
+        ui_line(cx - 9.0f, cy, cx + 9.0f, cy, 1.5f, 1.0f, 1.0f, 1.0f, 0.7f);
+        ui_line(cx, cy - 9.0f, cx, cy + 9.0f, 1.5f, 1.0f, 1.0f, 1.0f, 0.7f);
+    }
+    ui_end();
 }
 
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -1562,6 +1590,14 @@ int main(void) {
     }
 #endif
 
+    if (!ui_init()) {                     /* the 2D overlay (P3 item 2) */
+        fprintf(stderr, "ui_init failed\n");
+        rhi_shutdown();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return EXIT_FAILURE;
+    }
+
     last = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
@@ -1584,6 +1620,7 @@ int main(void) {
         rhi_present();
     }
 
+    ui_shutdown();
     scene_free(&state.scene);
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
     if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);
