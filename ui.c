@@ -158,9 +158,8 @@ static void push_vert(float x, float y, float u, float v,
     g_ui.vert_count++;
 }
 
-/* Two triangles for an axis-aligned rect; v0 is the TOP edge's v so a
-   bottom-up GL texture (stb flips on load) displays upright in y-down UI
-   coordinates. */
+/* Two triangles for an axis-aligned rect; the caller picks which texture v
+   lands on the top edge (data-order textures want 0, GL-flipped images 1). */
 static void push_rect(RhiTexture tex, float x, float y, float w, float h,
                       float v_top, float v_bottom,
                       float r, float g, float b, float a) {
@@ -216,7 +215,10 @@ void ui_line(float x0, float y0, float x1, float y1, float t,
 
 void ui_textured_quad(RhiTexture tex, float x, float y, float w, float h) {
     if (!g_ui.ready || !tex.id) return;
-    push_rect(tex, x, y, w, h, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+    /* data row order: texture row 0 at the quad's top (matches the font
+       atlas). An stb-loaded image (flipped for GL at decode) shows inverted
+       here — add a flip flag when such a caller exists. */
+    push_rect(tex, x, y, w, h, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
 }
 
 /* ------------------------------------------------------------------- flush */

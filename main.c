@@ -13,6 +13,7 @@
 #include "image.h"
 #include "glb.h"
 #include "ui.h"                  /* the 2D overlay (P3 item 2) */
+#include "font.h"                /* the SDF glyph atlas (P3 item 3) */
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -528,6 +529,10 @@ typedef struct {
     RhiPipeline     brdf_lut_pipeline;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     sol_bool    l_was_down;     /* edge-detect the scene-reload key (P3 item 1) */
+    /* text (P3 item 3) */
+    Font       *ui_font;        /* DejaVu Sans, SDF atlas; NULL if load failed */
+    sol_bool    show_atlas;     /* 'T' toggles the atlas inspector (3a) */
+    sol_bool    t_was_down;
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
     int         mouse_skip;        /* swallow N frames of delta after a cursor-mode change */
@@ -776,6 +781,14 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }
     }
     st->p_was_down = p_now;
+
+    /* T toggles the font-atlas inspector (P3 item 3a, edge) */
+    {
+        sol_bool t_now = glfwGetKey(w, GLFW_KEY_T) == GLFW_PRESS;
+        if (t_now && !st->t_was_down && st->ui_font)
+            st->show_atlas = !st->show_atlas;
+        st->t_was_down = t_now;
+    }
 
     /* L reloads scene.stml from disk (P3 item 1: the persistence proof, edge).
        Procedural geometry reconstructs via the resolver; glb objects and
@@ -1483,6 +1496,20 @@ static void render(AppState *state) {
         ui_line(cx, cy - 9.0f, cx, cy + 9.0f, 1.5f, 1.0f, 1.0f, 1.0f, 0.7f);
     }
 
+    /* 'T': the font-atlas inspector (3a) — the raw SDF atlas as a textured
+       quad. Glyphs read as soft white shapes (you are looking at DISTANCE,
+       not coverage; the text shader's threshold is what sharpens them). */
+    if (state->show_atlas && state->ui_font) {
+        float side = ui_vh(85.0f);
+        float ax   = ui_vw(50.0f) - side * 0.5f;
+        float ay   = ui_vh(50.0f) - side * 0.5f;
+        ui_quad(ax - 8.0f, ay - 8.0f, side + 16.0f, side + 16.0f,
+                0.0f, 0.0f, 0.0f, 0.85f);                  /* backdrop */
+        ui_textured_quad(font_atlas(state->ui_font), ax, ay, side, side);
+        ui_quad_outline(ax - 8.0f, ay - 8.0f, side + 16.0f, side + 16.0f,
+                        1.0f, 0.95f, 0.80f, 0.45f, 0.9f);
+    }
+
     /* a billboarded mark pinned to the selected object: its WORLD position is
        projected through the same view-proj the scene used, then drawn in
        screen space — constant pixel size, always crisp, faces the camera by
@@ -1618,6 +1645,13 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    /* the UI font (P3 item 3): bake the SDF atlas once at startup. A missing
+       font degrades (no text) rather than failing the launch — ui_font stays
+       NULL and text paths skip. */
+    state.ui_font = font_load("fonts/DejaVuSans.ttf", 48.0f);
+    if (!state.ui_font)
+        fprintf(stderr, "font: fonts/DejaVuSans.ttf failed to load — text disabled\n");
+
     last = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
@@ -1640,6 +1674,7 @@ int main(void) {
         rhi_present();
     }
 
+    font_destroy(state.ui_font);
     ui_shutdown();
     scene_free(&state.scene);
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);

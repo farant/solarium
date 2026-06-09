@@ -24,8 +24,11 @@ typedef enum { RHI_FORMAT_FLOAT2, RHI_FORMAT_FLOAT3, RHI_FORMAT_FLOAT4 } RhiVert
    SRGB8   — color/albedo/page images (GPU converts sRGB->linear on sample);
    RGBA8   — linear data maps (normal/roughness/masks; sampled raw);
    RGBA16F — float HDR render-target color: values may exceed 1.0 without
-             clipping (the point of the offscreen pass; item 7). */
-typedef enum { RHI_TEX_SRGB8, RHI_TEX_RGBA8, RHI_TEX_RGBA16F } RhiTextureFormat;
+             clipping (the point of the offscreen pass; item 7);
+   R8      — single-channel linear data (the SDF glyph atlas, item 3): source
+             is 1 byte/texel, sampled raw via .r (G/B swizzled to R for debug
+             views). */
+typedef enum { RHI_TEX_SRGB8, RHI_TEX_RGBA8, RHI_TEX_RGBA16F, RHI_TEX_R8 } RhiTextureFormat;
 
 /* ---- vertex layout + pipeline description ---- */
 typedef struct {

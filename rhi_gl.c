@@ -255,12 +255,26 @@ RhiTexture rhi_create_texture(const void *pixels, int width, int height, RhiText
     GLuint     tex;
     sol_u32    idx;
     RhiTexture h;
-    GLint      internal = (fmt == RHI_TEX_SRGB8) ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+    GLint      internal = (fmt == RHI_TEX_SRGB8) ? GL_SRGB8_ALPHA8
+                        : (fmt == RHI_TEX_R8)    ? GL_R8 : GL_RGBA8;
 
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, internal, (GLsizei)width, (GLsizei)height, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);     /* source bytes are RGBA8 */
+    if (fmt == RHI_TEX_R8) {
+        /* single-channel source: 1-byte texels need 1-byte row alignment (the
+           default is 4, which would skew any odd-width upload) */
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, (GLsizei)width, (GLsizei)height, 0,
+                     GL_RED, GL_UNSIGNED_BYTE, pixels);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        /* swizzle G/B to read the red channel too, so a debug textured-quad
+           view shows grayscale; samplers that read .r are unaffected */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, (GLsizei)width, (GLsizei)height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, pixels);     /* source bytes are RGBA8 */
+    }
     glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
