@@ -18,8 +18,9 @@
 #define UI_VERT_FLOATS 8
 #define UI_VERT_BYTES  (UI_VERT_FLOATS * sizeof(sol_f32))
 
-/* a contiguous run of vertices drawn with one texture */
-typedef struct { RhiTexture tex; int first; int count; } UiSpan;
+/* a contiguous run of vertices drawn with one texture + one pipeline
+   (sdf -> the text pipeline's smoothstep decode; else the flat shader) */
+typedef struct { RhiTexture tex; sol_bool sdf; int first; int count; } UiSpan;
 
 static struct {
     sol_f32    *verts;                       /* CPU batch, realloc-doubling */
@@ -30,6 +31,8 @@ static struct {
                                                 storage is re-specified per frame */
     RhiShader   shader;
     RhiPipeline pipeline;
+    RhiShader   text_shader;                 /* SDF decode (P3 item 3b) */
+    RhiPipeline text_pipeline;
     RhiTexture  white;                       /* 1x1 white for untextured draws */
     float       screen_w, screen_h;
     sol_bool    ready;
@@ -64,6 +67,24 @@ static const char *UI_FRAGMENT_SRC =
     "out vec4 FragColor;\n"
     "void main() { FragColor = vColor * texture(uTex, vUV); }\n";
 
+/* the SDF decode: the atlas stores DISTANCE (0.5 = the glyph contour), and
+   thresholding it reconstructs the edge analytically per screen pixel — why
+   one atlas is crisp at every zoom. fwidth(d) is the screen-space derivative,
+   so the smoothstep band is always ~one display pixel of anti-aliasing
+   whatever the glyph's scale. */
+static const char *UI_TEXT_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "in vec4 vColor;\n"
+    "uniform sampler2D uTex;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    float d = texture(uTex, vUV).r;\n"
+    "    float w = fwidth(d) * 0.5 + 0.0001;\n"
+    "    float edge = smoothstep(0.5 - w, 0.5 + w, d);\n"
+    "    FragColor = vec4(vColor.rgb, vColor.a * edge);\n"
+    "}\n";
+
 sol_bool ui_init(void) {
     RhiPipelineDesc desc = {0};
     unsigned char   white_px[4];
@@ -84,6 +105,13 @@ sol_bool ui_init(void) {
     g_ui.pipeline = rhi_create_pipeline(&desc);
     if (!g_ui.pipeline.id) return SOL_FALSE;
 
+    /* the text pipeline: same vertex format and state, SDF-decoding fragment */
+    g_ui.text_shader = rhi_create_shader(UI_VERTEX_SRC, UI_TEXT_FRAGMENT_SRC);
+    if (!g_ui.text_shader.id) return SOL_FALSE;
+    desc.shader = g_ui.text_shader;
+    g_ui.text_pipeline = rhi_create_pipeline(&desc);
+    if (!g_ui.text_pipeline.id) return SOL_FALSE;
+
     white_px[0] = 255; white_px[1] = 255; white_px[2] = 255; white_px[3] = 255;
     g_ui.white = rhi_create_texture(white_px, 1, 1, RHI_TEX_RGBA8);   /* linear: sampled raw */
     if (!g_ui.white.id) return SOL_FALSE;
@@ -100,6 +128,8 @@ void ui_shutdown(void) {
     if (!g_ui.ready) return;
     rhi_destroy_buffer(g_ui.vbuffer);
     rhi_destroy_texture(g_ui.white);
+    rhi_destroy_pipeline(g_ui.text_pipeline);
+    rhi_destroy_shader(g_ui.text_shader);
     rhi_destroy_pipeline(g_ui.pipeline);
     rhi_destroy_shader(g_ui.shader);
     free(g_ui.verts);
@@ -119,12 +149,13 @@ float ui_vh(float pct) { return g_ui.screen_h * pct * 0.01f; }
 
 /* ---------------------------------------------------------------- batching */
 
-/* Continue the current span if it uses this texture, else start a new one
-   (a "batch break" — each span is one draw call). */
-static UiSpan *span_for(RhiTexture tex) {
+/* Continue the current span if it uses this texture + pipeline, else start a
+   new one (a "batch break" — each span is one draw call). */
+static UiSpan *span_for(RhiTexture tex, sol_bool sdf) {
     UiSpan *s;
     if (g_ui.span_count > 0 &&
-        g_ui.spans[g_ui.span_count - 1].tex.id == tex.id) {
+        g_ui.spans[g_ui.span_count - 1].tex.id == tex.id &&
+        g_ui.spans[g_ui.span_count - 1].sdf    == sdf) {
         return &g_ui.spans[g_ui.span_count - 1];
     }
     if (g_ui.span_count == g_ui.span_cap) {
@@ -136,6 +167,7 @@ static UiSpan *span_for(RhiTexture tex) {
     }
     s = &g_ui.spans[g_ui.span_count++];
     s->tex   = tex;
+    s->sdf   = sdf;
     s->first = (int)g_ui.vert_count;
     s->count = 0;
     return s;
@@ -163,7 +195,7 @@ static void push_vert(float x, float y, float u, float v,
 static void push_rect(RhiTexture tex, float x, float y, float w, float h,
                       float v_top, float v_bottom,
                       float r, float g, float b, float a) {
-    UiSpan *s = span_for(tex);
+    UiSpan *s = span_for(tex, SOL_FALSE);
     if (!s) return;
     push_vert(x,     y,     0.0f, v_top,    r, g, b, a);
     push_vert(x + w, y,     1.0f, v_top,    r, g, b, a);
@@ -202,7 +234,7 @@ void ui_line(float x0, float y0, float x1, float y1, float t,
     if (len < 0.0001f) return;
     px = -dy / len * t * 0.5f;       /* the perpendicular, half a thickness long */
     py =  dx / len * t * 0.5f;
-    s = span_for(g_ui.white);
+    s = span_for(g_ui.white, SOL_FALSE);
     if (!s) return;
     push_vert(x0 + px, y0 + py, 0.0f, 0.0f, r, g, b, a);
     push_vert(x1 + px, y1 + py, 1.0f, 0.0f, r, g, b, a);
@@ -221,6 +253,22 @@ void ui_textured_quad(RhiTexture tex, float x, float y, float w, float h) {
     push_rect(tex, x, y, w, h, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
 }
 
+void ui_glyph_quad(RhiTexture atlas, float x, float y, float w, float h,
+                   float u0, float v0, float u1, float v1,
+                   float r, float g, float b, float a) {
+    UiSpan *s;
+    if (!g_ui.ready) return;
+    s = span_for(atlas, SOL_TRUE);       /* the SDF-decode pipeline */
+    if (!s) return;
+    push_vert(x,     y,     u0, v0, r, g, b, a);
+    push_vert(x + w, y,     u1, v0, r, g, b, a);
+    push_vert(x + w, y + h, u1, v1, r, g, b, a);
+    push_vert(x,     y,     u0, v0, r, g, b, a);
+    push_vert(x + w, y + h, u1, v1, r, g, b, a);
+    push_vert(x,     y + h, u0, v1, r, g, b, a);
+    s->count += 6;
+}
+
 /* ------------------------------------------------------------------- flush */
 
 void ui_end(void) {
@@ -236,14 +284,21 @@ void ui_end(void) {
     rhi_update_buffer(g_ui.vbuffer, g_ui.verts, bytes);
 
     rhi_begin_pass(screen, RHI_CLEAR_NONE, 0.0f, 0.0f, 0.0f, 0.0f);  /* load, don't clear */
-    rhi_set_pipeline(g_ui.pipeline);
-    rhi_bind_vertex_buffer(g_ui.vbuffer);
-    rhi_set_uniform_float("uScreenW", g_ui.screen_w);
-    rhi_set_uniform_float("uScreenH", g_ui.screen_h);
-    rhi_set_uniform_int("uTex", 0);
-    for (i = 0; i < g_ui.span_count; i++) {
-        rhi_bind_texture(g_ui.spans[i].tex, 0);
-        rhi_draw(g_ui.spans[i].first, g_ui.spans[i].count);
+    {
+        int cur = -1;        /* which pipeline is bound: 0 flat, 1 sdf */
+        for (i = 0; i < g_ui.span_count; i++) {
+            int want = g_ui.spans[i].sdf ? 1 : 0;
+            if (want != cur) {           /* pipeline switch: rebind buffer + uniforms */
+                rhi_set_pipeline(want ? g_ui.text_pipeline : g_ui.pipeline);
+                rhi_bind_vertex_buffer(g_ui.vbuffer);
+                rhi_set_uniform_float("uScreenW", g_ui.screen_w);
+                rhi_set_uniform_float("uScreenH", g_ui.screen_h);
+                rhi_set_uniform_int("uTex", 0);
+                cur = want;
+            }
+            rhi_bind_texture(g_ui.spans[i].tex, 0);
+            rhi_draw(g_ui.spans[i].first, g_ui.spans[i].count);
+        }
     }
     rhi_end_pass();
 

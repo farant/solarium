@@ -53,6 +53,13 @@ void ui_line(float x0, float y0, float x1, float y1, float t,
    (sampled to linear) will come out dark here. */
 void ui_textured_quad(RhiTexture tex, float x, float y, float w, float h);
 
+/* One SDF glyph quad with explicit UVs, drawn through the TEXT pipeline
+   (the smoothstep threshold decode — see ui.c). text.c's ui_text is the
+   intended caller; the batch breaks between geometry and text spans. */
+void ui_glyph_quad(RhiTexture atlas, float x, float y, float w, float h,
+                   float u0, float v0, float u1, float v1,
+                   float r, float g, float b, float a);
+
 /* Upload the batch and draw it (one buffer update; one draw per texture
    change — untextured quads share the internal 1x1 white texture, so a
    typical overlay is a single draw). Safe to call with an empty batch. */

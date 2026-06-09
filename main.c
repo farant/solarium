@@ -14,6 +14,7 @@
 #include "glb.h"
 #include "ui.h"                  /* the 2D overlay (P3 item 2) */
 #include "font.h"                /* the SDF glyph atlas (P3 item 3) */
+#include "text.h"                /* text_shape seam + ui_text (P3 item 3b) */
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -531,7 +532,7 @@ typedef struct {
     sol_bool    l_was_down;     /* edge-detect the scene-reload key (P3 item 1) */
     /* text (P3 item 3) */
     Font       *ui_font;        /* DejaVu Sans, SDF atlas; NULL if load failed */
-    sol_bool    show_atlas;     /* 'T' toggles the atlas inspector (3a) */
+    int         text_inspect;   /* 'T' cycles: 0 off, 1 atlas, 2 type specimen */
     sol_bool    t_was_down;
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
@@ -782,11 +783,11 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     }
     st->p_was_down = p_now;
 
-    /* T toggles the font-atlas inspector (P3 item 3a, edge) */
+    /* T cycles the text inspectors (P3 item 3): off -> SDF atlas -> specimen */
     {
         sol_bool t_now = glfwGetKey(w, GLFW_KEY_T) == GLFW_PRESS;
         if (t_now && !st->t_was_down && st->ui_font)
-            st->show_atlas = !st->show_atlas;
+            st->text_inspect = (st->text_inspect + 1) % 3;
         st->t_was_down = t_now;
     }
 
@@ -1378,6 +1379,7 @@ static void ensure_render_target(AppState *state, int w, int h) {
 
 static void render(AppState *state) {
     float   aspect;
+    float   us;        /* UI scale: sizes track the framebuffer (see pass 3) */
     vec3    eye;
     mat4    view, proj;
     sol_u32 i;
@@ -1481,25 +1483,44 @@ static void render(AppState *state) {
 
     /* ---- pass 3: the 2D overlay (item 2) — display-referred sRGB colors
        composited OVER the tonemapped image in a no-clear (load) pass. After
-       the tonemap on purpose: ACES would roll UI white down to ~0.8 gray. ---- */
+       the tonemap on purpose: ACES would roll UI white down to ~0.8 gray.
+       SIZES are multiplied by `us` (fb_height / the 1080 the 960x540 retina
+       window opens at) so the HUD keeps its proportions when the window
+       grows — fixed pixels stay the same physical size while everything
+       else scales (the DPI-relative unit family); POSITIONS keep their
+       px / vw / vh anchors. ---- */
     ui_begin(state->fb_width, state->fb_height);
+    us = (float)state->fb_height / 1080.0f;
 
-    /* reserved debug-readout panel (item 3 puts text in it) + its border */
-    ui_quad(8.0f, 8.0f, 280.0f, 84.0f, 0.05f, 0.07f, 0.10f, 0.55f);
-    ui_quad_outline(8.0f, 8.0f, 280.0f, 84.0f, 1.0f, 0.95f, 0.80f, 0.45f, 0.9f);
+    /* the debug readout panel — first real type in the engine (3b; live
+       readouts arrive in 3c). ui_text positions the BASELINE, hence ascent. */
+    ui_quad(8.0f * us, 8.0f * us, 280.0f * us, 84.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
+    ui_quad_outline(8.0f * us, 8.0f * us, 280.0f * us, 84.0f * us,
+                    1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
+    if (state->ui_font) {
+        float ts   = 0.45f * us;
+        float base = 16.0f * us + font_ascent(state->ui_font) * ts;
+        ui_text(state->ui_font, "solarium", 20.0f * us, base, ts,
+                0.95f, 0.80f, 0.45f, 1.0f);
+        ui_text(state->ui_font,
+                "\xce\xb4\xce\xbf\xce\xba\xce\xb9\xce\xbc\xce\xae"
+                " \xce\xba\xce\xb5\xce\xb9\xce\xbc\xce\xad\xce\xbd\xce\xbf\xcf\x85",
+                20.0f * us, base + font_line_height(state->ui_font) * ts, ts,
+                1.0f, 1.0f, 1.0f, 0.85f);            /* Greek: "text test" */
+    }
 
     /* first-person crosshair at the pick point (screen centre, via the
        viewport-relative units) — orbit mode picks at the cursor instead */
     if (state->camera.mode != CAMERA_ORBIT) {
         float cx = ui_vw(50.0f), cy = ui_vh(50.0f);
-        ui_line(cx - 9.0f, cy, cx + 9.0f, cy, 1.5f, 1.0f, 1.0f, 1.0f, 0.7f);
-        ui_line(cx, cy - 9.0f, cx, cy + 9.0f, 1.5f, 1.0f, 1.0f, 1.0f, 0.7f);
+        ui_line(cx - 9.0f * us, cy, cx + 9.0f * us, cy, 1.5f * us, 1.0f, 1.0f, 1.0f, 0.7f);
+        ui_line(cx, cy - 9.0f * us, cx, cy + 9.0f * us, 1.5f * us, 1.0f, 1.0f, 1.0f, 0.7f);
     }
 
-    /* 'T': the font-atlas inspector (3a) — the raw SDF atlas as a textured
-       quad. Glyphs read as soft white shapes (you are looking at DISTANCE,
-       not coverage; the text shader's threshold is what sharpens them). */
-    if (state->show_atlas && state->ui_font) {
+    /* 'T' mode 1: the font-atlas inspector (3a) — the raw SDF atlas as a
+       textured quad. Glyphs read as soft white shapes (you are looking at
+       DISTANCE, not coverage; the text shader's threshold sharpens them). */
+    if (state->text_inspect == 1 && state->ui_font) {
         float side = ui_vh(85.0f);
         float ax   = ui_vw(50.0f) - side * 0.5f;
         float ay   = ui_vh(50.0f) - side * 0.5f;
@@ -1508,6 +1529,34 @@ static void render(AppState *state) {
         ui_textured_quad(font_atlas(state->ui_font), ax, ay, side, side);
         ui_quad_outline(ax - 8.0f, ay - 8.0f, side + 16.0f, side + 16.0f,
                         1.0f, 0.95f, 0.80f, 0.45f, 0.9f);
+    }
+
+    /* 'T' mode 2: the type specimen (3b acceptance) — the SAME fuzzy atlas
+       drawn through the SDF threshold, at scales from huge to small. Every
+       size is the one 48px bake; sharpness at 4x is the proof. */
+    if (state->text_inspect == 2 && state->ui_font) {
+        static const float scales[5] = { 4.0f, 2.0f, 1.0f, 0.5f, 0.33f };
+        static const char *latin = "Sphinx of black quartz, judge my vow.";
+        static const char *greek =
+            "\xce\x9e\xce\xb5\xcf\x83\xce\xba\xce\xb5\xcf\x80\xce\xac\xce\xb6"
+            "\xcf\x89 \xcf\x84\xce\xb7\xce\xbd \xcf\x88\xcf\x85\xcf\x87\xce\xbf"
+            "\xcf\x86\xce\xb8\xcf\x8c\xcf\x81\xce\xb1 \xce\xb2\xce\xb4\xce\xb5"
+            "\xce\xbb\xcf\x85\xce\xb3\xce\xbc\xce\xaf\xce\xb1";   /* Greek pangram */
+        float yy = ui_vh(8.0f);
+        int   k;
+        ui_quad(0.0f, 0.0f, ui_vw(100.0f), ui_vh(100.0f), 0.0f, 0.0f, 0.0f, 0.88f);
+        for (k = 0; k < 5; k++) {
+            float s = scales[k] * us;
+            yy += font_ascent(state->ui_font) * s;
+            ui_text(state->ui_font, k < 2 ? "Ag \xce\xa9\xce\xbe" : latin,
+                    ui_vw(6.0f), yy, s, 1.0f, 1.0f, 1.0f, 1.0f);
+            if (k >= 2) {
+                yy += font_line_height(state->ui_font) * s;
+                ui_text(state->ui_font, greek, ui_vw(6.0f), yy, s,
+                        0.95f, 0.80f, 0.45f, 1.0f);
+            }
+            yy += (font_line_height(state->ui_font) - font_ascent(state->ui_font)) * s + 14.0f * us;
+        }
     }
 
     /* a billboarded mark pinned to the selected object: its WORLD position is
@@ -1522,11 +1571,11 @@ static void render(AppState *state) {
         if (mat4_project_point(mat4_mul(proj, view), world, &ndc)) {
             float sx = (ndc.x * 0.5f + 0.5f) * (float)state->fb_width;
             float sy = (0.5f - ndc.y * 0.5f) * (float)state->fb_height;   /* NDC y-up -> UI y-down */
-            float tw = 64.0f, th = 20.0f;                /* the tag, sat above the point */
-            float tx = sx - tw * 0.5f, ty = sy - 46.0f;
-            ui_line(sx, sy, sx, ty + th, 1.5f, 0.95f, 0.80f, 0.45f, 0.9f);   /* leader */
+            float tw = 64.0f * us, th = 20.0f * us;      /* the tag, sat above the point */
+            float tx = sx - tw * 0.5f, ty = sy - 46.0f * us;
+            ui_line(sx, sy, sx, ty + th, 1.5f * us, 0.95f, 0.80f, 0.45f, 0.9f);   /* leader */
             ui_quad(tx, ty, tw, th, 0.05f, 0.07f, 0.10f, 0.75f);
-            ui_quad_outline(tx, ty, tw, th, 1.0f, 0.95f, 0.80f, 0.45f, 0.9f);
+            ui_quad_outline(tx, ty, tw, th, 1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
         }
     }
     ui_end();
