@@ -7,17 +7,24 @@
 #include "rhi.h"
 
 #include <stdio.h>
+#include <assert.h>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <OpenGL/gl3.h>
 
-/* ---- internal resource storage (handle id -> GL object) ---- */
-#define MAX_BUFFERS        256
+/* ---- internal resource storage (handle id -> GL object) ----
+   Buffers and textures are on the palace's accretion path (every object is
+   geometry; every image card / page view is a texture), so their ceilings are
+   generous; the real limit is VRAM, far above these. Shaders/pipelines/targets
+   are code-bounded (~a dozen). Overflow is caught by slot_alloc, not silently
+   written past the array. */
+#define MAX_BUFFERS       1024
 #define MAX_SHADERS         64
 #define MAX_PIPELINES       64
-#define MAX_TEXTURES        64
+#define MAX_TEXTURES      1024
 #define MAX_RENDER_TARGETS  16
+#define SLOT_NONE  ((sol_u32)-1)   /* slot_alloc failure: table full (see callers) */
 
 typedef struct {
     GLuint        program;
@@ -66,11 +73,18 @@ static sol_u32 g_texture_free_count;
 static sol_u32 g_render_target_free[MAX_RENDER_TARGETS];
 static sol_u32 g_render_target_free_count;
 
-/* Reuse a freed slot if one exists, else extend the table. */
-static sol_u32 slot_alloc(sol_u32 *count, sol_u32 *free_list, sol_u32 *free_count) {
+/* Reuse a freed slot if one exists, else extend the table. Returns SLOT_NONE
+   (and asserts in debug) when the table is full, so the caller fails with an
+   invalid handle instead of writing past the static array (the bug this guards:
+   `(*count)++` past `max` is silent memory corruption, not a clean failure). */
+static sol_u32 slot_alloc(sol_u32 *count, sol_u32 *free_list, sol_u32 *free_count, sol_u32 max) {
     if (*free_count > 0) {
         *free_count -= 1;
         return free_list[*free_count];
+    }
+    if (*count >= max) {
+        assert(0 && "RHI resource table exhausted (raise the MAX_* ceiling)");
+        return SLOT_NONE;
     }
     return (*count)++;
 }
@@ -174,7 +188,8 @@ RhiBuffer rhi_create_buffer(RhiBufferType type, const void *data, size_t size) {
     glBindBuffer(GL_COPY_WRITE_BUFFER, vbo);   /* neutral: touches no VAO state */
     glBufferData(GL_COPY_WRITE_BUFFER, (GLsizeiptr)size, data, GL_STATIC_DRAW);
 
-    idx = slot_alloc(&g_buffer_count, g_buffer_free, &g_buffer_free_count);
+    idx = slot_alloc(&g_buffer_count, g_buffer_free, &g_buffer_free_count, MAX_BUFFERS);
+    if (idx == SLOT_NONE) { glDeleteBuffers(1, &vbo); h.id = 0; return h; }
     g_buffers[idx] = vbo;
     h.id = idx + 1;
     gl_check("rhi_create_buffer");
@@ -196,7 +211,8 @@ RhiShader rhi_create_shader(const char *vertex_src, const char *fragment_src) {
     glDeleteShader(fs);
     if (!program) return h;
 
-    idx = slot_alloc(&g_shader_count, g_shader_free, &g_shader_free_count);
+    idx = slot_alloc(&g_shader_count, g_shader_free, &g_shader_free_count, MAX_SHADERS);
+    if (idx == SLOT_NONE) { glDeleteProgram(program); return h; }   /* h.id already 0 */
     g_shaders[idx] = program;
     h.id = idx + 1;
     return h;
@@ -208,7 +224,8 @@ RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
     sol_u32 idx;
     int i;
 
-    idx = slot_alloc(&g_pipeline_count, g_pipeline_free, &g_pipeline_free_count);
+    idx = slot_alloc(&g_pipeline_count, g_pipeline_free, &g_pipeline_free_count, MAX_PIPELINES);
+    if (idx == SLOT_NONE) { h.id = 0; return h; }   /* no GL created yet */
     p = &g_pipelines[idx];
 
     p->program    = g_shaders[desc->shader.id - 1];
@@ -239,7 +256,8 @@ RhiTexture rhi_create_texture(const void *pixels, int width, int height, RhiText
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
-    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count, MAX_TEXTURES);
+    if (idx == SLOT_NONE) { glDeleteTextures(1, &tex); h.id = 0; return h; }
     g_textures[idx].tex = tex;
     g_textures[idx].target = GL_TEXTURE_2D;
     h.id = idx + 1;
@@ -263,7 +281,8 @@ RhiTexture rhi_create_texture_hdr(const float *pixels, int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);         /* longitude wraps */
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);  /* clamp at the poles */
 
-    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count, MAX_TEXTURES);
+    if (idx == SLOT_NONE) { glDeleteTextures(1, &tex); h.id = 0; return h; }
     g_textures[idx].tex = tex;
     g_textures[idx].target = GL_TEXTURE_2D;
     h.id = idx + 1;
@@ -290,7 +309,8 @@ RhiTexture rhi_create_cubemap(int size, sol_bool mipmapped) {
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
     if (mipmapped) glGenerateMipmap(GL_TEXTURE_CUBE_MAP);  /* allocate the mip chain */
 
-    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count, MAX_TEXTURES);
+    if (idx == SLOT_NONE) { glDeleteTextures(1, &tex); h.id = 0; return h; }
     g_textures[idx].tex = tex;
     g_textures[idx].target = GL_TEXTURE_CUBE_MAP;
     h.id = idx + 1;
@@ -376,11 +396,24 @@ RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat
 
     /* register the color texture in the texture table so rhi_bind_texture and
        rhi_render_target_texture treat it as an ordinary texture handle */
-    tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count, MAX_TEXTURES);
+    if (tex_idx == SLOT_NONE) {
+        glDeleteTextures(1, &color_tex);
+        glDeleteRenderbuffers(1, &depth_rbo);
+        glDeleteFramebuffers(1, &fbo);
+        return h;                                    /* h.id already 0 */
+    }
     g_textures[tex_idx].tex = color_tex;
     g_textures[tex_idx].target = GL_TEXTURE_2D;
 
-    rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count);
+    rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count, MAX_RENDER_TARGETS);
+    if (rt_idx == SLOT_NONE) {
+        slot_free(tex_idx, g_texture_free, &g_texture_free_count);   /* give the texture slot back */
+        glDeleteTextures(1, &color_tex);
+        glDeleteRenderbuffers(1, &depth_rbo);
+        glDeleteFramebuffers(1, &fbo);
+        return h;
+    }
     rt = &g_render_targets[rt_idx];
     rt->fbo       = fbo;
     rt->depth_rbo = depth_rbo;
@@ -437,11 +470,22 @@ RhiRenderTarget rhi_create_depth_target(int width, int height) {
         return h;
     }
 
-    tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count);
+    tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count, MAX_TEXTURES);
+    if (tex_idx == SLOT_NONE) {
+        glDeleteTextures(1, &depth_tex);
+        glDeleteFramebuffers(1, &fbo);
+        return h;                                    /* h.id already 0 */
+    }
     g_textures[tex_idx].tex = depth_tex;
     g_textures[tex_idx].target = GL_TEXTURE_2D;
 
-    rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count);
+    rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count, MAX_RENDER_TARGETS);
+    if (rt_idx == SLOT_NONE) {
+        slot_free(tex_idx, g_texture_free, &g_texture_free_count);   /* give the texture slot back */
+        glDeleteTextures(1, &depth_tex);
+        glDeleteFramebuffers(1, &fbo);
+        return h;
+    }
     rt = &g_render_targets[rt_idx];
     rt->fbo       = fbo;
     rt->depth_rbo = 0;               /* depth is the texture, not a renderbuffer */
