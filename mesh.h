@@ -32,6 +32,12 @@ void    mb_compute_tangents(MeshBuilder *b);
 void    make_box(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 d);
 void    make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d);
 void    make_grid(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_u32 subdiv);
+void    make_page(MeshBuilder *b, sol_f32 w, sol_f32 h);   /* upright XY quad, +Z, upright UVs */
+
+/* mesh-ref resolver, CPU half: ref name -> emitter call into b (the single
+   source of truth for what "box"/"grid"/"page" mean). SOL_FALSE = unknown ref;
+   the caller keeps the object as an empty (placed data is never destroyed). */
+sol_bool mesh_ref_build(const char *ref, MeshBuilder *b);
 
 /* upload a finished builder to GPU buffers (computes tangents first, then uploads
    via the RHI, never GL). Mutates b (writes the tangents); b is freed after. */

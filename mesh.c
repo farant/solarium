@@ -4,6 +4,7 @@
 #include "mesh.h"
 
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 void mb_init(MeshBuilder *b) {
@@ -107,6 +108,35 @@ void make_grid(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_u32 subdiv) {
 
 void make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d) {
     make_grid(b, w, d, 1);   /* the degenerate grid: a single quad */
+}
+
+/* A page: a w x h quad standing in the XY plane, facing +Z, with upright UVs
+   (uv (0,0) at bottom-left). Built directly rather than make_plane+rotation,
+   which would invert V relative to world-up (a flat XZ quad stood up via
+   +90 deg about X sends v to -Y). Extracted from main.c in P3 item 1. */
+void make_page(MeshBuilder *b, sol_f32 w, sol_f32 h) {
+    sol_f32 hw = w * 0.5f, hh = h * 0.5f;
+    sol_u32 v0 = mb_push_vertex(b, -hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f);  /* BL */
+    sol_u32 v1 = mb_push_vertex(b,  hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f);  /* BR */
+    sol_u32 v2 = mb_push_vertex(b,  hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f);  /* TR */
+    sol_u32 v3 = mb_push_vertex(b, -hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f);  /* TL */
+    mb_push_triangle(b, v0, v1, v2);
+    mb_push_triangle(b, v0, v2, v3);
+}
+
+/* The mesh-ref resolver, CPU half (P3 item 1): map a ref name to the emitter
+   call that regenerates its geometry. THE single source of truth for what
+   each name means — the scene built at startup and the scene loaded from
+   disk both come through here, so they cannot drift apart. Items 5/6/10
+   extend this vocabulary (room/file/terrain refs, parameters); they don't
+   rebuild the machine. Pure CPU (no upload) so it stays headless-testable.
+   Returns SOL_FALSE for an unknown name: the caller leaves the object as a
+   transform-only empty — a missing generator must never destroy placed data. */
+sol_bool mesh_ref_build(const char *ref, MeshBuilder *b) {
+    if (strcmp(ref, "box") == 0)  { make_box(b, 1.0f, 1.0f, 1.0f);  return SOL_TRUE; }
+    if (strcmp(ref, "grid") == 0) { make_grid(b, 6.0f, 6.0f, 8);    return SOL_TRUE; }
+    if (strcmp(ref, "page") == 0) { make_page(b, 0.9f, 1.2f);       return SOL_TRUE; }
+    return SOL_FALSE;
 }
 
 /* Per-vertex tangents from the UV gradient: for each triangle, solve for the

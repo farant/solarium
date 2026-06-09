@@ -526,6 +526,7 @@ typedef struct {
     RhiRenderTarget brdf_lut_rt;       /* BRDF integration LUT, 2D RG (C2) */
     RhiPipeline     brdf_lut_pipeline;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
+    sol_bool    l_was_down;     /* edge-detect the scene-reload key (P3 item 1) */
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
     int         mouse_skip;        /* swallow N frames of delta after a cursor-mode change */
@@ -660,9 +661,11 @@ static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
 /* Poll GLFW into a CameraInput (the platform layer; camera.c stays GLFW-free).
    Movement/look are level-triggered (held keys); the mode toggle is edge-
    triggered so it fires once per press. */
+static void scene_resolve_meshes(Scene *s);   /* defined with init_scene below */
+
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool f_now, tab_now, m_now, i_now, p_now, dragging, fp;
+    sol_bool f_now, tab_now, m_now, i_now, p_now, l_now, dragging, fp;
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
@@ -772,6 +775,28 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }
     }
     st->p_was_down = p_now;
+
+    /* L reloads scene.stml from disk (P3 item 1: the persistence proof, edge).
+       Procedural geometry reconstructs via the resolver; glb objects and
+       materials are not in the file yet (items 5/6), so they come back as
+       empties/defaults — the honest current boundary. The old scene's GPU
+       meshes are NOT destroyed: glb parts may share buffers (instanced
+       meshes), so per-object destroy could double-free a slot. A debug key
+       leaking boundedly is acceptable; the asset registry owns this later. */
+    l_now = glfwGetKey(w, GLFW_KEY_L) == GLFW_PRESS;
+    if (l_now && !st->l_was_down) {
+        Scene fresh;
+        if (scene_load(&fresh, "scene.stml")) {
+            scene_resolve_meshes(&fresh);
+            scene_free(&st->scene);
+            st->scene = fresh;
+            st->selected_handle = 0;       /* the old selection died with its scene */
+            printf("reloaded scene.stml: %u objects\n", (unsigned)st->scene.count);
+        } else {
+            fprintf(stderr, "scene.stml did not load — keeping the live scene\n");
+        }
+    }
+    st->l_was_down = l_now;
 
     /* exposure scrub: '[' down, ']' up (held; dt-scaled), with a live title readout */
     {
@@ -904,12 +929,33 @@ static void build_brdf_lut(AppState *state) {
     rhi_end_pass();
 }
 
+/* The mesh-ref resolver, GPU half (P3 item 1): realize geometry for every
+   object whose ref names a generator and whose mesh is still empty. Runs
+   AFTER rhi_init (it uploads) and after scene_load or scene-building — the
+   data phase stays pure (headless iotest keeps working), realization happens
+   here. An unknown ref leaves the object as a transform-only empty, warned:
+   placed data must outlive a missing generator (it re-saves intact). */
+static void scene_resolve_meshes(Scene *s) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        MeshBuilder  mb;
+        if (!o->mesh_ref || o->mesh.index_count != 0) continue;
+        mb_init(&mb);
+        if (mesh_ref_build(o->mesh_ref, &mb)) {
+            o->mesh = mesh_from_builder(&mb);
+        } else {
+            fprintf(stderr, "scene: unknown mesh ref \"%s\" on %s — left empty\n",
+                    o->mesh_ref, o->nid ? o->nid : "(no nid)");
+        }
+        mb_free(&mb);
+    }
+}
+
 /* One-time setup: build the pipeline + meshes, populate the scene. */
 static int init_scene(AppState *state) {
-    MeshBuilder mb;
     RhiShader shader;
     RhiPipelineDesc desc;
-    Mesh box_mesh, floor_mesh, page_mesh;
     Mesh empty = {0};            /* zero mesh -> an empty (transform-only) */
     sol_u32 anchor, floor, page;
 
@@ -1038,48 +1084,31 @@ static int init_scene(AppState *state) {
 
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
-    /* meshes (shared assets the scene objects reference) */
-    mb_init(&mb);
-    make_box(&mb, 1.0f, 1.0f, 1.0f);
-    box_mesh = mesh_from_builder(&mb);
-    mb_free(&mb);
-
-    mb_init(&mb);
-    make_grid(&mb, 6.0f, 6.0f, 8);
-    floor_mesh = mesh_from_builder(&mb);
-    mb_free(&mb);
-
-    /* a page-aspect quad standing in the XY plane, facing +Z, with upright UVs
-       (uv (0,0) at bottom-left). Built directly rather than make_plane+rotation,
-       which would invert V relative to world-up. ~3:4 to match paper-picture.png */
-    mb_init(&mb);
-    {
-        sol_f32 hw = 0.45f, hh = 0.60f;   /* half of 0.9 x 1.2 */
-        sol_u32 a = mb_push_vertex(&mb, -hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f);  /* BL */
-        sol_u32 b = mb_push_vertex(&mb,  hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f);  /* BR */
-        sol_u32 c = mb_push_vertex(&mb,  hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f);  /* TR */
-        sol_u32 d = mb_push_vertex(&mb, -hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f);  /* TL */
-        mb_push_triangle(&mb, a, b, c);
-        mb_push_triangle(&mb, a, c, d);
-    }
-    page_mesh = mesh_from_builder(&mb);
-    mb_free(&mb);
-
     /* scene: floor (root), an empty anchor (root), and the box as the
-       anchor's child — so spinning the anchor makes the box orbit it */
+       anchor's child — so spinning the anchor makes the box orbit it.
+       Geometry is BY REFERENCE even at build time (P3 item 1): objects are
+       added empty carrying a mesh ref, and one resolver pass realizes them —
+       the exact path a scene loaded from disk takes, so the built world and
+       the reloaded world cannot drift apart. */
     scene_init(&state->scene);
-    floor = scene_add(&state->scene, 0, floor_mesh,
+    floor = scene_add(&state->scene, 0, empty,
               vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     anchor = scene_add(&state->scene, 0, empty,
               vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     state->anchor_handle = anchor;
-    state->box_handle = scene_add(&state->scene, anchor, box_mesh,
+    state->box_handle = scene_add(&state->scene, anchor, empty,
               vec3_make(1.5f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
 
-    /* the parchment reading surface: the page quad, already upright and facing +Z */
-    page = scene_add(&state->scene, 0, page_mesh,
+    /* the parchment reading surface: an upright page quad facing +Z (~3:4,
+       matching paper-picture.png; the emitter lives in mesh.c now) */
+    page = scene_add(&state->scene, 0, empty,
               vec3_make(-2.0f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     state->page_handle = page;
+
+    scene_mesh_ref_set(&state->scene, floor, "grid");
+    scene_mesh_ref_set(&state->scene, state->box_handle, "box");
+    scene_mesh_ref_set(&state->scene, page, "page");
+    scene_resolve_meshes(&state->scene);
 
     /* PBR materials for the procedural objects (item 8a) */
     {
@@ -1124,11 +1153,6 @@ static int init_scene(AppState *state) {
             sw->pos    = vec3_make(0.3f, 0.0f, 0.0f);   /* tight radius (the cube's is 1.5) */
         }
     }
-
-    /* geometry by reference: the asset name regenerates the mesh on load */
-    scene_mesh_ref_set(&state->scene, floor, "grid");
-    scene_mesh_ref_set(&state->scene, state->box_handle, "box");
-    scene_mesh_ref_set(&state->scene, page, "page");
 
     /* overbuilt slots demo (mostly empty this phase) */
     scene_meta_set(&state->scene, state->box_handle, "title",  "Test Box");
@@ -1492,6 +1516,49 @@ int main(void) {
             rhi_destroy_buffer(b);
         }
         printf("teardown selftest: 5000 create/destroy cycles ok\n");
+    }
+
+    /* persistence self-check (P3 item 1 acceptance): the scene.stml written
+       by init_scene must load back and RECONSTRUCT geometry, not just data.
+       Load into a second Scene, resolve, verify every ref'd object got real
+       geometry, then free it — including the check meshes, which are safe to
+       destroy per-object here because they were just resolved (uniquely
+       owned), unlike the live scene's possibly-instanced glb buffers. */
+    {
+        Scene   check;
+        sol_u32 i, refs = 0, solid = 0;
+        if (!scene_load(&check, "scene.stml")) {
+            fprintf(stderr, "persistence self-check: scene.stml failed to load\n");
+            rhi_shutdown();
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return EXIT_FAILURE;
+        }
+        scene_resolve_meshes(&check);
+        for (i = 0; i < check.count; i++) {
+            SceneObject *o = &check.objects[i];
+            if (!o->mesh_ref) continue;
+            refs++;
+            if (o->mesh.index_count > 0) {
+                solid++;
+                rhi_destroy_buffer(o->mesh.vbuffer);
+                rhi_destroy_buffer(o->mesh.ibuffer);
+            }
+        }
+        if (refs == 0 || solid != refs || check.count != state.scene.count) {
+            fprintf(stderr, "persistence self-check FAILED: %u/%u refs reconstructed, "
+                    "%u loaded vs %u live objects\n",
+                    (unsigned)solid, (unsigned)refs,
+                    (unsigned)check.count, (unsigned)state.scene.count);
+            scene_free(&check);
+            rhi_shutdown();
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return EXIT_FAILURE;
+        }
+        printf("persistence self-check: %u objects, %u/%u meshes reconstructed ok\n",
+               (unsigned)check.count, (unsigned)solid, (unsigned)refs);
+        scene_free(&check);
     }
 #endif
 
