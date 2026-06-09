@@ -29,11 +29,19 @@ first client; the future document/content model (item 5 / Part 5) is the second.
 | Element | `<tag ...> ... </>` | children between open and `</>` |
 | Self-closing element | `<tag ... />` | leaf, no children |
 | Auto-close | `</>` | closes the nearest open tag (no name needed); a named `</tag>` is *accepted* and validated against the stack |
-| Attribute | `name="value"` | value is quoted |
+| Attribute | `name="value"` or `name='value'` | either quote; backslash escapes `\\` `\"` `\'` are **always** decoded inside quoted values (an escape that is only sometimes active cannot round-trip); any other escape is a parse error |
 | Boolean attribute | `name` | no `=` → value is `true` |
 | Text capture | `<tag ... (>text` | the element's text content is everything up to the **next tag**, trimmed/dedented; the element self-closes. For free-text values (titles, notes) — sidesteps attribute escaping, since STML has **no character entities**. |
-| Raw capture | `<tag! ... (>text` | as above but content is read **literally** (use when the text contains `<` or other markup characters) |
+| Raw line capture | `<tag! ... (>text` | the rest of the current line, **verbatim** — no trim, no dedent, `<` is a plain byte; the newline is the terminator (not content) and the element self-closes |
+| Raw block | `<tag! ...>text</tag>` | everything between `>` and the first `</` is text, **byte-for-byte** (newlines, indentation, `<`); the close is validated as usual. The one string raw text cannot contain is its own terminator `</` (every verbatim scheme has exactly this blind spot — CDATA's is `]]>`) |
 | Comment | `<!-- ... -->` | skipped |
+
+**`&` is never special.** Not in attributes, not in content, not in raw text —
+it is a literal byte everywhere. The `&…;` sigil is *reserved* for a future
+STML feature (`&some name here;` referencing a deduplicated singleton
+`<entity>` — a semantic wikilink, not XML character substitution), and that
+resolution will apply only in normal content, never raw. No writer or reader
+in this codebase may escape, encode, or rewrite `&`.
 
 **Explicitly NOT supported (live in the TS tooling, not our C parser):**
 N-sibling / backward / sandwich capture operators, transclusion (`<<...>>`),
@@ -148,8 +156,32 @@ Consequences:
 ## 5. Serialization rules
 
 - Floats are written with `%.9g` so `pos`/`rot`/`scale` round-trip exactly.
-- Save → load must produce a **semantically identical** scene (same `nid`s,
-  transforms, hierarchy, metadata) with stable object ordering.
+- Save → load → save must be **byte-identical** (stronger than semantic: it
+  proves nothing was dropped, reordered, or mangled). This works because the
+  writer's form selection is a *pure function of the value* — the same string
+  always serializes the same way.
 - The loader tolerates unknown tags/attributes (forward compatibility) and a
   missing optional element (defaults: identity transform, no parent, no slots).
 - Geometry is never in the file; `mesh ref` names a generator/asset.
+
+**The writer is a form selector**, not an escaper: per value it picks the
+cheapest representation that round-trips, and the DOM always holds the
+*logical* string (encode/decode only at the file boundary).
+
+Attribute values — quote selection first, escaping last:
+
+| Value contains | Written as |
+|---|---|
+| no `"` | `"value"` |
+| `"` but no `'` | `'value'` |
+| both quotes | `"value"` with `\"` |
+| a literal `\` (any case) | always doubled to `\\` |
+
+Meta text values — the capture/raw ladder:
+
+| Value | Form |
+|---|---|
+| single line, no `<`, no edge whitespace (trim/dedent is identity) | `<meta key="k" (>value` |
+| any other single-line value | `<meta! key="k" (>value` (raw line, verbatim) |
+| multiline | `<meta! key="k">value</meta>` — written **tight**: inside raw every byte is content, so no pretty-printing between the delimiters |
+| multiline containing `</` | **unrepresentable** — `scene_save` fails loudly and removes the partial file rather than write a lying one |

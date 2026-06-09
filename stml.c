@@ -168,6 +168,33 @@ static void skip_ws_and_comments(Parser *ps) {
     }
 }
 
+/* Decode backslash escapes in a quoted attribute value: \\ -> \  \" -> "
+   \' -> '. Escape semantics are ALWAYS on inside quoted values, whichever
+   quote delimits them — an escape that is only sometimes active cannot
+   round-trip (the reader has no way to know which mode a value was written
+   in). Any other escape is an error: this is a machine format first, and
+   strictness catches corruption and typos instead of hiding them. */
+static char *decode_attr_range(Parser *ps, const char *a, const char *b) {
+    char       *out, *w;
+    const char *p;
+
+    out = (char *)malloc((size_t)(b - a) + 1);  /* decoding never grows */
+    if (!out) { set_err(ps, "out of memory"); return NULL; }
+    w = out;
+    for (p = a; p < b; p++) {
+        if (*p == '\\') {
+            p++;
+            if (p >= b) { free(out); set_err(ps, "dangling backslash in attribute value"); return NULL; }
+            if (*p != '\\' && *p != '"' && *p != '\'') {
+                free(out); set_err(ps, "unknown escape in attribute value"); return NULL;
+            }
+        }
+        *w++ = *p;
+    }
+    *w = '\0';
+    return out;
+}
+
 static int parse_attr(Parser *ps, StmlNode *n) {
     const char *name_start, *name_end;
     char       *name, *value;
@@ -187,11 +214,15 @@ static int parse_attr(Parser *ps, StmlNode *n) {
         if (q != '"' && q != '\'') { free(name); set_err(ps, "attribute value must be quoted"); return 0; }
         ps->p++;
         val_start = ps->p;
-        while (*ps->p != '\0' && *ps->p != q) ps->p++;
+        while (*ps->p != '\0' && *ps->p != q) {     /* an escaped quote is not the end */
+            if (ps->p[0] == '\\' && ps->p[1] != '\0') ps->p++;
+            ps->p++;
+        }
         if (*ps->p != q) { free(name); set_err(ps, "unterminated attribute value"); return 0; }
         val_end = ps->p;
         ps->p++;                                /* consume closing quote */
-        value = dup_range(val_start, val_end);
+        value = decode_attr_range(ps, val_start, val_end);
+        if (!value) { free(name); return 0; }   /* err already set */
     } else {
         value = dup_cstr("true");               /* boolean attribute */
     }
@@ -210,6 +241,18 @@ static int parse_capture(Parser *ps, StmlNode *n) {
     while (*ps->p != '\0' && *ps->p != '<') ps->p++;
     n->text = dedent_range(t_start, ps->p);
     if (!n->text) { set_err(ps, "out of memory"); return 0; }
+    return 1;
+}
+
+/* Raw capture (<tag! (>): the rest of the current line, VERBATIM — no trim,
+   no dedent, '<' is just a byte. The newline is the terminator (consumed),
+   not content; the element self-closes. */
+static int parse_raw_capture(Parser *ps, StmlNode *n) {
+    const char *t_start = ps->p;
+    while (*ps->p != '\0' && *ps->p != '\n') ps->p++;
+    n->text = dup_range(t_start, ps->p);
+    if (!n->text) { set_err(ps, "out of memory"); return 0; }
+    if (*ps->p == '\n') ps->p++;
     return 1;
 }
 
@@ -235,6 +278,21 @@ static int parse_close(Parser *ps, StmlNode *parent) {
         }
     }
     return 1;
+}
+
+/* Raw block (<tag!> ... </tag>): everything between the '>' and the first
+   "</" is the element's text, byte-for-byte — newlines, indentation, '<',
+   all of it is content. The one string raw text cannot hold is its own
+   terminator ("</"); that is the irreducible blind spot of every verbatim
+   scheme (CDATA's is "]]>"), and the writer's job is to refuse such values
+   loudly. The close is then validated as usual (named match or </>). */
+static int parse_raw_block(Parser *ps, StmlNode *n) {
+    const char *t_start = ps->p;
+    while (*ps->p != '\0' && !(ps->p[0] == '<' && ps->p[1] == '/')) ps->p++;
+    if (*ps->p == '\0') { set_err(ps, "unexpected end of input: unclosed raw element"); return 0; }
+    n->text = dup_range(t_start, ps->p);
+    if (!n->text) { set_err(ps, "out of memory"); return 0; }
+    return parse_close(ps, n);
 }
 
 /* Parse a run of children into `parent`, stopping at EOF (top level) or the
@@ -289,12 +347,16 @@ static StmlNode *parse_element(Parser *ps) {
         ps->p++;
         if (*ps->p != '>') { set_err(ps, "expected '>' after '(' capture"); stml_free(n); return NULL; }
         ps->p++;
-        if (!parse_capture(ps, n)) { stml_free(n); return NULL; }
+        if (n->raw ? !parse_raw_capture(ps, n) : !parse_capture(ps, n)) {
+            stml_free(n); return NULL;
+        }
         return n;
     }
-    if (*ps->p == '>') {                          /* open: parse children */
+    if (*ps->p == '>') {                          /* open: raw text or children */
         ps->p++;
-        if (!parse_content(ps, n)) { stml_free(n); return NULL; }
+        if (n->raw ? !parse_raw_block(ps, n) : !parse_content(ps, n)) {
+            stml_free(n); return NULL;
+        }
         return n;
     }
     set_err(ps, "unterminated tag");

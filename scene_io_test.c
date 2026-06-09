@@ -72,6 +72,15 @@ int main(void) {
     scene_rel_add(&scene, box_h, "orbits", anchor_h);
     scene_content_set(&scene, box_h, "notes/box.txt");
 
+    /* the TODO3 item-1 acceptance set: values with quotes, '<', '&', edge
+       whitespace, and newlines must all survive save->load->save untouched */
+    scene_meta_set(&scene, box_h, "quotes",    "she said \"hi\" and 'hey'");
+    scene_meta_set(&scene, box_h, "angles",    "if a < b && b > c");
+    scene_meta_set(&scene, box_h, "entity",    "see &some name here; later");
+    scene_meta_set(&scene, box_h, "spaced",    "  edges matter  ");
+    scene_meta_set(&scene, box_h, "multiline", "line one\n  indented two\nline three");
+    scene_meta_set(&scene, box_h, "say\"what", "a key needing quote-selection");
+
     /* remember the minted ids up front; both the round-trip and keystone
        sections find the same objects by these later */
     strcpy(a_floor_nid,  scene_get(&scene, floor_h)->nid);
@@ -123,6 +132,31 @@ int main(void) {
             return 1;
         }
         printf("round-trip save->load->save is byte-identical: ok\n");
+
+        /* and the loaded VALUES are the originals, byte for byte — file
+           identity alone could mask a writer+reader that agree on mangling */
+        {
+            static const char *want[][2] = {
+                { "quotes",    "she said \"hi\" and 'hey'"          },
+                { "angles",    "if a < b && b > c"                  },
+                { "entity",    "see &some name here; later"         },
+                { "spaced",    "  edges matter  "                   },
+                { "multiline", "line one\n  indented two\nline three" },
+                { "say\"what", "a key needing quote-selection"      },
+            };
+            sol_u32     bbox_h = scene_handle_for_nid(&b, a_box_nid);
+            size_t      k;
+            for (k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+                const char *got = scene_meta_get(&b, bbox_h, want[k][0]);
+                if (!got || strcmp(got, want[k][1]) != 0) {
+                    printf("FAIL: meta [%s] loaded as [%s]\n",
+                           want[k][0], got ? got : "(missing)");
+                    scene_free(&b); scene_free(&scene);
+                    return 1;
+                }
+            }
+            printf("special-character meta values load back exactly: ok\n");
+        }
 
         /* identity + hierarchy survived: B's box (found by A's nid) must have a
            parent whose nid is A's anchor nid */
@@ -206,6 +240,27 @@ int main(void) {
             printf("after delete, save+reload keeps survivors and drops the floor: ok\n");
             scene_free(&d);
         }
+    }
+
+    /* the raw blind spot: a multiline value containing the literal terminator
+       "</" is unrepresentable — save must refuse loudly and leave no file */
+    {
+        const char *path4 = "scene_io_test_4.stml";
+        FILE       *probe;
+        scene_meta_set(&scene, box_h, "poison", "line one</meta>\nline two");
+        if (scene_save(&scene, path4)) {
+            printf("FAIL: save accepted an unrepresentable raw value\n");
+            scene_free(&scene);
+            return 1;
+        }
+        probe = fopen(path4, "rb");
+        if (probe) {
+            printf("FAIL: refused save left a truncated file behind\n");
+            fclose(probe);
+            scene_free(&scene);
+            return 1;
+        }
+        printf("unrepresentable value (multiline with \"</\") refused cleanly: ok\n");
     }
 
     scene_free(&scene);

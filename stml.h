@@ -1,9 +1,12 @@
 /* stml.h — a tiny STML parser producing a generic DOM tree. Scene-agnostic:
    this module knows nothing about nid/pos/object — the scene loader is just its
    first client. Supports the "STML data profile" (see SCENE_FORMAT.md):
-   elements, self-closing, `</>` auto-close, quoted + boolean attributes,
-   `<tag (>` forward text capture (trimmed/dedented), `!` raw marker, comments.
-   Above every seam: depends on the C library only, never GL. */
+   elements, self-closing, `</>` auto-close, quoted + boolean attributes
+   (backslash escapes \\ \" \' always decoded inside quotes; `&` is NEVER
+   special — reserved for the future &name; entity reference), `<tag (>`
+   forward text capture (trimmed/dedented), raw mode `!` (`<tag! (>` = rest of
+   line verbatim; `<tag!>...</tag>` = verbatim block, terminator "</"),
+   comments. Above every seam: depends on the C library only, never GL. */
 #ifndef STML_H
 #define STML_H
 
@@ -25,7 +28,7 @@ typedef struct StmlNode {
     struct StmlNode **children;
     sol_u32           child_count;
     sol_u32           child_cap;
-    char             *text;         /* capture-tag text (dedented); NULL if none */
+    char             *text;         /* text content (dedented; VERBATIM if raw); NULL if none */
     sol_bool          raw;          /* tag carried the `!` raw marker */
 } StmlNode;
 

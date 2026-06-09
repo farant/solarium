@@ -1,8 +1,11 @@
-/* scene_io.c — scene persistence: STML serialization (save here; load next).
+/* scene_io.c — scene persistence: STML serialization (save and load).
    Above the seam: writes text via stdio, knows the scene schema, never GL.
    References (parent, rel target) are written as the *referenced object's nid*,
    resolved from its runtime handle at write time. Floats use %.9g so a 32-bit
-   float round-trips exactly. See SCENE_FORMAT.md. */
+   float round-trips exactly. The writer is a FORM SELECTOR: per value it picks
+   the cheapest representation that round-trips (quote choice for attributes,
+   capture vs raw for meta text) — STML-native, no character entities, and `&`
+   is never touched. See SCENE_FORMAT.md. */
 
 #include "scene.h"
 #include "stml.h"
@@ -14,6 +17,66 @@
 static void write_vec3(FILE *f, const char *tag, vec3 v) {
     fprintf(f, "    <%s x=\"%.9g\" y=\"%.9g\" z=\"%.9g\" />\n",
             tag, (double)v.x, (double)v.y, (double)v.z);
+}
+
+/* Write one attribute as ` name="value"`, selecting the quote that avoids
+   escaping: `"` normally, `'` when the value contains `"`, and only when it
+   contains BOTH quote characters fall back to `"` with `\"`. A literal
+   backslash is always written `\\` (the reader's escape decoding is always
+   on — see stml.c). NEVER touches `&` (reserved for &name; references).
+   Deterministic — a pure function of the value — which is what keeps
+   save -> load -> save byte-identical. */
+static void write_attr(FILE *f, const char *name, const char *value) {
+    const char *p;
+    char        q;
+
+    q = strchr(value, '"') ? (strchr(value, '\'') ? '"' : '\'') : '"';
+    fprintf(f, " %s=%c", name, q);
+    for (p = value; *p; p++) {
+        if (*p == '\\' || *p == q) fputc('\\', f);
+        fputc(*p, f);
+    }
+    fputc(q, f);
+}
+
+/* Can `v` ride the normal capture form (<meta key (>v), whose read path trims
+   surrounding whitespace and dedents? Only when that read gives back exactly
+   `v`: one line, no '<' (the capture terminator), and nothing for the trim to
+   eat at either end. Everything else escalates to a raw form. */
+static int capture_safe(const char *v) {
+    size_t      n = strlen(v);
+    const char *p;
+    if (n == 0) return 1;
+    if (v[0] == ' ' || v[0] == '\t') return 0;
+    if (v[n - 1] == ' ' || v[n - 1] == '\t') return 0;
+    for (p = v; *p; p++) {
+        if (*p == '<' || *p == '\n' || *p == '\r') return 0;
+    }
+    return 1;
+}
+
+/* One meta entry, in the cheapest form that round-trips it (see
+   SCENE_FORMAT.md "serialization rules"). Returns 0 only for the raw blind
+   spot: a multiline value containing the literal terminator "</". */
+static int write_meta(FILE *f, const char *key, const char *value) {
+    if (capture_safe(value)) {                    /* trim/dedent is identity */
+        fprintf(f, "    <meta");
+        write_attr(f, "key", key);
+        fprintf(f, " (>%s\n", value);
+    } else if (strchr(value, '\n') == NULL) {     /* raw line: verbatim to \n */
+        fprintf(f, "    <meta!");
+        write_attr(f, "key", key);
+        fprintf(f, " (>%s\n", value);
+    } else if (strstr(value, "</") == NULL) {     /* raw block, written TIGHT:
+                            inside raw every byte is content, so the value butts
+                            directly against '>' and '</' — no pretty-printing */
+        fprintf(f, "    <meta!");
+        write_attr(f, "key", key);
+        fprintf(f, ">%s</meta>\n", value);
+    } else {
+        return 0;
+    }
+    return 1;
 }
 
 sol_bool scene_save(Scene *s, const char *path) {
@@ -31,26 +94,43 @@ sol_bool scene_save(Scene *s, const char *path) {
             SceneObject *par = scene_get(s, o->parent);
             if (par && par->nid) pnid = par->nid;     /* reference BY nid, not handle */
         }
-        fprintf(f, "  <object nid=\"%s\" parent=\"%s\">\n",
-                o->nid ? o->nid : "", pnid);
+        fprintf(f, "  <object");
+        write_attr(f, "nid", o->nid ? o->nid : "");
+        write_attr(f, "parent", pnid);
+        fprintf(f, ">\n");
 
         write_vec3(f, "pos", o->pos);
         fprintf(f, "    <rot x=\"%.9g\" y=\"%.9g\" z=\"%.9g\" w=\"%.9g\" />\n",
                 (double)o->rot.x, (double)o->rot.y, (double)o->rot.z, (double)o->rot.w);
         write_vec3(f, "scale", o->scale);
 
-        if (o->mesh_ref) fprintf(f, "    <mesh ref=\"%s\" />\n", o->mesh_ref);
+        if (o->mesh_ref) {
+            fprintf(f, "    <mesh");
+            write_attr(f, "ref", o->mesh_ref);
+            fprintf(f, " />\n");
+        }
 
-        for (j = 0; j < o->meta_count; j++)            /* capture form: value after (> */
-            fprintf(f, "    <meta key=\"%s\" (>%s\n", o->meta[j].key, o->meta[j].value);
+        for (j = 0; j < o->meta_count; j++) {
+            if (!write_meta(f, o->meta[j].key, o->meta[j].value)) {
+                fclose(f);                    /* unrepresentable value: fail loud */
+                remove(path);                 /* and leave no truncated file behind */
+                return SOL_FALSE;
+            }
+        }
 
         for (j = 0; j < o->rel_count; j++) {
             SceneObject *tgt = scene_get(s, o->relations[j].target);
-            fprintf(f, "    <rel type=\"%s\" target=\"%s\" />\n",
-                    o->relations[j].type, (tgt && tgt->nid) ? tgt->nid : "");
+            fprintf(f, "    <rel");
+            write_attr(f, "type", o->relations[j].type);
+            write_attr(f, "target", (tgt && tgt->nid) ? tgt->nid : "");
+            fprintf(f, " />\n");
         }
 
-        if (o->content) fprintf(f, "    <content path=\"%s\" />\n", o->content);
+        if (o->content) {
+            fprintf(f, "    <content");
+            write_attr(f, "path", o->content);
+            fprintf(f, " />\n");
+        }
 
         fprintf(f, "  </object>\n");
     }
