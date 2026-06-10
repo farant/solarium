@@ -2,6 +2,7 @@
    to rhi.h for upload, never to GL. */
 
 #include "mesh.h"
+#include "sol_math.h"   /* SOL_PI + sol_smoothstep (the codex emitters) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -336,6 +337,206 @@ static void emit_room(MeshBuilder *b, const float *p) {
 }
 static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
 static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1], p[2]); }
+/* ---- the codex (item 9): geometry from real bookbinding ----
+   A bound book parameterized by its CONSTRUCTION, not by guesswork: sewn
+   signatures form the text BLOCK; the sewing cords show through the leather
+   as RAISED BANDS across the spine; the spine is ROUNDED AND BACKED
+   (round 0 = a cheap flat binding, 1 = fully rounded); wooden BOARDS
+   overhang the block by the SQUARES; vellum wants a CLASP. Real ranges
+   make variation non-arbitrary (formats run h:w ~1.35-1.6; bands 3-5).
+
+   Local frame: the book LIES on its back cover — x: 0 = spine edge ->
+   w = fore-edge; y: 0..t thickness; z: +-h/2 head/tail. Stand it up with
+   the object's rotation. COVER and BLOCK are separate refs so each part
+   wears its own material (leather vs cream) with no new machinery — a
+   book is a small GROUP, the way a room is. */
+#define BOOK_SEG 6   /* spine arc segments */
+
+static void box_minmax(MeshBuilder *b, sol_f32 x0, sol_f32 x1,
+                       sol_f32 y0, sol_f32 y1, sol_f32 z0, sol_f32 z1) {
+    face_x(b, x0, y0, y1, z0, z1, -1);
+    face_x(b, x1, y0, y1, z0, z1,  1);
+    face_y(b, x0, x1, y0, z0, z1, -1);
+    face_y(b, x0, x1, y1, z0, z1,  1);
+    face_z(b, x0, x1, y0, y1, z0, -1);
+    face_z(b, x0, x1, y0, y1, z1,  1);
+}
+
+/* spine cross-section sample i of [0..BOOK_SEG]: from the back board edge
+   (0,0) over the bulge (-depth, t/2) to the front board edge (0,t) */
+static void spine_point(int i, sol_f32 t, sol_f32 depth, sol_f32 *x, sol_f32 *y) {
+    float a = SOL_PI * ((float)i / (float)BOOK_SEG) - SOL_PI * 0.5f;
+    *x = -depth * cosf(a);
+    *y = t * 0.5f + t * 0.5f * sinf(a);
+}
+
+/* one lofted strip of the spine arc over [z0,z1] at the given bulge depth;
+   per-segment normals from the cross-section tangent, rotated outward */
+static void spine_strip(MeshBuilder *b, sol_f32 t, sol_f32 depth,
+                        sol_f32 z0, sol_f32 z1) {
+    int i;
+    for (i = 0; i < BOOK_SEG; i++) {
+        sol_f32 x0, y0, x1, y1, nx, ny, nl;
+        spine_point(i,     t, depth, &x0, &y0);
+        spine_point(i + 1, t, depth, &x1, &y1);
+        nx = -(y1 - y0);
+        ny =  (x1 - x0);
+        nl = sqrtf(nx * nx + ny * ny);
+        if (nl > 1e-9f) { nx /= nl; ny /= nl; }
+        push_quad4(b,
+                   x0, y0, z0, 0.0f, (float)i,
+                   x0, y0, z1, 1.0f, (float)i,
+                   x1, y1, z1, 1.0f, (float)(i + 1),
+                   x1, y1, z0, 0.0f, (float)(i + 1),
+                   nx, ny, 0.0f);
+    }
+}
+
+void make_book_cover(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
+                     sol_f32 board, sol_f32 sq, sol_f32 round_,
+                     int bands, int clasp) {
+    sol_f32 hh    = h * 0.5f;
+    sol_f32 depth = round_ * t * 0.42f;
+    int     k;
+    (void)sq;                                   /* the block insets; boards don't */
+
+    box_minmax(b, 0.0f, w, 0.0f, board, -hh, hh);          /* back board  */
+    box_minmax(b, 0.0f, w, t - board, t, -hh, hh);         /* front board */
+
+    if (depth < 1e-4f) {
+        face_x(b, 0.0f, 0.0f, t, -hh, hh, -1);             /* flat binding */
+    } else {
+        int i;
+        spine_strip(b, t, depth, -hh, hh);                 /* the rounded wrap */
+        for (i = 0; i < BOOK_SEG; i++) {                   /* head/tail caps */
+            sol_f32 x0, y0, x1, y1;
+            sol_u32 a, c, d;
+            spine_point(i,     t, depth, &x0, &y0);
+            spine_point(i + 1, t, depth, &x1, &y1);
+            a = mb_push_vertex(b, 0.0f, t * 0.5f, hh, 0.0f, 0.0f, 1.0f, 0.5f, 0.5f);
+            c = mb_push_vertex(b, x1,   y1,       hh, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+            d = mb_push_vertex(b, x0,   y0,       hh, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            mb_push_triangle(b, a, c, d);
+            a = mb_push_vertex(b, 0.0f, t * 0.5f, -hh, 0.0f, 0.0f, -1.0f, 0.5f, 0.5f);
+            c = mb_push_vertex(b, x0,   y0,       -hh, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f);
+            d = mb_push_vertex(b, x1,   y1,       -hh, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f);
+            mb_push_triangle(b, a, c, d);
+        }
+    }
+
+    /* raised bands: the sewing cords under the leather — a deeper arc strip
+       plus two side rings closing it back to the spine surface */
+    for (k = 1; k <= bands; k++) {
+        sol_f32 zc = -hh + h * (sol_f32)k / (sol_f32)(bands + 1);
+        sol_f32 bw = h * 0.018f;
+        sol_f32 db = depth + t * 0.07f;   /* cord raise scales with the block */
+        int     i;
+        spine_strip(b, t, db, zc - bw, zc + bw);
+        for (i = 0; i < BOOK_SEG; i++) {
+            sol_f32 ix0, iy0, ix1, iy1, ox0, oy0, ox1, oy1;
+            spine_point(i,     t, depth, &ix0, &iy0);
+            spine_point(i + 1, t, depth, &ix1, &iy1);
+            spine_point(i,     t, db,    &ox0, &oy0);
+            spine_point(i + 1, t, db,    &ox1, &oy1);
+            push_quad4(b, ix0, iy0, zc + bw, 0.0f, 0.0f,
+                          ix1, iy1, zc + bw, 1.0f, 0.0f,
+                          ox1, oy1, zc + bw, 1.0f, 1.0f,
+                          ox0, oy0, zc + bw, 0.0f, 1.0f,
+                          0.0f, 0.0f, 1.0f);
+            push_quad4(b, ix1, iy1, zc - bw, 0.0f, 0.0f,
+                          ix0, iy0, zc - bw, 1.0f, 0.0f,
+                          ox0, oy0, zc - bw, 1.0f, 1.0f,
+                          ox1, oy1, zc - bw, 0.0f, 1.0f,
+                          0.0f, 0.0f, -1.0f);
+        }
+    }
+
+    if (clasp)                                              /* vellum fights back */
+        box_minmax(b, w * 0.94f, w * 1.03f,
+                   t * 0.40f, t * 0.60f, -h * 0.05f, h * 0.05f);
+}
+
+void make_book_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
+                     sol_f32 board, sol_f32 sq) {
+    sol_f32 hh = h * 0.5f;
+    box_minmax(b, 0.0f, w - sq, board, t - board, -(hh - sq), hh - sq);
+}
+
+/* ---- the OPEN codex (the reader's book) ----
+   Frame: gutter (the sewn fold) at x=0, the spread spans -w..+w, y up,
+   z +-h/2. The boards lie flat as one slab; each page fan rises out of
+   the gutter pinch along a smoothstep profile to the flat TEXT FIELD —
+   which is where wtext puts the page text, clear of the gutter curve,
+   like a typesetter would. */
+#define BOOK_FAN_SEG 8
+
+void make_book_open_cover(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
+                          sol_f32 board, sol_f32 sq) {
+    (void)t; (void)sq;
+    box_minmax(b, -w, w, 0.0f, board, -h * 0.5f, h * 0.5f);
+}
+
+void make_book_open_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
+                          sol_f32 board, sol_f32 sq) {
+    sol_f32 wb    = w - sq;                     /* page width  */
+    sol_f32 zh    = h * 0.5f - sq;              /* page height */
+    sol_f32 stack = (t - 2.0f * board) * 0.5f;  /* one side's leaf pile */
+    sol_f32 yb, xf, y0c, y1c;
+    sol_f32 px[BOOK_FAN_SEG + 1], py[BOOK_FAN_SEG + 1];
+    int     i, side;
+
+    if (stack < 0.004f) stack = 0.004f;
+    yb = board + stack * 0.25f;                 /* the gutter pinch (sewing) */
+    y0c = board;                                /* fans rest ON the slab; their
+                                                   underside is omitted (coplanar
+                                                   with the slab top = z-fight) */
+    y1c = board + stack;
+    xf  = wb * 0.30f;                           /* where the rise flattens */
+
+    for (i = 0; i <= BOOK_FAN_SEG; i++) {
+        sol_f32 x = wb * (sol_f32)i / (sol_f32)BOOK_FAN_SEG;
+        px[i] = x;
+        py[i] = yb + (y1c - yb) * sol_smoothstep(x / xf);
+    }
+
+    for (side = 0; side < 2; side++) {
+        sol_f32 s = (side == 0) ? 1.0f : -1.0f;
+        for (i = 0; i < BOOK_FAN_SEG; i++) {    /* the top surface */
+            sol_f32 nx = -(py[i + 1] - py[i]);
+            sol_f32 ny =  (px[i + 1] - px[i]);
+            sol_f32 nl = sqrtf(nx * nx + ny * ny);
+            if (nl > 1e-9f) { nx /= nl; ny /= nl; }
+            if (s > 0.0f)
+                push_quad4(b, px[i],   py[i],   -zh, (float)i, 0.0f,
+                              px[i],   py[i],    zh, (float)i, 1.0f,
+                              px[i+1], py[i+1],  zh, (float)(i+1), 1.0f,
+                              px[i+1], py[i+1], -zh, (float)(i+1), 0.0f,
+                              nx, ny, 0.0f);
+            else
+                push_quad4(b, -px[i],   py[i],    zh, (float)i, 1.0f,
+                              -px[i],   py[i],   -zh, (float)i, 0.0f,
+                              -px[i+1], py[i+1], -zh, (float)(i+1), 0.0f,
+                              -px[i+1], py[i+1],  zh, (float)(i+1), 1.0f,
+                              -nx, ny, 0.0f);
+        }
+        for (i = 0; i < BOOK_FAN_SEG; i++) {    /* head/tail silhouette walls */
+            sol_f32 ax = s * px[i], bx = s * px[i + 1];
+            push_quad4(b, ax, y0c,  zh, 0.0f, 0.0f,
+                          bx, y0c,  zh, 1.0f, 0.0f,
+                          bx, py[i+1], zh, 1.0f, 1.0f,
+                          ax, py[i],   zh, 0.0f, 1.0f,
+                          0.0f, 0.0f, 1.0f);
+            push_quad4(b, bx, y0c, -zh, 0.0f, 0.0f,
+                          ax, y0c, -zh, 1.0f, 0.0f,
+                          ax, py[i],   -zh, 1.0f, 1.0f,
+                          bx, py[i+1], -zh, 0.0f, 1.0f,
+                          0.0f, 0.0f, -1.0f);
+        }
+        face_x(b, s * wb, y0c, y1c, -zh, zh, s > 0.0f ? 1 : -1);   /* fore-edge */
+        face_x(b, 0.0f,   y0c, yb,  -zh, zh, s > 0.0f ? -1 : 1);   /* gutter    */
+    }
+}
+
 /* A flat arrow in the XY plane at z=0, from (x0,y0) to (x1,y1): a shaft quad
    plus a triangular head, single-sided, facing +Z. Board ink (item 8) — the
    endpoints come from two CARDS' positions, so this geometry is DERIVED and
@@ -370,6 +571,19 @@ void make_arrow(MeshBuilder *b, sol_f32 x0, sol_f32 y0,
 
 static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 static void emit_board(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
+static void emit_book_cover(MeshBuilder *b, const float *p) {
+    make_book_cover(b, p[0], p[1], p[2], p[3], p[4], p[5],
+                    (int)(p[6] + 0.5f), p[7] > 0.5f);
+}
+static void emit_book_block(MeshBuilder *b, const float *p) {
+    make_book_block(b, p[0], p[1], p[2], p[3], p[4]);
+}
+static void emit_book_open_cover(MeshBuilder *b, const float *p) {
+    make_book_open_cover(b, p[0], p[1], p[2], p[3], p[4]);
+}
+static void emit_book_open_block(MeshBuilder *b, const float *p) {
+    make_book_open_block(b, p[0], p[1], p[2], p[3], p[4]);
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -386,7 +600,18 @@ static const MeshRefEntry REGISTRY[] = {
     /* board: a card grown to furniture scale (item 8) — same slab geometry,
        bottom-origin, front face toward local +Z. Its OWN ref name is its
        identity: the drag code recognizes a pinboard by mesh_ref "board". */
-    { "board", 3, { "w", "h", "t" }, { 1.8f, 1.2f, 0.05f }, emit_board }
+    { "board", 3, { "w", "h", "t" }, { 1.8f, 1.2f, 0.05f }, emit_board },
+    /* the codex (item 9): cover and block are SEPARATE refs so each part
+       wears its own material — a book is a small group, like a room.
+       Defaults are a sane quarto; the spawner varies within real ranges. */
+    { "book_cover", 8, { "w", "h", "t", "board", "sq", "round", "bands", "clasp" },
+      { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f, 0.8f, 4.0f, 0.0f }, emit_book_cover },
+    { "book_block", 5, { "w", "h", "t", "board", "sq" },
+      { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f }, emit_book_block },
+    { "book_open_cover", 5, { "w", "h", "t", "board", "sq" },
+      { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f }, emit_book_open_cover },
+    { "book_open_block", 5, { "w", "h", "t", "board", "sq" },
+      { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f }, emit_book_open_block }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 

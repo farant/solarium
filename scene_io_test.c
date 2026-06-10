@@ -320,7 +320,62 @@ int main(void) {
                 return 1;
             }
             mb_free(&mb);
-            printf("room + wall + path + board + arrow emitters: ok\n");
+            /* item 9: the codex. Cover at defaults (round .8, 4 bands, no
+               clasp): boards 12 + spine 6 + bands 4*18 = 90 quads + 12 cap
+               tris -> 396v/576i. Flat bandless clasped: 12 + 1 flat spine +
+               6 clasp = 19 quads, no caps -> 76v/114i. Block = a box.
+               Open block: per side 8 top + 16 walls + fore + gutter = 26
+               quads, two sides -> 208v/312i. */
+            mb_init(&mb);
+            if (!mesh_ref_build("book_cover", (const float *)0, 0, &mb) ||
+                mb.vertex_count != 396 || mb.index_count != 576) {
+                printf("FAIL: default book_cover wants 396v/576i, got %uv/%ui\n",
+                       (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            mb_init(&mb);
+            {
+                float flat_p[8];
+                flat_p[0] = 0.20f; flat_p[1] = 0.28f; flat_p[2] = 0.05f;
+                flat_p[3] = 0.007f; flat_p[4] = 0.004f;
+                flat_p[5] = 0.0f;  flat_p[6] = 0.0f;  flat_p[7] = 1.0f;
+                mesh_ref_build("book_cover", flat_p, 8, &mb);
+            }
+            if (mb.vertex_count != 76 || mb.index_count != 114) {
+                printf("FAIL: flat clasped cover wants 76v/114i, got %uv/%ui\n",
+                       (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            mb_init(&mb);
+            if (!mesh_ref_build("book_block", (const float *)0, 0, &mb) ||
+                mb.vertex_count != 24 || mb.index_count != 36) {
+                printf("FAIL: book_block should be a box (24v/36i)\n");
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            mb_init(&mb);
+            if (!mesh_ref_build("book_open_cover", (const float *)0, 0, &mb) ||
+                mb.vertex_count != 24) {
+                printf("FAIL: book_open_cover should be a slab (24v)\n");
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            mb_init(&mb);
+            if (!mesh_ref_build("book_open_block", (const float *)0, 0, &mb) ||
+                mb.vertex_count != 208 || mb.index_count != 312) {
+                printf("FAIL: open block wants 208v/312i, got %uv/%ui\n",
+                       (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            printf("room + wall + path + board + arrow + codex emitters: ok\n");
         }
 
         /* identity + hierarchy survived: B's box (found by A's nid) must have a

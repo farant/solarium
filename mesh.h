@@ -51,6 +51,22 @@ void    make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t);
    standing on its bottom edge, facing +/-Z. */
 void    make_card(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t);
 
+/* The codex (item 9) — geometry from real bookbinding; see the construction
+   notes in mesh.c. Closed frame: the book LIES on its back cover (x: 0 =
+   spine -> w = fore-edge; y: 0..t; z: +-h/2) — stand it with the object's
+   rotation. Cover and block are separate refs (separate materials). */
+void    make_book_cover(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
+                        sol_f32 board, sol_f32 sq, sol_f32 round_,
+                        int bands, int clasp);
+void    make_book_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
+                        sol_f32 board, sol_f32 sq);
+/* Open frame: gutter at x=0, spread spans -w..+w; each page fan rises out
+   of the gutter pinch to the flat TEXT FIELD where wtext sets the page. */
+void    make_book_open_cover(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
+                             sol_f32 board, sol_f32 sq);
+void    make_book_open_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
+                             sol_f32 board, sol_f32 sq);
+
 /* Board ink (item 8): a flat arrow in the XY plane (z=0), single-sided
    facing +Z. DERIVED geometry — endpoints come from two cards' positions,
    so it is rebuilt as they move, never serialized. Emits nothing when the

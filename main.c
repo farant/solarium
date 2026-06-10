@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>              /* strcmp — room-shell refs (item 7) */
 #include <math.h>                /* cosf — spot-light cone cosines (item 9a) */
+#include <time.h>                /* time — seeds the codex mint (P3 item 9) */
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>          /* platform: window, input, time — not GL */
@@ -582,6 +583,7 @@ typedef struct {
     sol_u32     edit_handle;       /* note being edited; 0 = none */
     char        edit_buf[EDIT_BUF_CAP];
     int         edit_len;
+    sol_bool    v_was_down;        /* edge-detect mint-codex (V, item 9) */
 } AppState;
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
@@ -1150,6 +1152,15 @@ static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
 static void note_edit_end(AppState *st);       /* defined with on_key below */
 
+/* The codex mint's tiny LCG (item 9): varied-but-PERSISTENT books — the
+   drawn parameters land in the parts' mesh attrs, so a minted book keeps
+   its build forever; the generator is only consulted at mint time. */
+static unsigned g_mint_rng = 0;
+static float mint_range(float lo, float hi) {
+    g_mint_rng = g_mint_rng * 1664525u + 1013904223u;
+    return lo + (hi - lo) * (float)((g_mint_rng >> 16) & 0x7FFF) / 32767.0f;
+}
+
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
     sol_bool f_now, tab_now, m_now, i_now, p_now, l_now, dragging, fp;
@@ -1597,6 +1608,86 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                    board ? " on the board" : "");
         }
         st->n_was_down = n_now;
+    }
+
+    /* V mints a CODEX in front of you (item 9): a procedural bound book —
+       cover + page block as a small GROUP, each part wearing its own
+       material. Proportions draw from real binding ranges and PERSIST
+       (they live in the parts' mesh attrs); press it a few times for a
+       shelf of individuals. */
+    {
+        sol_bool v_now = glfwGetKey(w, GLFW_KEY_V) == GLFW_PRESS;
+        if (v_now && !st->v_was_down) {
+            Mesh    empty;
+            vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+            float   p[8];
+            vec3    f, pos;
+            float   yaw;
+            sol_u32 anchor, part;
+            int     leather;
+            if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
+            /* 2x real codex sizes — true-scale books read tiny in the world
+               (Fran's call after the first shelf) */
+            p[1] = mint_range(0.36f, 0.68f);             /* h: octavo..folio   */
+            p[0] = p[1] / mint_range(1.35f, 1.60f);      /* w from real ratios */
+            p[2] = mint_range(0.05f, 0.15f);             /* t (leaf count)     */
+            p[3] = mint_range(0.010f, 0.018f);           /* board thickness    */
+            p[4] = mint_range(0.006f, 0.012f);           /* squares            */
+            p[5] = mint_range(0.40f, 1.00f);             /* spine roundness    */
+            p[6] = (float)(int)mint_range(3.0f, 5.99f);  /* raised bands       */
+            p[7] = (mint_range(0.0f, 1.0f) < 0.30f) ? 1.0f : 0.0f;   /* clasp */
+            leather = (int)mint_range(0.0f, 2.99f);
+            f = camera_forward(&st->camera);
+            f.y = 0.0f;
+            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+            f   = vec3_normalize(f);
+            pos = vec3_add(st->camera.pos, vec3_scale(f, 1.6f));
+            pos.y = p[1] * 0.5f;                  /* standing: height spans +-h/2 */
+            yaw = atan2f(-f.z, f.x);              /* the spine (-x) faces you */
+            memset(&empty, 0, sizeof empty);
+            anchor = scene_add(&st->scene, 0, empty, pos,
+                               quat_mul(quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw),
+                                        quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f),
+                                                             sol_radians(-90.0f))),
+                               one);
+            scene_meta_set(&st->scene, anchor, "name", "codex");
+            part = scene_add(&st->scene, anchor, empty,
+                             vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+            scene_mesh_ref_set(&st->scene, part, "book_cover");
+            scene_mesh_params_set(&st->scene, part, p, 8);
+            {
+                SceneObject *po = scene_get(&st->scene, part);
+                if (po) {
+                    Material m = material_default();
+                    m.base_color = (leather == 0) ? vec3_make(0.36f, 0.22f, 0.13f)
+                                 : (leather == 1) ? vec3_make(0.34f, 0.12f, 0.10f)
+                                                  : vec3_make(0.14f, 0.22f, 0.15f);
+                    m.roughness = 0.65f;
+                    po->material = m;
+                }
+            }
+            part = scene_add(&st->scene, anchor, empty,
+                             vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+            scene_mesh_ref_set(&st->scene, part, "book_block");
+            scene_mesh_params_set(&st->scene, part, p, 5);
+            {
+                SceneObject *po = scene_get(&st->scene, part);
+                if (po) {
+                    Material m = material_default();
+                    m.base_color = vec3_make(0.88f, 0.84f, 0.72f);   /* cream leaves */
+                    m.roughness  = 0.92f;
+                    po->material = m;
+                }
+            }
+            scene_resolve_meshes(&st->scene);
+            st->selected_handle = anchor;
+            scene_save(&st->scene, "scene.stml");
+            printf("codex minted: %.0fx%.0fmm, %d bands, %s spine%s\n",
+                   (double)(p[0] * 1000.0f), (double)(p[1] * 1000.0f), (int)p[6],
+                   p[5] > 0.7f ? "round" : "shallow",
+                   p[7] > 0.5f ? ", clasped" : "");
+        }
+        st->v_was_down = v_now;
     }
 
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
