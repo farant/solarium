@@ -485,6 +485,8 @@ static const char *BRDF_LUT_FRAGMENT_SRC =
     "    FragColor = vec4(integrateBRDF(max(vUV.x, 0.001), vUV.y), 0.0, 1.0);\n"  /* guard NoV=0 */
     "}\n";
 
+#define EDIT_BUF_CAP 2048   /* a note's text, while it is being typed */
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
@@ -573,6 +575,13 @@ typedef struct {
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
+    /* note editing (item 8 piece 5): FOCUS routes the keyboard to TEXT.
+       Keys are buttons, chars are text — GLFW separates them (key vs char
+       callback, the OS keymap between), and edit_handle is what bridges
+       them: while it is set, chars append here and buttons go quiet. */
+    sol_u32     edit_handle;       /* note being edited; 0 = none */
+    char        edit_buf[EDIT_BUF_CAP];
+    int         edit_len;
 } AppState;
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
@@ -1139,6 +1148,7 @@ static void scene_resolve_meshes(Scene *s);    /* defined with init_scene below 
 static void apply_kind_materials(Scene *s);    /* likewise */
 static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
+static void note_edit_end(AppState *st);       /* defined with on_key below */
 
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
@@ -1146,6 +1156,29 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
+
+    /* FOCUS (item 8 piece 5): while a note is open for typing, the keyboard
+       is TEXT — chars route to the note (on_char/on_key) and every button
+       below goes quiet, so 'w' writes a letter instead of walking. A click
+       blurs (saving) without also picking — the standard text-field deal:
+       the first click leaves the field, the next one acts. */
+    if (st->edit_handle != 0) {
+        in->forward = in->back = in->left = in->right = SOL_FALSE;
+        in->up = in->down = SOL_FALSE;
+        in->look_dx = 0.0f;
+        in->look_dy = 0.0f;
+        in->zoom    = 0.0f;
+        st->scroll_accum = 0.0;
+        glfwGetCursorPos(w, &mx, &my);
+        {
+            sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (lmb && !st->lmb_was_down) note_edit_end(st);
+            st->lmb_was_down = lmb;
+        }
+        st->mouse_last_x = mx;       /* keep tracking: no look-jump on blur */
+        st->mouse_last_y = my;
+        return;
+    }
 
     /* movement (held; ignored by the camera in orbit) */
     in->forward = glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS;
@@ -1518,7 +1551,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     /* N spawns a NOTE card (item 8): pinned to the board under the cursor,
        else standing on the floor ahead. Its text lives in the inline `text`
        meta — the multiline raw-block escaping ladder's first real customer;
-       in-app typing arrives in the next piece (edit scene.stml meanwhile). */
+       Enter (with the note selected) opens it for typing. */
     {
         sol_bool n_now = glfwGetKey(w, GLFW_KEY_N) == GLFW_PRESS;
         if (n_now && !st->n_was_down) {
@@ -1548,8 +1581,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             scene_kind_set(&st->scene, h, KIND_NOTE);
             scene_meta_set(&st->scene, h, "name", "note");
             scene_meta_set(&st->scene, h, "text",
-                           "a new note. typing arrives next - for now its text "
-                           "lives in scene.stml as <meta key=\"text\">.");
+                           "press Enter to edit me");
             scene_mesh_ref_set(&st->scene, h, "card");
             if (board != 0) {
                 SceneObject *no = scene_get(&st->scene, h);
@@ -2602,9 +2634,20 @@ static void render(AppState *state) {
             wtext_block(uf, vp, face, nm,
                         -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
                         ink_r, ink_g, ink_b);
-            /* the note body: the inline text meta, wrapped to the card */
+            /* the note body: the inline text meta, wrapped to the card.
+               While the note has focus, a caret tails the text — the meta
+               mirrors every keystroke, so this renders the typing live. */
             if (o->kind == KIND_NOTE) {
                 const char *txt = scene_meta_get(&state->scene, o->handle, "text");
+                char        ebuf[EDIT_BUF_CAP + 2];
+                if (state->edit_handle == o->handle) {
+                    size_t tn = txt ? strlen(txt) : 0;
+                    if (tn > sizeof(ebuf) - 2) tn = sizeof(ebuf) - 2;
+                    memcpy(ebuf, txt ? txt : "", tn);
+                    ebuf[tn]     = '_';
+                    ebuf[tn + 1] = '\0';
+                    txt = ebuf;
+                }
                 if (txt && txt[0]) {
                     float bpx2m = 0.028f / lh;              /* ~2.8cm body lines */
                     wtext_block(uf, vp, face, txt,
@@ -2813,11 +2856,112 @@ static void render(AppState *state) {
     ui_end();
 }
 
+/* ---- note editing (item 8 piece 5) ---- */
+
+/* Open a note for typing: seed the buffer from its text meta. */
+static void note_edit_begin(AppState *st, sol_u32 handle) {
+    const char *t = scene_meta_get(&st->scene, handle, "text");
+    size_t      n = t ? strlen(t) : 0;
+    if (n >= EDIT_BUF_CAP) n = EDIT_BUF_CAP - 1;
+    memcpy(st->edit_buf, t ? t : "", n);
+    st->edit_buf[n] = '\0';
+    st->edit_len    = (int)n;
+    st->edit_handle = handle;
+    printf("editing note — type away; Enter = newline, Esc or click = done\n");
+}
+
+/* Blur: the buffer already mirrors into the meta per keystroke (the card
+   renders live); the blur is what makes it durable — save on blur, the
+   same reflex as save-on-release. */
+static void note_edit_end(AppState *st) {
+    if (st->edit_handle == 0) return;
+    scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+    st->edit_handle = 0;
+    scene_save(&st->scene, "scene.stml");
+    printf("note saved\n");
+}
+
+/* codepoint -> UTF-8 bytes (the encoder mirroring text.c's decoder).
+   Returns the byte count, 0 for an invalid codepoint. */
+static int utf8_encode(unsigned int cp, char *out) {
+    if (cp < 0x80u) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800u) {
+        out[0] = (char)(0xC0u | (cp >> 6));
+        out[1] = (char)(0x80u | (cp & 0x3Fu));
+        return 2;
+    }
+    if (cp < 0x10000u) {
+        if (cp >= 0xD800u && cp <= 0xDFFFu) return 0;   /* surrogates: not chars */
+        out[0] = (char)(0xE0u | (cp >> 12));
+        out[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[2] = (char)(0x80u | (cp & 0x3Fu));
+        return 3;
+    }
+    if (cp <= 0x10FFFFu) {
+        out[0] = (char)(0xF0u | (cp >> 18));
+        out[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+        out[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[3] = (char)(0x80u | (cp & 0x3Fu));
+        return 4;
+    }
+    return 0;
+}
+
+/* CHARS are text: the OS keymap's output, delivered only here. Appends to
+   the focused note and mirrors into the meta so the card renders live. */
+static void on_char(GLFWwindow *w, unsigned int cp) {
+    AppState *st = (AppState *)glfwGetWindowUserPointer(w);
+    char      enc[4];
+    int       n;
+    if (!st || st->edit_handle == 0) return;
+    n = utf8_encode(cp, enc);
+    if (n <= 0 || st->edit_len + n >= EDIT_BUF_CAP) return;
+    memcpy(st->edit_buf + st->edit_len, enc, (size_t)n);
+    st->edit_len += n;
+    st->edit_buf[st->edit_len] = '\0';
+    scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+}
+
+/* KEYS are buttons. While a note has focus the only buttons that mean
+   anything are the text-control ones — and they get GLFW_REPEAT for free
+   here (held Backspace erases a run), which polling cannot give. */
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
+    AppState *st = (AppState *)glfwGetWindowUserPointer(window);
     (void)scancode;
     (void)mods;
+
+    if (st && st->edit_handle != 0) {
+        if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
+        if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+            note_edit_end(st);
+        } else if (key == GLFW_KEY_BACKSPACE && st->edit_len > 0) {
+            st->edit_len--;                     /* drop ONE codepoint: walk back
+                                                   over UTF-8 continuation bytes */
+            while (st->edit_len > 0 &&
+                   ((unsigned char)st->edit_buf[st->edit_len] & 0xC0u) == 0x80u)
+                st->edit_len--;
+            st->edit_buf[st->edit_len] = '\0';
+            scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+        } else if (key == GLFW_KEY_ENTER && st->edit_len + 1 < EDIT_BUF_CAP) {
+            st->edit_buf[st->edit_len++] = '\n';
+            st->edit_buf[st->edit_len]   = '\0';
+            scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+        }
+        return;                                 /* everything else stays quiet */
+    }
+
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
+    /* Enter opens the selected NOTE for typing (focus begins) */
+    if (st && key == GLFW_KEY_ENTER && action == GLFW_PRESS &&
+        st->selected_handle != 0) {
+        SceneObject *o = scene_get(&st->scene, st->selected_handle);
+        if (o && o->kind == KIND_NOTE)
+            note_edit_begin(st, st->selected_handle);
     }
 }
 
@@ -2841,7 +2985,8 @@ int main(void) {
     }
 
     glfwSetWindowUserPointer(window, &state);   /* bridge callbacks -> state */
-    glfwSetKeyCallback(window, on_key);         /* platform: input */
+    glfwSetKeyCallback(window, on_key);         /* platform: input (buttons) */
+    glfwSetCharCallback(window, on_char);       /* platform: input (text) */
     glfwSetScrollCallback(window, on_scroll);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);  /* first-person: capture */
     state.mouse_skip = 2;                /* swallow the first deltas (no baseline yet) */
