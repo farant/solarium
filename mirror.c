@@ -119,3 +119,50 @@ int room_mirror_scan(Scene *s, sol_u32 room, const char *dirpath) {
     fs_listing_free(&l);
     return changed;
 }
+
+sol_u32 workspace_add_alias(Scene *s, sol_u32 room, const char *path, const char *name) {
+    Mesh    empty = {0};
+    quat    qid;
+    vec3    one;
+    sol_u32 j, h;
+    int     slot = 0;
+
+    for (j = 0; j < s->count; j++) {
+        const SceneObject *o = &s->objects[j];
+        if (o->parent != room) continue;
+        if (o->kind == KIND_ALIAS && o->content && strcmp(o->content, path) == 0)
+            return o->handle;                    /* already gathered here */
+        if (o->kind != KIND_PLAIN) slot++;       /* cards count; shells don't */
+    }
+
+    qid.x = 0.0f; qid.y = 0.0f; qid.z = 0.0f; qid.w = 1.0f;
+    one.x = 1.0f; one.y = 1.0f; one.z = 1.0f;
+    h = scene_add(s, room, empty, tray_slot(slot), qid, one);
+    scene_kind_set(s, h, KIND_ALIAS);
+    scene_content_set(s, h, path);
+    if (name) scene_meta_set(s, h, "name", name);
+    scene_meta_set(s, h, "unplaced", "1");
+    scene_mesh_ref_set(s, h, "card");
+    return h;
+}
+
+int workspace_validate_aliases(Scene *s) {
+    int     changed = 0;
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        const SceneObject *o = &s->objects[i];
+        const char        *flag;
+        sol_bool           alive;
+        if (o->kind != KIND_ALIAS || !o->content) continue;
+        alive = fs_exists(o->content);
+        flag  = scene_meta_get(s, o->handle, "stale");
+        if (!alive && (!flag || strcmp(flag, "1") != 0)) {
+            scene_meta_set(s, o->handle, "stale", "1");
+            changed++;
+        } else if (alive && flag && strcmp(flag, "1") == 0) {
+            scene_meta_set(s, o->handle, "stale", "0");
+            changed++;
+        }
+    }
+    return changed;
+}

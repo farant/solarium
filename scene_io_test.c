@@ -433,6 +433,43 @@ int main(void) {
             }
             printf("tombstone + surviving note + resurrection in place: ok\n");
         }
+
+        /* workspaces (6d): one file aliased into TWO workspaces — both hold
+           a live reference to the single real path (no 2D equivalent);
+           re-aliasing dedups; a vanished target FLAGS stale, never removes */
+        {
+            sol_u32 ws1, ws2, a1, a2, a3;
+            ws1 = scene_add(&m, 0, empty, v3(10.0f, 0.0f, 0.0f), q_identity(), v3(1.0f, 1.0f, 1.0f));
+            ws2 = scene_add(&m, 0, empty, v3(20.0f, 0.0f, 0.0f), q_identity(), v3(1.0f, 1.0f, 1.0f));
+            a1 = workspace_add_alias(&m, ws1, "mirror_test_dir/beta.txt", "beta.txt");
+            a2 = workspace_add_alias(&m, ws2, "mirror_test_dir/beta.txt", "beta.txt");
+            a3 = workspace_add_alias(&m, ws1, "mirror_test_dir/beta.txt", "beta.txt");
+            if (!a1 || !a2 || a1 == a2 || a3 != a1 ||
+                scene_get(&m, a1)->kind != KIND_ALIAS ||
+                strcmp(scene_get(&m, a2)->content, "mirror_test_dir/beta.txt") != 0) {
+                printf("FAIL: alias into two workspaces / dedup\n");
+                scene_free(&m);
+                return 1;
+            }
+            remove("mirror_test_dir/beta.txt");
+            if (workspace_validate_aliases(&m) != 2 ||
+                !scene_meta_get(&m, a1, "stale") ||
+                strcmp(scene_meta_get(&m, a1, "stale"), "1") != 0 ||
+                scene_get(&m, a2)->kind != KIND_ALIAS) {
+                printf("FAIL: vanished target should flag BOTH aliases stale\n");
+                scene_free(&m);
+                return 1;
+            }
+            f1 = fopen("mirror_test_dir/beta.txt", "w");
+            if (f1) { fputs("b\n", f1); fclose(f1); }
+            if (workspace_validate_aliases(&m) != 2 ||
+                strcmp(scene_meta_get(&m, a1, "stale"), "1") == 0) {
+                printf("FAIL: returned target should clear the stale flags\n");
+                scene_free(&m);
+                return 1;
+            }
+            printf("alias x2 workspaces, dedup, stale flag + clear: ok\n");
+        }
         scene_free(&m);
     }
 

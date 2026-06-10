@@ -535,6 +535,7 @@ typedef struct {
     sol_bool    l_was_down;     /* edge-detect the scene-reload key (P3 item 1) */
     sol_bool    r_was_down;     /* edge-detect the mirror-rescan key (P3 item 6c) */
     sol_bool    bs_was_down;    /* edge-detect tombstone dismissal (Backspace) */
+    sol_bool    g_was_down;     /* edge-detect gather-to-workspace (P3 item 6d) */
     /* room graph (P3 item 7) */
     sol_u32     current_room;   /* containing room's anchor handle; 0 = outside (derived per frame) */
     float       ambient_scale;  /* eased toward the room's ambient (sealed = dim) */
@@ -1066,6 +1067,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 int n = sp ? room_mirror_scan(&st->scene, mirrors[i], sp) : -1;
                 if (n > 0) total += n;
             }
+            total += workspace_validate_aliases(&st->scene);   /* stale flags (6d) */
             if (total > 0) {
                 scene_resolve_meshes(&st->scene);
                 apply_kind_materials(&st->scene);
@@ -1086,6 +1088,41 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             printf("rescan: %d change(s) across %u mirror(s)\n", total, (unsigned)mc);
         }
         st->r_was_down = r_now;
+    }
+
+    /* G gathers the selected FILE/FOLDER card into the first workspace as an
+       ALIAS (item 6d) — a reference, never a copy: the same file may stand
+       in many rooms at once, the arrangement the filesystem forbids and
+       this project exists to allow. */
+    {
+        sol_bool g_now = glfwGetKey(w, GLFW_KEY_G) == GLFW_PRESS;
+        if (g_now && !st->g_was_down && st->selected_handle != 0) {
+            SceneObject *o = scene_get(&st->scene, st->selected_handle);
+            if (o && (o->kind == KIND_FILE || o->kind == KIND_FOLDER) && o->content) {
+                sol_u32 ws = 0, i;
+                for (i = 0; i < st->scene.count; i++) {
+                    const char *rt = scene_meta_get(&st->scene,
+                                                    st->scene.objects[i].handle, "room_type");
+                    if (rt && strcmp(rt, "workspace") == 0) {
+                        ws = st->scene.objects[i].handle;
+                        break;
+                    }
+                }
+                if (ws != 0) {
+                    char        lbuf[16], wbuf[16];
+                    const char *nm = object_label(&st->scene, st->selected_handle, lbuf);
+                    sol_u32     a  = workspace_add_alias(&st->scene, ws, o->content, nm);
+                    if (a != 0) {
+                        scene_resolve_meshes(&st->scene);
+                        apply_kind_materials(&st->scene);
+                        scene_save(&st->scene, "scene.stml");
+                        printf("gathered '%s' into %s\n", nm,
+                               object_label(&st->scene, ws, wbuf));
+                    }
+                }
+            }
+        }
+        st->g_was_down = g_now;
     }
 
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
@@ -1299,6 +1336,13 @@ static void apply_kind_materials(Scene *s) {
             case KIND_NOTE:      m.base_color = vec3_make(0.95f, 0.90f, 0.55f); m.roughness = 0.90f; break;
             case KIND_TOMBSTONE: m.base_color = vec3_make(0.32f, 0.32f, 0.36f); m.roughness = 0.95f; break;
             default: break;
+        }
+        /* a STALE alias (target gone from disk) flags itself dull red —
+           flagged, never removed: the system does not garbage-collect intent */
+        if (o->kind == KIND_ALIAS) {
+            const char *flag = scene_meta_get(s, o->handle, "stale");
+            if (flag && strcmp(flag, "1") == 0)
+                m.base_color = vec3_make(0.60f, 0.28f, 0.26f);
         }
         /* UNPLACED cards burn brighter — the tray isn't a place, it's a
            STATE, and it should be visible across the room: these are the
