@@ -569,6 +569,8 @@ typedef struct {
     float       drag_board_ox;     /* grab offset in board-local XY            */
     float       drag_board_oy;
     sol_bool    b_was_down;        /* edge-detect spawn-board (B) */
+    sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
+    sol_bool    c_was_down;
 } AppState;
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
@@ -824,6 +826,9 @@ static sol_u32 selection_root(Scene *s, sol_u32 handle) {
     SceneObject *o = scene_get(s, handle);
     if (!o) return 0;
     if (o->kind != KIND_PLAIN) return handle;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "arrow") == 0)
+        return handle;            /* an edge is its own thing: select it, not
+                                     the board group it hangs on (item 8) */
     return group_root(s, handle);
 }
 
@@ -914,6 +919,136 @@ static vec3 board_pin_pos(Scene *s, sol_u32 board, sol_u32 card, vec3 local,
     return vec3_make(local.x + ox, local.y + oy, bt * 0.5f + ct * 0.5f + BOARD_PIN_EPS);
 }
 
+/* ---- arrows: relations made visible (item 8) ----
+   An arrow is an OBJECT (child of its board) carrying two `connects` rels —
+   the third embodiment of the item-7 edge, after the doorway wall and the
+   path slab. Only the rels persist; the geometry below is derived from the
+   two cards' current positions and rebuilt whenever they move. */
+#define ARROW_INK_W    0.03f     /* shaft width, board-local units */
+#define ARROW_PIN_EPS  0.0015f   /* above the board face, beneath the cards */
+
+static sol_bool object_is_arrow(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    return (o && o->mesh_ref && strcmp(o->mesh_ref, "arrow") == 0)
+               ? SOL_TRUE : SOL_FALSE;
+}
+
+/* Param t (along a segment leaving a rect's CENTER) where it crosses the
+   rect boundary — the 2D slab test, nearer axis wins. Used to clip the
+   shaft to the cards' rectangles so the head lands on an edge. */
+static float seg_rect_exit(float dx, float dy, float hw, float hh) {
+    float adx = dx < 0.0f ? -dx : dx;
+    float ady = dy < 0.0f ? -dy : dy;
+    float tx  = adx > 1e-9f ? hw / adx : 1e30f;
+    float ty  = ady > 1e-9f ? hh / ady : 1e30f;
+    return tx < ty ? tx : ty;
+}
+
+/* A card's face center + half-extents in board-local space (bottom-origin
+   card: center is half a height above its position). */
+static void card_rect(Scene *s, SceneObject *c, float *cx, float *cy,
+                      float *hw, float *hh) {
+    const char *ref = c->mesh_ref ? c->mesh_ref : "card";
+    (void)s;
+    *hw = 0.5f * mesh_ref_param(ref, c->mesh_params, c->mesh_param_count, "w");
+    *hh = 0.5f * mesh_ref_param(ref, c->mesh_params, c->mesh_param_count, "h");
+    *cx = c->pos.x;
+    *cy = c->pos.y + *hh;
+}
+
+/* Re-derive every arrow's geometry from its two connected cards. Called on
+   load and whenever a board card moves — the rel is the data, the mesh is
+   its picture, so there is no "update the arrow" bookkeeping to go stale.
+   A dangling or off-board edge keeps its object but draws nothing. */
+static void arrows_rebuild(AppState *st) {
+    Scene  *s = &st->scene;
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        SceneObject *ca, *cb;
+        sol_u32      ha = 0, hb = 0, j;
+        float        ax, ay, ahw, ahh, bx, by, bhw, bhh, dx, dy, t0, t1;
+        MeshBuilder  mb;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "arrow") != 0) continue;
+        mesh_destroy(&o->mesh);
+        for (j = 0; j < o->rel_count; j++) {
+            if (strcmp(o->relations[j].type, "connects") != 0) continue;
+            if (ha == 0)      ha = o->relations[j].target;
+            else if (hb == 0) hb = o->relations[j].target;
+        }
+        ca = scene_get(s, ha);
+        cb = scene_get(s, hb);
+        if (!ca || !cb) continue;                         /* dangling: invisible,
+                                                             preserved */
+        if (ca->parent != o->parent || cb->parent != o->parent) continue;
+        card_rect(s, ca, &ax, &ay, &ahw, &ahh);
+        card_rect(s, cb, &bx, &by, &bhw, &bhh);
+        dx = bx - ax;
+        dy = by - ay;
+        t0 = seg_rect_exit(dx, dy, ahw, ahh);             /* leave card A...   */
+        t1 = 1.0f - seg_rect_exit(dx, dy, bhw, bhh);      /* ...arrive at B    */
+        if (!(t0 < t1)) continue;                         /* overlapping cards */
+        mb_init(&mb);
+        make_arrow(&mb, ax + dx * t0, ay + dy * t0,
+                        ax + dx * t1, ay + dy * t1, ARROW_INK_W);
+        if (mb.index_count > 0) o->mesh = mesh_from_builder(&mb);
+        mb_free(&mb);
+    }
+}
+
+/* Make the edge object itself: two rels, ink material, geometry derived. */
+static sol_u32 arrow_create(AppState *st, sol_u32 board, sol_u32 from, sol_u32 to) {
+    SceneObject *bo = scene_get(&st->scene, board);
+    float bt = bo ? mesh_ref_param("board", bo->mesh_params, bo->mesh_param_count, "t")
+                  : 0.05f;
+    Mesh    empty;
+    vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+    sol_u32 h;
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, board, empty,
+                  vec3_make(0.0f, 0.0f, bt * 0.5f + ARROW_PIN_EPS),
+                  quat_identity(), one);
+    scene_rel_add(&st->scene, h, "connects", from);
+    scene_rel_add(&st->scene, h, "connects", to);
+    scene_meta_set(&st->scene, h, "name", "arrow");
+    scene_mesh_ref_set(&st->scene, h, "arrow");
+    {
+        SceneObject *ao = scene_get(&st->scene, h);
+        if (ao) {
+            Material m   = material_default();
+            m.base_color = vec3_make(0.10f, 0.10f, 0.12f);   /* ink */
+            m.roughness  = 0.90f;
+            ao->material = m;
+        }
+    }
+    arrows_rebuild(st);
+    return h;
+}
+
+/* The armed connection (C): a press on a second card of the same board
+   births the arrow. One-shot — any press disarms, hit or miss. */
+static sol_bool try_connect(AppState *st, sol_u32 hit) {
+    SceneObject *from, *to;
+    sol_u32      src = st->connect_from;
+    if (src == 0) return SOL_FALSE;
+    st->connect_from = 0;
+    from = scene_get(&st->scene, src);
+    to   = scene_get(&st->scene, hit);
+    if (!from || !to || hit == src) { printf("connect: cancelled\n"); return SOL_FALSE; }
+    if (to->kind != KIND_ALIAS && to->kind != KIND_NOTE) {
+        printf("connect: cancelled (not a board card)\n");
+        return SOL_FALSE;
+    }
+    if (to->parent != from->parent) {
+        printf("connect: cancelled (not on the same board)\n");
+        return SOL_FALSE;
+    }
+    arrow_create(st, from->parent, src, hit);
+    scene_save(&st->scene, "scene.stml");
+    printf("connected — the rel persists; the arrow is its picture\n");
+    return SOL_TRUE;
+}
+
 /* Begin carrying: the GROUP ROOT moves (dragging a part would tear it off
    its import), and only root-level objects for PLAIN props. Cards move
    individually wherever they sit — the rotated-parent boundary item 4 noted
@@ -933,6 +1068,9 @@ static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
         target = hit;       /* cards (item 6) move INDIVIDUALLY, though parented
                                to a room or a board */
     } else {
+        if (object_is_arrow(&st->scene, hit)) return;   /* derived geometry: an
+                                                           arrow follows its cards,
+                                                           it is never dragged */
         target = group_root(&st->scene, hit);    /* props move as their group */
         if (target == st->floor_handle) return;  /* the floor is the room, not a card */
         if (scene_meta_get(&st->scene, target, "room_type")) return;   /* architecture */
@@ -1077,7 +1215,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             st->press_y = my;
             if (fp) {
                 do_pick(st, w, 0.0f, 0.0f);             /* select on press, as before */
-                if (st->selected_handle != 0 && st->selected_handle != st->page_handle)
+                if (try_connect(st, st->selected_handle)) {
+                    /* the press completed a connection — no drag */
+                } else if (st->selected_handle != 0 && st->selected_handle != st->page_handle)
                     drag_begin(st, w, st->selected_handle);
             } else {
                 float   t;
@@ -1086,7 +1226,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 glfwGetWindowSize(w, &ww, &wh);
                 hit = pick_at(st, w, 2.0f*(float)mx/(float)ww - 1.0f,
                                      1.0f - 2.0f*(float)my/(float)wh, &t);
-                if (hit) drag_begin(st, w, hit);        /* candidate; selection waits for slop/tap */
+                if (hit && !try_connect(st, hit))
+                    drag_begin(st, w, hit);             /* candidate; selection waits for slop/tap */
             }
         }
 
@@ -1125,6 +1266,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                                blocal, st->drag_board_ox,
                                                st->drag_board_oy);
                         st->drag_moved = SOL_TRUE;     /* a reparent is a real move */
+                        arrows_rebuild(st);            /* its arrows follow live */
                     } else {                           /* ---- ground mode ---- */
                         float t;
                         if (st->drag_board != 0) {     /* leaving a board: step off;
@@ -1140,6 +1282,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                             o->pos          = scene_world_to_local(&st->scene,
                                                                    o->parent, woff);
                             st->drag_offset = vec3_make(0.0f, 0.0f, 0.0f);
+                            arrows_rebuild(st);        /* its edges go dormant */
                         }
                         if (ray_vs_plane(r, vec3_make(0.0f, 0.0f, 0.0f),
                                          vec3_make(0.0f, 1.0f, 0.0f), &t) &&
@@ -1347,8 +1490,32 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->b_was_down = b_now;
     }
 
+    /* C arms a connection from the selected board card (item 8): the next
+       press on a second card of the same board births an ARROW object —
+       two `connects` rels made visible. C again disarms. */
+    {
+        sol_bool c_now = glfwGetKey(w, GLFW_KEY_C) == GLFW_PRESS;
+        if (c_now && !st->c_was_down) {
+            if (st->connect_from != 0) {
+                st->connect_from = 0;
+                printf("connect: disarmed\n");
+            } else if (st->selected_handle != 0) {
+                SceneObject *o = scene_get(&st->scene, st->selected_handle);
+                if (o && (o->kind == KIND_ALIAS || o->kind == KIND_NOTE) &&
+                    object_is_board(&st->scene, o->parent)) {
+                    char lbuf[16];
+                    st->connect_from = st->selected_handle;
+                    printf("connect: from '%s' — click another card on the same board\n",
+                           object_label(&st->scene, st->selected_handle, lbuf));
+                }
+            }
+        }
+        st->c_was_down = c_now;
+    }
+
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
-       decision): the system never throws away the marker for you. */
+       decision): the system never throws away the marker for you. Item 8
+       extends it to ARROWS: deleting the edge object deletes the relation. */
     {
         sol_bool bs_now = glfwGetKey(w, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
         if (bs_now && !st->bs_was_down && st->selected_handle != 0) {
@@ -1359,7 +1526,14 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 printf("dismissed tombstone: %s\n", label);
                 scene_remove(&st->scene, st->selected_handle);
                 st->selected_handle = 0;
+                arrows_rebuild(st);            /* edges to the dead card go dormant */
                 scene_save(&st->scene, "scene.stml");
+            } else if (o && object_is_arrow(&st->scene, st->selected_handle)) {
+                mesh_destroy(&o->mesh);        /* derived GPU buffers, freed now */
+                scene_remove(&st->scene, st->selected_handle);
+                st->selected_handle = 0;
+                scene_save(&st->scene, "scene.stml");
+                printf("removed arrow — the connection is gone\n");
             }
         }
         st->bs_was_down = bs_now;
@@ -1519,6 +1693,8 @@ static void scene_resolve_meshes(Scene *s) {
         SceneObject *o = &s->objects[i];
         MeshBuilder  mb;
         if (!o->mesh_ref || o->mesh.index_count != 0) continue;
+        if (strcmp(o->mesh_ref, "arrow") == 0) continue;   /* scene-derived:
+                                                              arrows_rebuild owns it */
         mb_init(&mb);
         if (mesh_ref_build(o->mesh_ref, o->mesh_params, o->mesh_param_count, &mb)) {
             o->mesh = mesh_from_builder(&mb);
@@ -1666,6 +1842,7 @@ static sol_bool load_palace(AppState *st) {
     st->scene = fresh;
     scene_reimport_glbs(st);
     scene_resolve_meshes(&st->scene);
+    arrows_rebuild(st);              /* edges re-derive from the loaded cards */
     apply_kind_materials(&st->scene);
     bind_runtime_handles(st);
     {

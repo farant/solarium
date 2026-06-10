@@ -51,6 +51,13 @@ void    make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t);
    standing on its bottom edge, facing +/-Z. */
 void    make_card(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t);
 
+/* Board ink (item 8): a flat arrow in the XY plane (z=0), single-sided
+   facing +Z. DERIVED geometry — endpoints come from two cards' positions,
+   so it is rebuilt as they move, never serialized. Emits nothing when the
+   segment is shorter than 2w. */
+void    make_arrow(MeshBuilder *b, sol_f32 x0, sol_f32 y0,
+                   sol_f32 x1, sol_f32 y1, sol_f32 w);
+
 /* A wall with a doorway, built as the pieces AROUND the gap — left panel,
    right panel, header — never a boolean cut (§1.4). Real thickness t (centered
    on the XY plane): each piece is a box emitting only its EXPOSED faces, incl.
@@ -89,5 +96,9 @@ float mesh_ref_param(const char *ref, const float *params, int count, const char
    after. Lives in mesh_gpu.c so everything above stays pure CPU — emitters
    and the registry are headless-testable and linkable by scene_io. */
 Mesh    mesh_from_builder(MeshBuilder *b);
+
+/* Release a mesh's GPU buffers and zero it — for DERIVED meshes (arrows)
+   that rebuild as their sources move; everything else lives for the session. */
+void    mesh_destroy(Mesh *m);
 
 #endif /* MESH_H */

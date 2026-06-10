@@ -301,7 +301,26 @@ int main(void) {
                     return 1;
                 }
             }
-            printf("room + wall + path + board emitters (flags, degenerate skip, params): ok\n");
+            /* item 8: the arrow — shaft quad + head triangle (7v/9i); a
+               segment shorter than 2w emits nothing (overlapping cards) */
+            mb_init(&mb);
+            make_arrow(&mb, 0.0f, 0.0f, 1.0f, 0.5f, 0.03f);
+            if (mb.vertex_count != 7 || mb.index_count != 9) {
+                printf("FAIL: arrow should be 7v/9i, got %uv/%ui\n",
+                       (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            mb_init(&mb);
+            make_arrow(&mb, 0.0f, 0.0f, 0.02f, 0.0f, 0.03f);
+            if (mb.vertex_count != 0) {
+                printf("FAIL: a too-short arrow must emit nothing\n");
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            printf("room + wall + path + board + arrow emitters: ok\n");
         }
 
         /* identity + hierarchy survived: B's box (found by A's nid) must have a
@@ -510,6 +529,62 @@ int main(void) {
             printf("alias x2 workspaces, dedup, stale flag + clear: ok\n");
         }
         scene_free(&m);
+    }
+
+    /* arrows (item 8): the EDGE object round-trips — mesh ref "arrow" is not
+       in the registry (its geometry derives from the scene at runtime), and
+       both `connects` rels survive the save with remapped targets */
+    {
+        const char *patha = "scene_io_test_arrow.stml";
+        Scene       m, d;
+        sol_u32     board, c1, c2, arrow;
+        char        c1_nid[32], c2_nid[32], arrow_nid[32];
+
+        scene_init(&m);
+        board = scene_add(&m, 0, empty, v3(0.0f, 1.0f, 0.0f), q_identity(), v3(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&m, board, "board");
+        c1 = scene_add(&m, board, empty, v3(-0.5f, 0.2f, 0.04f), q_identity(), v3(1.0f, 1.0f, 1.0f));
+        scene_kind_set(&m, c1, KIND_NOTE);
+        scene_mesh_ref_set(&m, c1, "card");
+        c2 = scene_add(&m, board, empty, v3(0.5f, 0.6f, 0.04f), q_identity(), v3(1.0f, 1.0f, 1.0f));
+        scene_kind_set(&m, c2, KIND_ALIAS);
+        scene_mesh_ref_set(&m, c2, "card");
+        arrow = scene_add(&m, board, empty, v3(0.0f, 0.0f, 0.026f), q_identity(), v3(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&m, arrow, "arrow");
+        scene_rel_add(&m, arrow, "connects", c1);
+        scene_rel_add(&m, arrow, "connects", c2);
+        strcpy(c1_nid,    scene_get(&m, c1)->nid);
+        strcpy(c2_nid,    scene_get(&m, c2)->nid);
+        strcpy(arrow_nid, scene_get(&m, arrow)->nid);
+        if (!scene_save(&m, patha) || !scene_load(&d, patha)) {
+            printf("FAIL: arrow scene save/load\n");
+            scene_free(&m);
+            return 1;
+        }
+        {
+            SceneObject *ar = scene_get(&d, scene_handle_for_nid(&d, arrow_nid));
+            SceneObject *t1, *t2;
+            if (!ar || !ar->mesh_ref || strcmp(ar->mesh_ref, "arrow") != 0 ||
+                ar->rel_count != 2 ||
+                strcmp(ar->relations[0].type, "connects") != 0 ||
+                strcmp(ar->relations[1].type, "connects") != 0) {
+                printf("FAIL: arrow object/rels did not round-trip\n");
+                scene_free(&d); scene_free(&m);
+                return 1;
+            }
+            t1 = scene_get(&d, ar->relations[0].target);
+            t2 = scene_get(&d, ar->relations[1].target);
+            if (!t1 || !t2 || strcmp(t1->nid, c1_nid) != 0 ||
+                strcmp(t2->nid, c2_nid) != 0) {
+                printf("FAIL: rel targets did not remap to the cards\n");
+                scene_free(&d); scene_free(&m);
+                return 1;
+            }
+        }
+        remove(patha);
+        scene_free(&d);
+        scene_free(&m);
+        printf("arrow edge object + connects rels round-trip: ok\n");
     }
 
     /* the raw blind spot: a multiline value containing the literal terminator

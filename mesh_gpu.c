@@ -5,6 +5,14 @@
 
 #include "mesh.h"
 
+void mesh_destroy(Mesh *m) {
+    if (m->vbuffer.id) rhi_destroy_buffer(m->vbuffer);
+    if (m->ibuffer.id) rhi_destroy_buffer(m->ibuffer);
+    m->vbuffer.id  = 0;
+    m->ibuffer.id  = 0;
+    m->index_count = 0;
+}
+
 Mesh mesh_from_builder(MeshBuilder *b) {
     Mesh m;
     mb_compute_tangents(b);                  /* finalize tangents before upload */

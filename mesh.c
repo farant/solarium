@@ -336,6 +336,38 @@ static void emit_room(MeshBuilder *b, const float *p) {
 }
 static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
 static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1], p[2]); }
+/* A flat arrow in the XY plane at z=0, from (x0,y0) to (x1,y1): a shaft quad
+   plus a triangular head, single-sided, facing +Z. Board ink (item 8) — the
+   endpoints come from two CARDS' positions, so this geometry is DERIVED and
+   rebuilt as they move, never stored: the rel is the data, the arrow is its
+   picture. Too-short segments emit nothing (overlapping cards have no
+   visible edge — the relation still persists). */
+void make_arrow(MeshBuilder *b, sol_f32 x0, sol_f32 y0,
+                sol_f32 x1, sol_f32 y1, sol_f32 w) {
+    sol_f32 dx = x1 - x0, dy = y1 - y0;
+    sol_f32 len = (sol_f32)sqrt((double)(dx * dx + dy * dy));
+    sol_f32 ux, uy, px, py, hw, hl, hww, sx, sy;
+    sol_u32 a, c, d;
+    if (len < w * 2.0f) return;
+    ux = dx / len;  uy = dy / len;            /* along the shaft */
+    px = -uy;       py = ux;                  /* its perpendicular */
+    hw  = w * 0.5f;                           /* shaft half-width */
+    hl  = w * 3.5f;                           /* head length */
+    if (hl > len * 0.5f) hl = len * 0.5f;
+    hww = w * 1.4f;                           /* head half-width */
+    sx = x1 - ux * hl;  sy = y1 - uy * hl;    /* where the shaft hands over */
+    push_quad4(b,
+               x0 + px * hw, y0 + py * hw, 0.0f, 0.0f, 0.0f,
+               x0 - px * hw, y0 - py * hw, 0.0f, 0.0f, 1.0f,
+               sx - px * hw, sy - py * hw, 0.0f, 1.0f, 1.0f,
+               sx + px * hw, sy + py * hw, 0.0f, 1.0f, 0.0f,
+               0.0f, 0.0f, 1.0f);
+    a = mb_push_vertex(b, sx + px * hww, sy + py * hww, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+    c = mb_push_vertex(b, sx - px * hww, sy - py * hww, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+    d = mb_push_vertex(b, x1,            y1,            0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.5f);
+    mb_push_triangle(b, a, c, d);
+}
+
 static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 static void emit_board(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 
