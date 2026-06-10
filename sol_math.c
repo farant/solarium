@@ -149,6 +149,23 @@ quat quat_mul(quat a, quat b) {
     return q;
 }
 
+/* Conjugate = same axis, opposite angle. For a UNIT quaternion this is the
+   inverse rotation (the general inverse divides by |q|^2, which is 1). */
+quat quat_conjugate(quat q) {
+    quat r;
+    r.x = -q.x; r.y = -q.y; r.z = -q.z; r.w = q.w;
+    return r;
+}
+
+/* Rotate a vector by a unit quaternion: the sandwich product q v q*, expanded
+   to two cross products (cheaper than building the 4x4):
+       t = 2 (q.xyz x v);  v' = v + q.w t + q.xyz x t */
+vec3 quat_rotate(quat q, vec3 v) {
+    vec3 qv = vec3_make(q.x, q.y, q.z);
+    vec3 t  = vec3_scale(vec3_cross(qv, v), 2.0f);
+    return vec3_add(v, vec3_add(vec3_scale(t, q.w), vec3_cross(qv, t)));
+}
+
 quat quat_normalize(quat q) {
     float len = sqrtf(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
     quat  r;
@@ -176,6 +193,25 @@ mat4 mat4_from_trs(vec3 pos, quat rot, vec3 scale) {
     mat4 r = quat_to_mat4(rot);
     mat4 s = mat4_scale(scale);
     return mat4_mul(t, mat4_mul(r, s));
+}
+
+/* Single-node TRS applied to a POINT, and its exact inverse. The inverse of a
+   composed function runs the inverse steps in REVERSE order:
+       to_world: p' = T + R(S p)        to_local: p = S^-1 (R^-1 (p' - T))
+   When R is identity and S is 1 these collapse to add/subtract — the
+   "unrotated parent" shortcut the drag code used until item 8. */
+vec3 trs_point_to_world(vec3 p, vec3 t, quat r, vec3 s) {
+    p.x *= s.x; p.y *= s.y; p.z *= s.z;
+    p = quat_rotate(r, p);
+    return vec3_add(p, t);
+}
+
+/* Precondition: nonzero scale on every axis (a zero-scale node has collapsed
+   a dimension; no inverse exists and the division yields inf, visibly). */
+vec3 trs_point_to_local(vec3 p, vec3 t, quat r, vec3 s) {
+    p = quat_rotate(quat_conjugate(r), vec3_sub(p, t));
+    p.x /= s.x; p.y /= s.y; p.z /= s.z;
+    return p;
 }
 
 /* Affine transform of a point (implicit w=1): includes the translation column.

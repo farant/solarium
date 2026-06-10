@@ -128,6 +128,92 @@ int main(void) {
         printf("ray_vs_plane hit/parallel/behind: ok\n");
     }
 
+    /* ---- quat rotate + conjugate (item 8: rotated-parent math) ---- */
+    {
+        quat ry = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), sol_radians(90.0f));
+        vec3 v  = quat_rotate(ry, vec3_make(1.0f, 0.0f, 0.0f));   /* +X -> -Z */
+        vec3 b;
+        printf("rotate(+90Y, +X) = (%.3f, %.3f, %.3f)\n", v.x, v.y, v.z);
+        if (!approx(v.x, 0.0f) || !approx(v.y, 0.0f) || !approx(v.z, -1.0f)) {
+            printf("FAIL: quat_rotate 90Y\n"); return 1;
+        }
+        b = quat_rotate(quat_conjugate(ry), v);                   /* and back */
+        if (!approx(b.x, 1.0f) || !approx(b.y, 0.0f) || !approx(b.z, 0.0f)) {
+            printf("FAIL: conjugate did not undo the rotation\n"); return 1;
+        }
+        printf("quat rotate/conjugate: ok\n");
+    }
+
+    /* ---- single-node TRS forward + inverse ----
+       T=(1,2,3), R=+90deg Y, S=(2,3,4). local (1,1,1): scale -> (2,3,4);
+       rotate (x'=z, z'=-x) -> (4,3,-2); translate -> (5,5,1). */
+    {
+        vec3 t   = vec3_make(1.0f, 2.0f, 3.0f);
+        quat r90 = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), sol_radians(90.0f));
+        vec3 s   = vec3_make(2.0f, 3.0f, 4.0f);
+        vec3 w   = trs_point_to_world(vec3_make(1.0f, 1.0f, 1.0f), t, r90, s);
+        vec3 back;
+        printf("trs to_world = (%.3f, %.3f, %.3f)\n", w.x, w.y, w.z);
+        if (!approx(w.x, 5.0f) || !approx(w.y, 5.0f) || !approx(w.z, 1.0f)) {
+            printf("FAIL: trs_point_to_world known case\n"); return 1;
+        }
+        back = trs_point_to_local(w, t, r90, s);
+        if (!approx(back.x, 1.0f) || !approx(back.y, 1.0f) || !approx(back.z, 1.0f)) {
+            printf("FAIL: trs_point_to_local did not invert to_world\n"); return 1;
+        }
+        printf("trs round-trip: ok\n");
+    }
+
+    /* ---- chain inverse through the scene (the drag write-back contract) ----
+       A rotated, uniformly scaled grandparent and a rotated parent. The
+       forward path is the RENDERER'S OWN math (scene_world_matrix +
+       mat4_mul_point), so any convention mismatch in the inverse fails here. */
+    {
+        Scene        sc;
+        sol_u32      g, par, child;
+        SceneObject *co;
+        vec3         w0, loc, idw, qd, md;
+        quat         rw;
+        scene_init(&sc);
+        g     = scene_add(&sc, 0, box_mesh(), vec3_make(10.0f, 0.0f, 0.0f),
+                          quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), sol_radians(90.0f)),
+                          vec3_make(2.0f, 2.0f, 2.0f));
+        par   = scene_add(&sc, g, box_mesh(), vec3_make(0.0f, 1.5f, 0.0f),
+                          quat_from_axis_angle(vec3_make(0.0f, 0.0f, 1.0f), sol_radians(45.0f)),
+                          vec3_make(1.0f, 1.0f, 1.0f));
+        child = scene_add(&sc, par, box_mesh(), vec3_make(0.25f, -0.5f, 0.75f),
+                          quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+
+        co = scene_get(&sc, child);
+        w0 = mat4_mul_point(scene_world_matrix(&sc, co), vec3_make(0.0f, 0.0f, 0.0f));
+
+        /* drag contract: world origin -> parent-local recovers child->pos */
+        loc = scene_world_to_local(&sc, par, w0);
+        printf("chain world->local = (%.3f, %.3f, %.3f)\n", loc.x, loc.y, loc.z);
+        if (!approx(loc.x, 0.25f) || !approx(loc.y, -0.5f) || !approx(loc.z, 0.75f)) {
+            printf("FAIL: chain inverse did not recover the child's local pos\n");
+            scene_free(&sc); return 1;
+        }
+
+        /* parent 0 = the world frame: identity */
+        idw = scene_world_to_local(&sc, 0, w0);
+        if (!approx(idw.x, w0.x) || !approx(idw.y, w0.y) || !approx(idw.z, w0.z)) {
+            printf("FAIL: parent 0 must be identity\n"); scene_free(&sc); return 1;
+        }
+
+        /* world rotation: rotating +Z by the composed quat must match the
+           matrix path's direction (normalized away from the uniform scale) */
+        rw = scene_world_rotation(&sc, child);
+        qd = quat_rotate(rw, vec3_make(0.0f, 0.0f, 1.0f));
+        md = vec3_normalize(mat4_mul_dir(scene_world_matrix(&sc, co), vec3_make(0.0f, 0.0f, 1.0f)));
+        if (!approx(qd.x, md.x) || !approx(qd.y, md.y) || !approx(qd.z, md.z)) {
+            printf("FAIL: scene_world_rotation disagrees with the matrix path\n");
+            scene_free(&sc); return 1;
+        }
+        printf("scene chain inverse + world rotation: ok\n");
+        scene_free(&sc);
+    }
+
     printf("pick_test: OK\n");
     return 0;
 }

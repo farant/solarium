@@ -40,11 +40,17 @@ mat4  mat4_perspective(float fovy, float aspect, float near, float far);  /* fov
 quat  quat_identity(void);
 quat  quat_from_axis_angle(vec3 axis, float angle);
 quat  quat_mul(quat a, quat b);   /* Hamilton product; quat_mul(a,b) = apply b, then a */
+quat  quat_conjugate(quat q);     /* the inverse rotation (for unit quaternions) */
 quat  quat_normalize(quat q);
+vec3  quat_rotate(quat q, vec3 v);   /* rotate v by unit quaternion q */
 mat4  quat_to_mat4(quat q);
 
 /* compose a TRS transform: M = T * R * S (vertex order: scale, rotate, translate) */
 mat4  mat4_from_trs(vec3 pos, quat rot, vec3 scale);
+
+/* one TRS node forward/inverse on a point (item 8: rotated-parent write-back) */
+vec3  trs_point_to_world(vec3 p, vec3 t, quat r, vec3 s);  /* T + R(S p) */
+vec3  trs_point_to_local(vec3 p, vec3 t, quat r, vec3 s);  /* S^-1(R^-1(p - T)); scale must be nonzero */
 
 /* ---- ray casting (item 4 picking) ---- */
 vec3     mat4_mul_point(mat4 m, vec3 p);                 /* affine point transform (w=1) */

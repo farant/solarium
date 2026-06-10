@@ -128,6 +128,55 @@ mat4 scene_world_matrix(Scene *s, const SceneObject *o) {
     return world;
 }
 
+/* World point -> the local space of `parent` (0 = the world frame: identity).
+   scene_world_matrix's inverse, computed WITHOUT flattening: collect the
+   chain, then run each node's single-TRS inverse root-first — the inverse of
+   a composition applies the inverse steps in reverse order. Step-by-step
+   inverses stay exact even where a flattened R*S would shear (non-uniform
+   scale under rotation). Same depth cap + dangling guard as world_matrix.
+   This is what writes a dragged child's world position back into a ROTATED
+   parent (item 8: cards on a vertical board). */
+vec3 scene_world_to_local(Scene *s, sol_u32 parent, vec3 p) {
+    sol_u32 chain[64];
+    int     n = 0;
+    sol_u32 h = parent;
+    while (h != 0 && n < 64) {
+        SceneObject *o = scene_get(s, h);
+        if (!o) break;                                     /* dangling parent -> stop */
+        chain[n++] = h;
+        h = o->parent;
+    }
+    while (n > 0) {                                        /* root first, `parent` last */
+        SceneObject *o = scene_get(s, chain[--n]);
+        if (o) p = trs_point_to_local(p, o->pos, o->rot, o->scale);
+    }
+    return p;
+}
+
+/* Chain-composed world ROTATION. Quats compose like the matrices they mirror
+   (quat_mul(a,b) = apply b then a), so ancestors multiply on the left as we
+   climb. Assumes the no-shear TRS chains we actually build — non-uniform
+   scale beneath a rotated child would add shear no quaternion can hold.
+   Normalized once at the end against float drift. Used for a board's world
+   plane normal and for rotation write-back when reparenting (item 8). */
+quat scene_world_rotation(Scene *s, sol_u32 handle) {
+    SceneObject *o = scene_get(s, handle);
+    quat    r;
+    sol_u32 p;
+    int     depth = 0;
+    if (!o) return quat_identity();
+    r = o->rot;
+    p = o->parent;
+    while (p != 0 && depth < 64) {
+        SceneObject *par = scene_get(s, p);
+        if (!par) break;
+        r = quat_mul(par->rot, r);
+        p = par->parent;
+        depth++;
+    }
+    return quat_normalize(r);
+}
+
 /* CPU ray-cast against object AABBs; returns the nearest hit's stable handle
    (0 = none). Empties (no mesh) aren't pickable. Broad-phase only — AABB is
    exact for boxes; a triangle test would need retained CPU geometry (future). */
