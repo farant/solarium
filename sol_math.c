@@ -7,6 +7,15 @@
 
 float sol_radians(float deg) { return deg * (SOL_PI / 180.0f); }
 
+/* The cubic Hermite ease 3t^2 - 2t^3 on a clamped [0,1]: zero velocity at
+   both ends — the animation ease (item 9 book rise / page turn; the same
+   family as the room-ambient glide). */
+float sol_smoothstep(float t) {
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
 /* ---- vec3 ---- */
 vec3 vec3_make(float x, float y, float z) {
     vec3 r;
@@ -147,6 +156,39 @@ quat quat_mul(quat a, quat b) {
     q.y = a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x;
     q.z = a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w;
     return q;
+}
+
+/* Spherical linear interpolation between unit quaternions: the constant-
+   angular-velocity walk along the great-circle arc from a to b (item 9:
+   the book's lift-and-face). Lerping components cuts a CHORD through the
+   unit sphere instead — speeds up mid-arc and denormalizes. q and -q are
+   the same rotation, so a negative dot flips b to take the SHORT way
+   around; at tiny angles sin(theta) -> 0, so fall back to normalized lerp
+   (chord and arc agree to first order there). */
+quat quat_slerp(quat a, quat b, float t) {
+    float d = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+    float theta, s, sa, sb;
+    quat  r;
+    if (d < 0.0f) {                     /* shortest path: -b is the same rotation */
+        d = -d;
+        b.x = -b.x; b.y = -b.y; b.z = -b.z; b.w = -b.w;
+    }
+    if (d > 0.9995f) {                  /* nearly parallel: nlerp is stable here */
+        r.x = a.x + (b.x - a.x) * t;
+        r.y = a.y + (b.y - a.y) * t;
+        r.z = a.z + (b.z - a.z) * t;
+        r.w = a.w + (b.w - a.w) * t;
+        return quat_normalize(r);
+    }
+    theta = acosf(d);
+    s     = sinf(theta);
+    sa    = sinf((1.0f - t) * theta) / s;
+    sb    = sinf(t * theta) / s;
+    r.x = a.x * sa + b.x * sb;
+    r.y = a.y * sa + b.y * sb;
+    r.z = a.z * sa + b.z * sb;
+    r.w = a.w * sa + b.w * sb;
+    return r;
 }
 
 /* Conjugate = same axis, opposite angle. For a UNIT quaternion this is the

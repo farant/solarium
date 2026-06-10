@@ -11,6 +11,7 @@
 #define SOL_PI 3.14159265358979323846f
 
 float sol_radians(float deg);
+float sol_smoothstep(float t);    /* 3t^2-2t^3 on clamped [0,1] — animation ease */
 
 /* ---- vec3 ---- */
 vec3  vec3_make(float x, float y, float z);
@@ -40,6 +41,7 @@ mat4  mat4_perspective(float fovy, float aspect, float near, float far);  /* fov
 quat  quat_identity(void);
 quat  quat_from_axis_angle(vec3 axis, float angle);
 quat  quat_mul(quat a, quat b);   /* Hamilton product; quat_mul(a,b) = apply b, then a */
+quat  quat_slerp(quat a, quat b, float t);  /* great-circle arc, constant angular velocity; takes the short way */
 quat  quat_conjugate(quat q);     /* the inverse rotation (for unit quaternions) */
 quat  quat_normalize(quat q);
 vec3  quat_rotate(quat q, vec3 v);   /* rotate v by unit quaternion q */

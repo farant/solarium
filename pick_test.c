@@ -214,6 +214,72 @@ int main(void) {
         scene_free(&sc);
     }
 
+    /* ---- quat_slerp (item 9: the book's lift-and-face) ---- */
+    {
+        quat id  = quat_identity();
+        quat y90 = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), sol_radians(90.0f));
+        quat q;
+        vec3 v;
+        float len;
+
+        /* endpoints */
+        q = quat_slerp(id, y90, 0.0f);
+        v = quat_rotate(q, vec3_make(1.0f, 0.0f, 0.0f));
+        if (!approx(v.x, 1.0f) || !approx(v.z, 0.0f)) {
+            printf("FAIL: slerp t=0 should be the start\n"); return 1;
+        }
+        q = quat_slerp(id, y90, 1.0f);
+        v = quat_rotate(q, vec3_make(1.0f, 0.0f, 0.0f));
+        if (!approx(v.x, 0.0f) || !approx(v.z, -1.0f)) {
+            printf("FAIL: slerp t=1 should be the end\n"); return 1;
+        }
+
+        /* constant angular velocity: t=0.25 of a 90-degree arc is 22.5 deg.
+           +X rotated by 22.5 about Y -> (cos22.5, 0, -sin22.5) */
+        q = quat_slerp(id, y90, 0.25f);
+        v = quat_rotate(q, vec3_make(1.0f, 0.0f, 0.0f));
+        printf("slerp quarter point -> (%.4f, %.4f, %.4f)\n", v.x, v.y, v.z);
+        if (!approx(v.x, 0.9239f) || !approx(v.z, -0.3827f)) {
+            printf("FAIL: slerp must walk the arc at constant rate\n"); return 1;
+        }
+        len = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+        if (!approx(len, 1.0f)) { printf("FAIL: slerp left the unit sphere\n"); return 1; }
+
+        /* shortest path: -y90 is the SAME rotation; the midpoint must still
+           rotate +X by 45 degrees, not take the 270-degree scenic route */
+        {
+            quat neg = y90;
+            neg.x = -neg.x; neg.y = -neg.y; neg.z = -neg.z; neg.w = -neg.w;
+            q = quat_slerp(id, neg, 0.5f);
+            v = quat_rotate(q, vec3_make(1.0f, 0.0f, 0.0f));
+            if (!approx(v.x, 0.7071f) || !approx(v.z, -0.7071f)) {
+                printf("FAIL: slerp must take the short way around\n"); return 1;
+            }
+        }
+
+        /* nearly-parallel fallback stays finite and unit */
+        {
+            quat tiny = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), sol_radians(0.01f));
+            q = quat_slerp(id, tiny, 0.5f);
+            len = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+            if (!approx(len, 1.0f)) { printf("FAIL: nlerp fallback not unit\n"); return 1; }
+        }
+        printf("quat_slerp endpoints/arc/short-path/fallback: ok\n");
+    }
+
+    /* ---- sol_smoothstep: endpoints, midpoint, clamp, ease shape ---- */
+    {
+        if (!approx(sol_smoothstep(0.0f), 0.0f)  ||
+            !approx(sol_smoothstep(1.0f), 1.0f)  ||
+            !approx(sol_smoothstep(0.5f), 0.5f)  ||
+            !approx(sol_smoothstep(-1.0f), 0.0f) ||
+            !approx(sol_smoothstep(2.0f), 1.0f)  ||
+            !approx(sol_smoothstep(0.25f), 0.15625f)) {
+            printf("FAIL: sol_smoothstep\n"); return 1;
+        }
+        printf("sol_smoothstep: ok\n");
+    }
+
     printf("pick_test: OK\n");
     return 0;
 }
