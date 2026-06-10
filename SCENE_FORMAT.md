@@ -122,7 +122,15 @@ take defaults (a schema can GROW without breaking old files); the loader
 stores only the file's own attribute prefix, keeping re-saves byte-identical.
 Current vocabulary: `box`, `grid`, `page` (no params), `room` (w,d,h + wall/
 ceiling presence flags wn,we,ws,ww,ceil), `wall` (w,h,ox,ow,oh,t), `path`
-(len,w,t), `card` (w,h,t).
+(len,w,t), `card` (w,h,t), `board` (w,h,t — the item-8 pinboard; cards
+attach by parenting, positions in board-local meters).
+
+**`arrow` is a ref outside the registry** (P3 item 8): an arrow object
+(child of its board, two `connects` rels) writes `<mesh ref="arrow"/>`,
+but its geometry is **scene-derived** — rebuilt at runtime from the two
+connected cards' positions, never from parameters. The rel is the data;
+the arrow is its picture. Loaders other than ours should treat it as an
+empty with relations.
 
 **`<mat>`** (P3 6e) — scalar factors only, written when they differ from the
 default; texture handles are runtime (glb parts re-derive theirs on
@@ -143,6 +151,8 @@ imports.
 - `stale` (`1`/`0`) — an alias whose target path vanished (flagged, never
   removed)
 - `glb` — an import anchor's source file; `derived` — its regenerated parts
+- `text` — a NOTE card's body, typed in-app (item 8); multiline values ride
+  the raw-block form below — the escaping ladder's first real customer
 
 - **`<scene version>`** — format version, for future migration.
 - **`<object>`** — `nid` (required, persistent ID), `parent` (a `nid`; absent or
