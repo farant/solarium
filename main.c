@@ -544,6 +544,13 @@ typedef struct {
     sol_u32     selected_handle;   /* 0 = none */
     sol_bool    lmb_was_down;
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
+    /* drag-to-place (P3 item 4) */
+    sol_u32     floor_handle;      /* room structure: never draggable (§1.2 is
+                                      about PLACED things; the floor is the room) */
+    sol_u32     drag_handle;       /* group root being carried; 0 = none */
+    vec3        drag_offset;       /* grab offset: pos - first plane hit */
+    vec3        drag_start_pos;    /* pos at press (did it really move?) */
+    sol_bool    drag_moved;        /* orbit: the slop latch; both: gates the save */
 } AppState;
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
@@ -628,18 +635,42 @@ static sol_u32 group_root(Scene *s, sol_u32 handle) {
     return handle;
 }
 
-/* Cast a pick ray through a screen point (NDC) and select the nearest object,
-   reporting its stable handle + nid. In orbit, a hit re-targets the pivot. */
-static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
-    int     ww, wh;
-    float   aspect, t;
-    Ray     ray;
-    sol_u32 hit;
+/* The pick ray for the current camera mode: through the crosshair (screen
+   centre) in first person, through the cursor in orbit. */
+static Ray pick_ray(AppState *st, GLFWwindow *w) {
+    int    ww, wh;
+    float  aspect, nx = 0.0f, ny = 0.0f;
+    double mx, my;
+    glfwGetWindowSize(w, &ww, &wh);
+    aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
+    if (st->camera.mode == CAMERA_ORBIT && ww > 0 && wh > 0) {
+        glfwGetCursorPos(w, &mx, &my);
+        nx = 2.0f * (float)mx / (float)ww - 1.0f;
+        ny = 1.0f - 2.0f * (float)my / (float)wh;
+    }
+    return camera_ray(&st->camera, nx, ny, aspect);
+}
 
+/* Side-effect-free pick through an NDC point: the nearest hit's handle (0 =
+   none). do_pick adds the selection/focus behavior on top; the drag path
+   (item 4) needs just the hit. */
+static sol_u32 pick_at(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y, float *t_out) {
+    int   ww, wh;
+    float aspect;
+    Ray   ray;
     glfwGetWindowSize(w, &ww, &wh);                 /* cursor is in window coords */
     aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
     ray = camera_ray(&st->camera, ndc_x, ndc_y, aspect);
-    hit = scene_pick(&st->scene, ray, &t);
+    return scene_pick(&st->scene, ray, t_out);
+}
+
+/* Cast a pick ray through a screen point (NDC) and select the nearest object,
+   reporting its stable handle + nid. In orbit, a hit re-targets the pivot. */
+static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
+    float   t;
+    sol_u32 hit;
+
+    hit = pick_at(st, w, ndc_x, ndc_y, &t);
     st->selected_handle = hit;
     if (hit) {
         SceneObject *o = scene_get(&st->scene, hit);
@@ -656,6 +687,36 @@ static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
     } else {
         printf("picked: nothing\n");
     }
+}
+
+/* Drag-to-place (item 4). The cursor is a RAY — one constraint short of a
+   position — so dragging pins the object to the ray's hit on a horizontal
+   plane at its own height (slide across the floor, height preserved). */
+#define DRAG_MAX_DIST 60.0f     /* a grazing ray races to the horizon; clamp */
+
+/* Begin carrying: the GROUP ROOT moves (dragging a part would tear it off
+   its import), and only root-level objects — a child's pos is parent-LOCAL,
+   and the world->local conversion (inverse parent matrix) is a noted
+   boundary, not built speculatively. The grab offset keeps the object under
+   the grip point instead of snapping its origin to the cursor. */
+static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
+    sol_u32      root = group_root(&st->scene, hit);
+    SceneObject *o    = scene_get(&st->scene, root);
+    Ray          r;
+    float        t;
+
+    if (root == st->floor_handle) return;   /* the floor is the room, not a card —
+                                               and in orbit it covers most of the
+                                               screen, so grabbing it would eat
+                                               camera rotation */
+    if (!o || o->parent != 0) return;
+    r = pick_ray(st, w);
+    if (!ray_vs_plane(r, o->pos, vec3_make(0.0f, 1.0f, 0.0f), &t) || t > DRAG_MAX_DIST)
+        return;
+    st->drag_handle    = root;
+    st->drag_offset    = vec3_sub(o->pos, vec3_add(r.origin, vec3_scale(r.dir, t)));
+    st->drag_start_pos = o->pos;
+    st->drag_moved     = SOL_FALSE;
 }
 
 /* Scroll arrives only as events (no poll), so it needs a callback; the window
@@ -718,7 +779,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     dragging = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     if (st->mouse_skip > 0) {
         st->mouse_skip--;                           /* reseed only; don't apply the delta */
-    } else if (fp || dragging) {
+    } else if (fp || (dragging && st->drag_handle == 0)) {
+        /* in orbit, a drag that started ON an object carries it (item 4)
+           instead of rotating the camera — drag_handle gates the look */
         float dx = (float)(mx - st->mouse_last_x);
         float dy = (float)(my - st->mouse_last_y);
         in->look_dx += dx * MOUSE_SENSITIVITY;
@@ -731,17 +794,70 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     in->zoom = (float)st->scroll_accum;
     st->scroll_accum = 0.0;
 
-    /* left button -> pick. FP: a press picks through screen center. Orbit: a
-       tap (release with little movement) picks at the cursor; a drag rotates. */
+    /* left button -> pick / drag (item 4). FP: a press picks + begins
+       carrying through the crosshair (look around and the object follows —
+       the page is excluded: clicking it means "read"). Orbit: a press ON an
+       object becomes a carry once the cursor moves past the slop; a press on
+       nothing rotates the camera as before; a tap still picks. A real move
+       saves the scene on release — placement persists automatically (§1.2:
+       no save button in a memory palace). */
     {
         sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        if (fp) {
-            if (lmb && !st->lmb_was_down) do_pick(st, w, 0.0f, 0.0f);
-        } else {
-            if (lmb && !st->lmb_was_down) {
-                st->press_x = mx;
-                st->press_y = my;
-            } else if (!lmb && st->lmb_was_down) {
+
+        if (lmb && !st->lmb_was_down) {                 /* ---- press ---- */
+            st->press_x = mx;
+            st->press_y = my;
+            if (fp) {
+                do_pick(st, w, 0.0f, 0.0f);             /* select on press, as before */
+                if (st->selected_handle != 0 && st->selected_handle != st->page_handle)
+                    drag_begin(st, w, st->selected_handle);
+            } else {
+                float   t;
+                int     ww, wh;
+                sol_u32 hit;
+                glfwGetWindowSize(w, &ww, &wh);
+                hit = pick_at(st, w, 2.0f*(float)mx/(float)ww - 1.0f,
+                                     1.0f - 2.0f*(float)my/(float)wh, &t);
+                if (hit) drag_begin(st, w, hit);        /* candidate; selection waits for slop/tap */
+            }
+        }
+
+        if (lmb && st->drag_handle != 0) {              /* ---- carrying ---- */
+            if (!fp && !st->drag_moved) {               /* orbit: wait out the slop */
+                double ddx = mx - st->press_x, ddy = my - st->press_y;
+                if (ddx*ddx + ddy*ddy >= 25.0) {
+                    st->drag_moved = SOL_TRUE;
+                    st->selected_handle = st->drag_handle;
+                }
+            }
+            if (fp || st->drag_moved) {
+                SceneObject *o = scene_get(&st->scene, st->drag_handle);
+                if (o) {
+                    Ray   r = pick_ray(st, w);
+                    float t;
+                    if (ray_vs_plane(r, o->pos, vec3_make(0.0f, 1.0f, 0.0f), &t) &&
+                        t <= DRAG_MAX_DIST) {
+                        o->pos = vec3_add(vec3_add(r.origin, vec3_scale(r.dir, t)),
+                                          st->drag_offset);
+                        if (fp && !st->drag_moved) {
+                            vec3 d = vec3_sub(o->pos, st->drag_start_pos);
+                            if (vec3_dot(d, d) > 1e-6f) st->drag_moved = SOL_TRUE;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!lmb && st->lmb_was_down) {                 /* ---- release ---- */
+            if (st->drag_handle != 0 && st->drag_moved) {
+                SceneObject *o = scene_get(&st->scene, st->drag_handle);
+                if (scene_save(&st->scene, "scene.stml"))
+                    printf("placed #%u at (%.2f, %.2f, %.2f) — saved\n",
+                           (unsigned)st->drag_handle,
+                           o ? (double)o->pos.x : 0.0,
+                           o ? (double)o->pos.y : 0.0,
+                           o ? (double)o->pos.z : 0.0);
+            } else if (!fp) {
                 double ddx = mx - st->press_x;
                 double ddy = my - st->press_y;
                 if (ddx*ddx + ddy*ddy < 25.0) {         /* moved < 5px -> a tap */
@@ -751,6 +867,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                    1.0f - 2.0f*(float)my/(float)wh);
                 }
             }
+            st->drag_handle = 0;
+            st->drag_moved  = SOL_FALSE;
         }
         st->lmb_was_down = lmb;
     }
@@ -1132,6 +1250,7 @@ static int init_scene(AppState *state) {
     scene_mesh_ref_set(&state->scene, state->box_handle, "box");
     scene_mesh_ref_set(&state->scene, page, "page");
     scene_resolve_meshes(&state->scene);
+    state->floor_handle = floor;             /* room structure: drag excludes it */
 
     /* PBR materials for the procedural objects (item 8a) */
     {
@@ -1183,9 +1302,20 @@ static int init_scene(AppState *state) {
     scene_rel_add(&state->scene, state->box_handle, "orbits", state->anchor_handle);
     scene_content_set(&state->scene, state->box_handle, "notes/box.txt");
 
-    /* persist the room once at startup (item 2.5c) — inspect ./scene.stml */
-    if (scene_save(&state->scene, "scene.stml"))
-        printf("saved scene -> scene.stml\n");
+    /* Persist the room at FIRST startup only (item 4 changed this): once a
+       scene.stml exists it may hold the user's arrangement (drag-to-place
+       saves on release), and §1.2 says placed positions are sacred — the
+       default room must never clobber them. L loads the saved room; load-at-
+       startup becomes real in item 6. */
+    {
+        FILE *probe = fopen("scene.stml", "rb");
+        if (probe) {
+            fclose(probe);
+            printf("scene.stml exists — startup save skipped (L loads your arrangement)\n");
+        } else if (scene_save(&state->scene, "scene.stml")) {
+            printf("saved scene -> scene.stml\n");
+        }
+    }
 
     /* place the camera where the old fixed view sat: back + raised, facing the
        scene (-Z) with a slight downward tilt (item 3b) */
@@ -1519,8 +1649,10 @@ static void render(AppState *state) {
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 1.0f, 1.0f, 1.0f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
             if (sel) {
-                sprintf(line, "sel #%-3u %s", (unsigned)state->selected_handle,
-                        sel->mesh_ref ? sel->mesh_ref : "(import)");
+                sprintf(line, "sel #%-3u %-8s %.1f %.1f %.1f",
+                        (unsigned)state->selected_handle,
+                        sel->mesh_ref ? sel->mesh_ref : "(import)",
+                        (double)sel->pos.x, (double)sel->pos.y, (double)sel->pos.z);
             } else {
                 sprintf(line, "sel none");
             }
@@ -1720,19 +1852,21 @@ int main(void) {
                 rhi_destroy_buffer(o->mesh.ibuffer);
             }
         }
-        if (refs == 0 || solid != refs || check.count != state.scene.count) {
-            fprintf(stderr, "persistence self-check FAILED: %u/%u refs reconstructed, "
-                    "%u loaded vs %u live objects\n",
-                    (unsigned)solid, (unsigned)refs,
-                    (unsigned)check.count, (unsigned)state.scene.count);
+        /* counts may legitimately differ now: scene.stml can be the user's
+           saved arrangement (item 4), not a mirror of the built default —
+           the hard requirement is that every ref RECONSTRUCTS */
+        if (refs == 0 || solid != refs) {
+            fprintf(stderr, "persistence self-check FAILED: %u/%u refs reconstructed\n",
+                    (unsigned)solid, (unsigned)refs);
             scene_free(&check);
             rhi_shutdown();
             glfwDestroyWindow(window);
             glfwTerminate();
             return EXIT_FAILURE;
         }
-        printf("persistence self-check: %u objects, %u/%u meshes reconstructed ok\n",
-               (unsigned)check.count, (unsigned)solid, (unsigned)refs);
+        printf("persistence self-check: %u objects (%u live), %u/%u meshes reconstructed ok\n",
+               (unsigned)check.count, (unsigned)state.scene.count,
+               (unsigned)solid, (unsigned)refs);
         scene_free(&check);
     }
 #endif

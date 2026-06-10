@@ -188,6 +188,22 @@ vec3 mat4_mul_point(mat4 m, vec3 p) {
     return r;
 }
 
+/* Ray vs the infinite plane through `point` with unit `normal`: solve
+   dot(N, O + tD - P0) = 0 for t. SOL_FALSE when the ray is (near) parallel
+   to the plane or the hit is behind the origin (t < 0). NOTE the danger
+   zone is NEAR-parallel, not parallel: a grazing ray turns pixel-sized
+   cursor moves into hits racing toward the horizon — callers placing
+   objects should ALSO clamp t to a sane distance. */
+sol_bool ray_vs_plane(Ray ray, vec3 point, vec3 normal, float *t_out) {
+    float denom = vec3_dot(normal, ray.dir);
+    float t;
+    if (denom > -1e-4f && denom < 1e-4f) return SOL_FALSE;
+    t = vec3_dot(normal, vec3_sub(point, ray.origin)) / denom;
+    if (t < 0.0f) return SOL_FALSE;
+    *t_out = t;
+    return SOL_TRUE;
+}
+
 /* Project a world point through a view-projection matrix to NDC: the full
    4-component multiply (w out), then the PERSPECTIVE DIVIDE — the one place
    w earns its keep (distant points have larger w, so they shrink toward the

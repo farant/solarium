@@ -52,5 +52,6 @@ vec3     mat4_mul_dir(mat4 m, vec3 d);                   /* direction transform 
 sol_bool mat4_project_point(mat4 m, vec3 p, vec3 *ndc);  /* full mul + perspective divide; FALSE if w<=0 (behind camera) */
 Aabb     aabb_transform(mat4 m, Aabb box);               /* AABB of the transformed corners */
 sol_bool ray_vs_aabb(Ray ray, Aabb box, float *t_out);  /* slab test; *t_out = entry distance */
+sol_bool ray_vs_plane(Ray ray, vec3 point, vec3 normal, float *t_out);  /* FALSE if parallel or behind */
 
 #endif /* SOL_MATH_H */

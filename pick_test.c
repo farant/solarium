@@ -104,6 +104,30 @@ int main(void) {
         scene_free(&sc);
     }
 
+    /* ray_vs_plane (item 4 drag): a downward ray hits the ground plane at
+       the expected distance; parallel and behind-origin rays are rejected */
+    {
+        vec3 ground = vec3_make(0.0f, 1.0f, 0.0f);   /* plane y=1 */
+        vec3 up     = vec3_make(0.0f, 1.0f, 0.0f);
+        r.origin = vec3_make(0.0f, 5.0f, 0.0f);
+        r.dir    = vec3_make(0.0f, -1.0f, 0.0f);
+        if (!ray_vs_plane(r, ground, up, &t) || !approx(t, 4.0f)) {
+            printf("FAIL: downward ray should hit y=1 at t=4\n");
+            return 1;
+        }
+        r.dir = vec3_make(1.0f, 0.0f, 0.0f);          /* parallel: no hit */
+        if (ray_vs_plane(r, ground, up, &t)) {
+            printf("FAIL: parallel ray must miss the plane\n");
+            return 1;
+        }
+        r.dir = vec3_make(0.0f, 1.0f, 0.0f);          /* plane behind: no hit */
+        if (ray_vs_plane(r, ground, up, &t)) {
+            printf("FAIL: plane behind the ray must be rejected\n");
+            return 1;
+        }
+        printf("ray_vs_plane hit/parallel/behind: ok\n");
+    }
+
     printf("pick_test: OK\n");
     return 0;
 }
