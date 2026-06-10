@@ -19,6 +19,7 @@
 #include "font.h"                /* the SDF glyph atlas (P3 item 3) */
 #include "text.h"                /* text_shape seam + ui_text (P3 item 3b) */
 #include "wtext.h"               /* world-space SDF text — note cards (P3 item 8) */
+#include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -599,6 +600,17 @@ typedef struct {
     Mesh        reader_cover, reader_block;   /* runtime meshes, per open */
     Material    reader_cover_mat, reader_block_mat;
     float       reader_params[5];  /* open-book w,h,t,board,sq */
+    /* the pages (piece 4): the file's text, wrapped ONCE into a heap
+       buffer; pages are just LINE RANGES into it, a spread is two */
+    char       *reader_text;       /* wrapped; NULL = no content loaded */
+    long        reader_text_len;
+    int        *reader_line_off;   /* byte offset of each line start */
+    int         reader_line_count;
+    int         reader_lines_per_page;
+    int         reader_spread;     /* current page-pair, 0-based */
+    const Font *reader_font;       /* mono for code, sans for prose */
+    float       reader_px2m;       /* body text scale, meters per font px */
+    sol_bool    arrow_l_was, arrow_r_was;     /* page-turn edges */
 } AppState;
 
 #define READER_IDLE      0
@@ -606,6 +618,7 @@ typedef struct {
 #define READER_OPEN      2
 #define READER_RETURNING 3
 #define READER_RISE_SECS 0.45f
+#define READER_FILE_CAP  (256L * 1024L)
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
    arbitrary-scale imported asset to the room. */
@@ -1200,6 +1213,112 @@ static sol_u32 codex_cover_child(Scene *s, sol_u32 root) {
     return 0;
 }
 
+/* mono for code, sans for prose — by extension; extensionless files
+   (Makefile, .gitignore-style) read as config, so mono. */
+static sol_bool reader_wants_mono(const AppState *st, const char *path) {
+    static const char *code[] = { "c", "h", "sh", "py", "js", "ts", "json",
+                                  "yml", "yaml", "toml", "mk", "stml",
+                                  (const char *)0 };
+    const char *dot, *base;
+    int i;
+    if (!st->mono_font || !path) return SOL_FALSE;
+    base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    dot  = strrchr(base, '.');
+    if (!dot || dot == base) return SOL_TRUE;
+    for (i = 0; code[i]; i++)
+        if (strcmp(dot + 1, code[i]) == 0) return SOL_TRUE;
+    return SOL_FALSE;
+}
+
+static void reader_free_text(AppState *st) {
+    free(st->reader_text);
+    free(st->reader_line_off);
+    st->reader_text       = (char *)0;
+    st->reader_line_off   = (int *)0;
+    st->reader_line_count = 0;
+    st->reader_text_len   = 0;
+    st->reader_spread     = 0;
+}
+
+/* Load + typeset the source's content (piece 4): read (capped — a partial
+   read is honestly marked), expand tabs to spaces (text_shape skips
+   unbaked glyphs, so a raw \t would advance ZERO), drop \r, wrap ONCE to
+   the page field at the body scale, then index the line starts. From here
+   pagination is arithmetic: a page is a line range, a spread is two. */
+static void reader_load_content(AppState *st, const char *path) {
+    const float *bp = st->reader_params;
+    float wb, zh, mg, xf, field_w, field_h;
+    long  rawlen = 0, i, n, cap;
+    int   truncated = 0, line;
+    char *raw, *clean;
+
+    reader_free_text(st);
+    st->reader_font = reader_wants_mono(st, path) ? st->mono_font : st->ui_font;
+    if (!st->reader_font) return;
+
+    wb = bp[0] - bp[4];
+    zh = bp[1] * 0.5f - bp[4];
+    mg = wb * 0.06f;
+    xf = wb * BOOK_GUTTER_FRAC;
+    field_w = wb - xf - 2.0f * mg;
+    field_h = 2.0f * zh - 2.0f * mg;
+    st->reader_px2m = (bp[1] * 0.026f) / font_line_height(st->reader_font);
+    st->reader_lines_per_page = (int)(field_h /
+        (font_line_height(st->reader_font) * st->reader_px2m));
+    if (st->reader_lines_per_page < 1) st->reader_lines_per_page = 1;
+
+    raw = path ? fs_read_file(path, READER_FILE_CAP, &rawlen, &truncated)
+               : (char *)0;
+    if (!raw) {
+        const char *ph = path ? "(the file would not open)"
+                              : "(an empty codex - no file is bound to it)";
+        raw = (char *)malloc(strlen(ph) + 1);
+        if (!raw) return;
+        strcpy(raw, ph);
+        rawlen    = (long)strlen(raw);
+        truncated = 0;
+    }
+
+    clean = (char *)malloc((size_t)rawlen * 4 + 64);
+    if (!clean) { free(raw); return; }
+    n = 0;
+    for (i = 0; i < rawlen; i++) {
+        char ch = raw[i];
+        if (ch == '\t') {
+            clean[n++] = ' '; clean[n++] = ' ';   /* tab = 2 spaces (Fran's call) */
+        } else if (ch != '\r') {
+            clean[n++] = ch;
+        }
+    }
+    if (truncated) {
+        const char *mark = "\n\n[... truncated ...]";
+        memcpy(clean + n, mark, strlen(mark));
+        n += (long)strlen(mark);
+    }
+    clean[n] = '\0';
+    free(raw);
+
+    cap = n * 2 + 256;                        /* wrapping only adds newlines */
+    st->reader_text = (char *)malloc((size_t)cap);
+    if (!st->reader_text) { free(clean); return; }
+    st->reader_line_count = text_wrap(st->reader_font, clean, st->reader_px2m,
+                                      field_w, st->reader_text, (int)cap);
+    free(clean);
+    if (st->reader_line_count <= 0) { reader_free_text(st); return; }
+    st->reader_text_len = (long)strlen(st->reader_text);
+    st->reader_line_off = (int *)malloc(sizeof(int) *
+                                        (size_t)(st->reader_line_count + 1));
+    if (!st->reader_line_off) { reader_free_text(st); return; }
+    line = 0;
+    st->reader_line_off[line++] = 0;
+    for (i = 0; i < st->reader_text_len && line < st->reader_line_count; i++)
+        if (st->reader_text[i] == '\n')
+            st->reader_line_off[line++] = (int)i + 1;
+    st->reader_line_count     = line;          /* trust the scan */
+    st->reader_line_off[line] = (int)st->reader_text_len + 1;  /* sentinel */
+}
+
 /* Open `handle` as a book. A codex rises as ITSELF (its own build and
    leather, read from the cover child's params — the open refs share the
    closed schema's prefix); a FILE/ALIAS card rises as the default codex:
@@ -1270,7 +1389,9 @@ static void reader_open(AppState *st, sol_u32 handle) {
     st->reader_source = root;
     st->reader_state  = READER_RISING;
     st->reader_t      = 0.0f;
-    printf("reading '%s' — Esc or click to put it back\n",
+    reader_load_content(st, o->content);       /* the card's file; a codex
+                                                  carries none (yet) */
+    printf("reading '%s' — Esc or click to put it back; left/right turn pages\n",
            object_label(s, root, lbuf));
 }
 
@@ -1306,8 +1427,30 @@ static void reader_update(AppState *st, float dt) {
             st->reader_source = 0;
             mesh_destroy(&st->reader_cover);
             mesh_destroy(&st->reader_block);
+            reader_free_text(st);
         }
     }
+}
+
+/* One page of the spread: lines [page*L, page*L+L), drawn by temporarily
+   terminating the wrapped buffer at the range end (single-threaded; the
+   sentinel offset makes the last page uniform). Already wrapped — wtext
+   gets wrap_w 0. */
+static void reader_draw_page(AppState *st, mat4 vp, mat4 page_m, int page,
+                             float x_left, float top_y) {
+    int  L = st->reader_lines_per_page;
+    int  first = page * L, last, a, b2;
+    char saved;
+    if (!st->reader_text || first >= st->reader_line_count) return;
+    last = first + L;
+    if (last > st->reader_line_count) last = st->reader_line_count;
+    a  = st->reader_line_off[first];
+    b2 = st->reader_line_off[last] - 1;
+    saved = st->reader_text[b2];
+    st->reader_text[b2] = '\0';
+    wtext_block(st->reader_font, vp, page_m, st->reader_text + a,
+                x_left, top_y, st->reader_px2m, 0.0f, 0.13f, 0.10f, 0.08f);
+    st->reader_text[b2] = saved;
 }
 
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
@@ -1348,13 +1491,29 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     in->up      = glfwGetKey(w, GLFW_KEY_SPACE)        == GLFW_PRESS;
     in->down    = glfwGetKey(w, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS;
 
-    /* keyboard look (held -> a rate -> dt-scaled) */
+    /* keyboard look (held -> a rate -> dt-scaled). While READING, the
+       arrows turn page-pairs instead (edge-triggered); the mouse still
+       looks, so the book stays facing where you opened it. */
     in->look_dx = 0.0f;
     in->look_dy = 0.0f;
-    if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
-    if (glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) in->look_dx -= look;
-    if (glfwGetKey(w, GLFW_KEY_UP)    == GLFW_PRESS) in->look_dy += look;
-    if (glfwGetKey(w, GLFW_KEY_DOWN)  == GLFW_PRESS) in->look_dy -= look;
+    if (st->reader_state == READER_OPEN && st->reader_text) {
+        sol_bool lnow = glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS;
+        sol_bool rnow = glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS;
+        int L       = st->reader_lines_per_page;
+        int pages   = (st->reader_line_count + L - 1) / L;
+        int spreads = (pages + 1) / 2;
+        if (rnow && !st->arrow_r_was && st->reader_spread + 1 < spreads)
+            st->reader_spread++;
+        if (lnow && !st->arrow_l_was && st->reader_spread > 0)
+            st->reader_spread--;
+        st->arrow_l_was = lnow;
+        st->arrow_r_was = rnow;
+    } else {
+        if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
+        if (glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) in->look_dx -= look;
+        if (glfwGetKey(w, GLFW_KEY_UP)    == GLFW_PRESS) in->look_dy += look;
+        if (glfwGetKey(w, GLFW_KEY_DOWN)  == GLFW_PRESS) in->look_dy -= look;
+    }
 
     /* Tab toggles first-person <-> orbit (edge); cursor mode follows */
     tab_now = glfwGetKey(w, GLFW_KEY_TAB) == GLFW_PRESS;
@@ -2864,35 +3023,50 @@ static void render(AppState *state) {
         const float lh  = font_line_height(uf);            /* px at base size */
         mat4        vp  = mat4_mul(proj, view);
 
-        /* the reader's pages (piece 3: placeholder; piece 4 sets the file's
-           text). The page plane is book-local xz at the text-field height;
-           the text frame is R_x(-90): text-up = toward the book's head. */
+        /* the reader's pages (item 9): the page plane is book-local xz at
+           the text-field height; the text frame is R_x(-90), so text-up =
+           toward the book's head. Pages are line ranges (piece 4). */
         if (state->reader_state != READER_IDLE &&
             state->reader_cover.index_count > 0) {
             const float *bp = state->reader_params;
             float wb    = bp[0] - bp[4];
             float zh    = bp[1] * 0.5f - bp[4];
             float stack = (bp[2] - 2.0f * bp[3]) * 0.5f;
-            float xf, fy, mg, px2m;
+            float xf, fy, mg;
             mat4  bm, page;
-            char  lbuf[16];
             if (stack < 0.004f) stack = 0.004f;
-            xf   = wb * 0.30f;
+            xf   = wb * BOOK_GUTTER_FRAC;
             fy   = bp[3] + stack + 0.0012f;
             mg   = wb * 0.06f;
-            px2m = (bp[1] * 0.035f) / lh;
             bm   = mat4_from_trs(state->reader_pos, state->reader_rot,
                                  vec3_make(1.0f, 1.0f, 1.0f));
             page = mat4_mul(bm, mat4_mul(mat4_translate(vec3_make(0.0f, fy, 0.0f)),
                        quat_to_mat4(quat_from_axis_angle(
                            vec3_make(1.0f, 0.0f, 0.0f), sol_radians(-90.0f)))));
-            wtext_block(uf, vp, page,
-                        object_label(&state->scene, state->reader_source, lbuf),
-                        -wb + mg, zh - mg, px2m, wb - xf - 2.0f * mg,
-                        0.13f, 0.10f, 0.08f);
-            wtext_block(uf, vp, page, "p. 1",
-                        xf + mg, zh - mg, px2m, wb - xf - 2.0f * mg,
-                        0.13f, 0.10f, 0.08f);
+            if (state->reader_text) {
+                int L      = state->reader_lines_per_page;
+                int pages  = (state->reader_line_count + L - 1) / L;
+                int pl     = state->reader_spread * 2;
+                reader_draw_page(state, vp, page, pl,     -wb + mg, zh - mg);
+                reader_draw_page(state, vp, page, pl + 1,  xf + mg, zh - mg);
+                {   /* the folio line, foot of the right page */
+                    char  fbuf[48];
+                    float flh = font_line_height(state->reader_font)
+                              * state->reader_px2m * 0.8f;
+                    sprintf(fbuf, "%d / %d",
+                            state->reader_spread + 1, (pages + 1) / 2);
+                    wtext_block(state->reader_font, vp, page, fbuf,
+                                xf + mg, -zh + mg * 0.5f + flh,
+                                state->reader_px2m * 0.8f, 0.0f,
+                                0.45f, 0.40f, 0.34f);
+                }
+            } else {
+                char lbuf[16];
+                wtext_block(uf, vp, page,
+                            object_label(&state->scene, state->reader_source, lbuf),
+                            -wb + mg, zh - mg, (bp[1] * 0.035f) / lh,
+                            wb - xf - 2.0f * mg, 0.13f, 0.10f, 0.08f);
+            }
         }
 
         for (i = 0; i < state->scene.count; i++) {

@@ -7,7 +7,7 @@
 #include "text.h"
 #include "sol_math.h"
 
-#define WT_MAX_GLYPHS 1024
+#define WT_MAX_GLYPHS 4096   /* a full book page of code (item 9) fits */
 #define WT_WRAP_CAP   2048
 #define WT_VERT_FLOATS 4              /* x, y, u, v */
 

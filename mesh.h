@@ -61,7 +61,10 @@ void    make_book_cover(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
 void    make_book_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
                         sol_f32 board, sol_f32 sq);
 /* Open frame: gutter at x=0, spread spans -w..+w; each page fan rises out
-   of the gutter pinch to the flat TEXT FIELD where wtext sets the page. */
+   of the gutter pinch to the flat TEXT FIELD where wtext sets the page.
+   The rise occupies this fraction of the page width — geometry (the fan
+   profile) and layout (where text may sit) must agree, so it lives here. */
+#define BOOK_GUTTER_FRAC 0.15f
 void    make_book_open_cover(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
                              sol_f32 board, sol_f32 sq);
 void    make_book_open_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,

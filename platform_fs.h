@@ -29,4 +29,10 @@ void     fs_listing_free(FsListing *l);
 /* Does the path exist (file or directory)? Stale-alias detection. */
 sol_bool fs_exists(const char *path);
 
+/* Read a whole file (binary), heap-allocated and NUL-terminated, capped at
+   `cap` bytes — a capped read is an HONEST partial: *out_truncated says so
+   (the reader appends its own marker). NULL on failure. *out_len excludes
+   the NUL. Either out pointer may be NULL. Caller frees. */
+char *fs_read_file(const char *path, long cap, long *out_len, int *out_truncated);
+
 #endif /* PLATFORM_FS_H */

@@ -67,3 +67,31 @@ sol_bool fs_exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0 ? SOL_TRUE : SOL_FALSE;
 }
+
+char *fs_read_file(const char *path, long cap, long *out_len, int *out_truncated) {
+    FILE *f;
+    long  len, take;
+    char *buf;
+    if (out_len)       *out_len = 0;
+    if (out_truncated) *out_truncated = 0;
+    if (!path || cap <= 0) return NULL;
+    f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0L, SEEK_END) != 0) { fclose(f); return NULL; }
+    len = ftell(f);
+    if (len < 0) { fclose(f); return NULL; }
+    rewind(f);
+    take = (len > cap) ? cap : len;
+    buf = (char *)malloc((size_t)take + 1);
+    if (!buf) { fclose(f); return NULL; }
+    if (take > 0 && fread(buf, 1, (size_t)take, f) != (size_t)take) {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    buf[take] = '\0';
+    if (out_len)       *out_len = take;
+    if (out_truncated) *out_truncated = (len > cap);
+    return buf;
+}

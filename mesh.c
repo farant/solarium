@@ -491,10 +491,15 @@ void make_book_open_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
                                                    underside is omitted (coplanar
                                                    with the slab top = z-fight) */
     y1c = board + stack;
-    xf  = wb * 0.30f;                           /* where the rise flattens */
+    xf  = wb * BOOK_GUTTER_FRAC;                /* where the rise flattens */
 
+    /* samples go where the curvature is: 6 of the 8 strips over the rise,
+       2 across the flat field (uniform sampling spent most segments on a
+       plane and left the curve chunky — Fran's catch) */
     for (i = 0; i <= BOOK_FAN_SEG; i++) {
-        sol_f32 x = wb * (sol_f32)i / (sol_f32)BOOK_FAN_SEG;
+        sol_f32 x = (i <= 6)
+                  ? xf * (sol_f32)i / 6.0f
+                  : xf + (wb - xf) * (sol_f32)(i - 6) / 2.0f;
         px[i] = x;
         py[i] = yb + (y1c - yb) * sol_smoothstep(x / xf);
     }

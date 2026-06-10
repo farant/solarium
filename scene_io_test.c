@@ -8,10 +8,12 @@
    trip -Wunused-function. scene.h (via sol_types.h) gives us the plain types. */
 
 #include "scene.h"
-#include "mirror.h"  /* room_mirror_scan (item 6) — headless against a temp dir */
-#include "nid.h"     /* NID_LEN — for stack buffers holding a copied nid */
+#include "mirror.h"      /* room_mirror_scan (item 6) — headless against a temp dir */
+#include "nid.h"         /* NID_LEN — for stack buffers holding a copied nid */
+#include "platform_fs.h" /* fs_read_file (item 9) */
 
 #include <stdio.h>
+#include <stdlib.h>      /* free — fs_read_file hands back heap buffers */
 #include <string.h>
 #include <sys/stat.h>   /* mkdir — this test file is C11/POSIX, not c89check'd */
 
@@ -584,6 +586,36 @@ int main(void) {
             printf("alias x2 workspaces, dedup, stale flag + clear: ok\n");
         }
         scene_free(&m);
+    }
+
+    /* fs_read_file (item 9): whole reads, capped reads marked truncated */
+    {
+        FILE *tf = fopen("scene_io_test_read.txt", "wb");
+        char *got;
+        long  len = 0;
+        int   trunc = 0;
+        if (tf) { fputs("alpha beta gamma", tf); fclose(tf); }
+        got = fs_read_file("scene_io_test_read.txt", 1024, &len, &trunc);
+        if (!got || len != 16 || trunc || strcmp(got, "alpha beta gamma") != 0) {
+            printf("FAIL: fs_read_file whole read\n");
+            free(got); scene_free(&scene);
+            return 1;
+        }
+        free(got);
+        got = fs_read_file("scene_io_test_read.txt", 5, &len, &trunc);
+        if (!got || len != 5 || !trunc || strcmp(got, "alpha") != 0) {
+            printf("FAIL: fs_read_file capped read must truncate honestly\n");
+            free(got); scene_free(&scene);
+            return 1;
+        }
+        free(got);
+        if (fs_read_file("scene_io_test_nope.txt", 64, &len, &trunc) != (char *)0) {
+            printf("FAIL: fs_read_file of a missing file must be NULL\n");
+            scene_free(&scene);
+            return 1;
+        }
+        remove("scene_io_test_read.txt");
+        printf("fs_read_file whole/capped/missing: ok\n");
     }
 
     /* arrows (item 8): the EDGE object round-trips — mesh ref "arrow" is not

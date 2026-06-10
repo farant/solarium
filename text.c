@@ -138,6 +138,12 @@ int text_wrap(const Font *f, const char *utf8, float scale, float max_width,
     limit  = max_width / scale;        /* compare in base-size units */
     line_w = 0.0f;
 
+    while (*p == ' ' && oi + 2 < (size_t)cap) {  /* the first line's indent */
+        out[oi++] = ' ';
+        line_w += space_w;
+        p++;
+    }
+
     while (*p != '\0' && oi + WORD_BUF + 2 < (size_t)cap) {
         size_t wl = 0;
         float  ww;
@@ -147,6 +153,13 @@ int text_wrap(const Font *f, const char *utf8, float scale, float max_width,
             lines++;
             line_w = 0.0f;
             p++;
+            /* LEADING whitespace survives the wrap (item 9: code
+               indentation is meaning); only interior runs collapse */
+            while (*p == ' ' && oi + 2 < (size_t)cap) {
+                out[oi++] = ' ';
+                line_w += space_w;
+                p++;
+            }
             continue;
         }
         if (*p == ' ') { p++; continue; }       /* separators collapse at breaks */
