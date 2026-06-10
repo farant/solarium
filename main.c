@@ -584,7 +584,28 @@ typedef struct {
     char        edit_buf[EDIT_BUF_CAP];
     int         edit_len;
     sol_bool    v_was_down;        /* edge-detect mint-codex (V, item 9) */
+    /* the reader (item 9): VIEW state, never scene state — the open book
+       rig lives here, not in the scene graph; nothing about reading
+       persists. The source object hides while its book is aloft. */
+    int         reader_state;      /* READER_IDLE/RISING/OPEN/RETURNING */
+    float       reader_t;          /* 0..1 through the current animation */
+    sol_u32     reader_source;     /* what is being read (group root) */
+    vec3        reader_rest_pos;   /* the source's resting pose (world) */
+    quat        reader_rest_rot;
+    vec3        reader_a_pos, reader_b_pos;   /* current animation: a -> b */
+    quat        reader_a_rot, reader_b_rot;
+    vec3        reader_pos;        /* the pose drawn this frame */
+    quat        reader_rot;
+    Mesh        reader_cover, reader_block;   /* runtime meshes, per open */
+    Material    reader_cover_mat, reader_block_mat;
+    float       reader_params[5];  /* open-book w,h,t,board,sq */
 } AppState;
+
+#define READER_IDLE      0
+#define READER_RISING    1
+#define READER_OPEN      2
+#define READER_RETURNING 3
+#define READER_RISE_SECS 0.45f
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
    arbitrary-scale imported asset to the room. */
@@ -1161,6 +1182,134 @@ static float mint_range(float lo, float hi) {
     return lo + (hi - lo) * (float)((g_mint_rng >> 16) & 0x7FFF) / 32767.0f;
 }
 
+/* ---- the reader (item 9 piece 3) ----
+   Skyrim-shaped: the book rises from its resting place and faces you on
+   the slerp arc, holding a lectern tilt just under the sightline. All of
+   it is VIEW state — the rig's meshes live in AppState and die when the
+   book lands; the scene only ever knows the source object's resting TRS. */
+
+/* The codex's cover child under a group root; 0 if not a codex. */
+static sol_u32 codex_cover_child(Scene *s, sol_u32 root) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        if (o->parent == root && o->mesh_ref &&
+            strcmp(o->mesh_ref, "book_cover") == 0)
+            return o->handle;
+    }
+    return 0;
+}
+
+/* Open `handle` as a book. A codex rises as ITSELF (its own build and
+   leather, read from the cover child's params — the open refs share the
+   closed schema's prefix); a FILE/ALIAS card rises as the default codex:
+   every file opens as a book. Anything else is a no-op. */
+static void reader_open(AppState *st, sol_u32 handle) {
+    Scene       *s = &st->scene;
+    SceneObject *o = scene_get(s, handle);
+    sol_u32      root, cover;
+    const char *const *names;
+    const float       *defs;
+    MeshBuilder  mb;
+    vec3         f;
+    float        dist;
+    int          k;
+    char         lbuf[16];
+
+    if (!o || st->reader_state != READER_IDLE) return;
+    root  = (o->kind == KIND_PLAIN) ? group_root(s, handle) : handle;
+    cover = codex_cover_child(s, root);
+    if (cover == 0 && o->kind != KIND_FILE && o->kind != KIND_ALIAS) return;
+
+    if (mesh_ref_schema("book_open_block", &names, &defs) != 5) return;
+    for (k = 0; k < 5; k++) st->reader_params[k] = defs[k];
+    if (cover != 0) {
+        SceneObject *co = scene_get(s, cover);
+        for (k = 0; k < 5; k++)
+            st->reader_params[k] = mesh_ref_param("book_cover",
+                co->mesh_params, co->mesh_param_count, names[k]);
+        st->reader_cover_mat = co->material;
+    } else {
+        st->reader_cover_mat = material_default();
+        st->reader_cover_mat.base_color = vec3_make(0.36f, 0.22f, 0.13f);
+        st->reader_cover_mat.roughness  = 0.65f;
+    }
+    st->reader_block_mat = material_default();
+    st->reader_block_mat.base_color = vec3_make(0.90f, 0.86f, 0.74f);
+    st->reader_block_mat.roughness  = 0.92f;
+
+    mesh_destroy(&st->reader_cover);
+    mesh_destroy(&st->reader_block);
+    mb_init(&mb);
+    if (mesh_ref_build("book_open_cover", st->reader_params, 5, &mb))
+        st->reader_cover = mesh_from_builder(&mb);
+    mb_free(&mb);
+    mb_init(&mb);
+    if (mesh_ref_build("book_open_block", st->reader_params, 5, &mb))
+        st->reader_block = mesh_from_builder(&mb);
+    mb_free(&mb);
+
+    /* poses: rest = the source's own; read = held on the lectern tilt a
+       touch below the sightline, far enough to frame the whole spread */
+    st->reader_rest_pos = object_world_pos(s, root);
+    st->reader_rest_rot = scene_world_rotation(s, root);
+    f = camera_forward(&st->camera);
+    f.y = 0.0f;
+    if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+    f = vec3_normalize(f);
+    dist = 0.45f + st->reader_params[0] * 0.9f;
+    st->reader_b_pos = vec3_add(st->camera.pos, vec3_scale(f, dist));
+    st->reader_b_pos.y -= 0.22f;
+    st->reader_b_rot = quat_mul(
+        quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), atan2f(-f.x, -f.z)),
+        quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), sol_radians(68.0f)));
+    st->reader_a_pos  = st->reader_rest_pos;
+    st->reader_a_rot  = st->reader_rest_rot;
+    st->reader_pos    = st->reader_a_pos;
+    st->reader_rot    = st->reader_a_rot;
+    st->reader_source = root;
+    st->reader_state  = READER_RISING;
+    st->reader_t      = 0.0f;
+    printf("reading '%s' — Esc or click to put it back\n",
+           object_label(s, root, lbuf));
+}
+
+/* Send the book home — from wherever it is, even mid-rise. */
+static void reader_close(AppState *st) {
+    if (st->reader_state == READER_IDLE || st->reader_state == READER_RETURNING)
+        return;
+    st->reader_a_pos = st->reader_pos;
+    st->reader_a_rot = st->reader_rot;
+    st->reader_b_pos = st->reader_rest_pos;
+    st->reader_b_rot = st->reader_rest_rot;
+    st->reader_t     = 0.0f;
+    st->reader_state = READER_RETURNING;
+}
+
+/* Per-frame: ease along the current arc (position lerp, rotation slerp,
+   both under one smoothstep so they arrive together). */
+static void reader_update(AppState *st, float dt) {
+    float s;
+    if (st->reader_state == READER_IDLE || st->reader_state == READER_OPEN)
+        return;
+    st->reader_t += dt / READER_RISE_SECS;
+    if (st->reader_t > 1.0f) st->reader_t = 1.0f;
+    s = sol_smoothstep(st->reader_t);
+    st->reader_pos = vec3_add(st->reader_a_pos,
+                     vec3_scale(vec3_sub(st->reader_b_pos, st->reader_a_pos), s));
+    st->reader_rot = quat_slerp(st->reader_a_rot, st->reader_b_rot, s);
+    if (st->reader_t >= 1.0f) {
+        if (st->reader_state == READER_RISING) {
+            st->reader_state = READER_OPEN;
+        } else {                                   /* landed: the rig dies */
+            st->reader_state  = READER_IDLE;
+            st->reader_source = 0;
+            mesh_destroy(&st->reader_cover);
+            mesh_destroy(&st->reader_block);
+        }
+    }
+}
+
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
     sol_bool f_now, tab_now, m_now, i_now, p_now, l_now, dragging, fp;
@@ -1259,7 +1408,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         if (lmb && !st->lmb_was_down) {                 /* ---- press ---- */
             st->press_x = mx;
             st->press_y = my;
-            if (fp) {
+            if (st->reader_state != READER_IDLE) {
+                reader_close(st);                       /* click-away, like blur:
+                                                           this press only closes */
+            } else if (fp) {
                 do_pick(st, w, 0.0f, 0.0f);             /* select on press, as before */
                 if (try_connect(st, st->selected_handle)) {
                     /* the press completed a connection — no drag */
@@ -2681,10 +2833,26 @@ static void render(AppState *state) {
         mat4  model;
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
+        if (state->reader_source != 0 &&
+            group_root(&state->scene, o->handle) == state->reader_source)
+            continue;                             /* its book is aloft (item 9) */
         model = scene_world_matrix(&state->scene, o);
         hl    = (sel_root != 0 && selection_root(&state->scene, o->handle) == sel_root)
               ? 1.0f : 0.0f;                       /* light the whole selected group */
         draw_mesh(state, o->mesh, model, view, proj, eye, hl, o->material);
+    }
+
+    /* the reader's open book (item 9): view-state geometry, drawn at the
+       animated pose — never part of the scene graph */
+    if (state->reader_state != READER_IDLE) {
+        mat4 bm = mat4_from_trs(state->reader_pos, state->reader_rot,
+                                vec3_make(1.0f, 1.0f, 1.0f));
+        if (state->reader_cover.index_count > 0)
+            draw_mesh(state, state->reader_cover, bm, view, proj, eye, 0.0f,
+                      state->reader_cover_mat);
+        if (state->reader_block.index_count > 0)
+            draw_mesh(state, state->reader_block, bm, view, proj, eye, 0.0f,
+                      state->reader_block_mat);
     }
 
     /* world text (item 8): card labels + note bodies, drawn as depth-tested
@@ -2695,6 +2863,38 @@ static void render(AppState *state) {
         const Font *uf  = state->ui_font;
         const float lh  = font_line_height(uf);            /* px at base size */
         mat4        vp  = mat4_mul(proj, view);
+
+        /* the reader's pages (piece 3: placeholder; piece 4 sets the file's
+           text). The page plane is book-local xz at the text-field height;
+           the text frame is R_x(-90): text-up = toward the book's head. */
+        if (state->reader_state != READER_IDLE &&
+            state->reader_cover.index_count > 0) {
+            const float *bp = state->reader_params;
+            float wb    = bp[0] - bp[4];
+            float zh    = bp[1] * 0.5f - bp[4];
+            float stack = (bp[2] - 2.0f * bp[3]) * 0.5f;
+            float xf, fy, mg, px2m;
+            mat4  bm, page;
+            char  lbuf[16];
+            if (stack < 0.004f) stack = 0.004f;
+            xf   = wb * 0.30f;
+            fy   = bp[3] + stack + 0.0012f;
+            mg   = wb * 0.06f;
+            px2m = (bp[1] * 0.035f) / lh;
+            bm   = mat4_from_trs(state->reader_pos, state->reader_rot,
+                                 vec3_make(1.0f, 1.0f, 1.0f));
+            page = mat4_mul(bm, mat4_mul(mat4_translate(vec3_make(0.0f, fy, 0.0f)),
+                       quat_to_mat4(quat_from_axis_angle(
+                           vec3_make(1.0f, 0.0f, 0.0f), sol_radians(-90.0f)))));
+            wtext_block(uf, vp, page,
+                        object_label(&state->scene, state->reader_source, lbuf),
+                        -wb + mg, zh - mg, px2m, wb - xf - 2.0f * mg,
+                        0.13f, 0.10f, 0.08f);
+            wtext_block(uf, vp, page, "p. 1",
+                        xf + mg, zh - mg, px2m, wb - xf - 2.0f * mg,
+                        0.13f, 0.10f, 0.08f);
+        }
+
         for (i = 0; i < state->scene.count; i++) {
             SceneObject *o = &state->scene.objects[i];
             float cw, ch, ct, margin, usable, px2m, name_w;
@@ -3045,14 +3245,20 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     }
 
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
+        if (st && st->reader_state != READER_IDLE)
+            reader_close(st);                   /* put the book back first */
+        else
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
     }
-    /* Enter opens the selected NOTE for typing (focus begins) */
+    /* Enter = ENTER THE THING: a NOTE opens for typing, a codex or a
+       FILE/ALIAS card opens for reading (item 9) */
     if (st && key == GLFW_KEY_ENTER && action == GLFW_PRESS &&
         st->selected_handle != 0) {
         SceneObject *o = scene_get(&st->scene, st->selected_handle);
         if (o && o->kind == KIND_NOTE)
             note_edit_begin(st, st->selected_handle);
+        else if (o)
+            reader_open(st, st->selected_handle);
     }
 }
 
@@ -3200,6 +3406,7 @@ int main(void) {
         read_input(window, &in, dt, &state);          /* poll GLFW -> CameraInput */
         camera_update(&state.camera, &in, (float)dt);
         update(&state, dt);                           /* animate the scene */
+        reader_update(&state, (float)dt);             /* the book's flight (item 9) */
         render(&state);
 
         rhi_present();
