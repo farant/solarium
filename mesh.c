@@ -283,6 +283,20 @@ void make_wall_with_opening(MeshBuilder *b, sol_f32 w, sol_f32 h,
     face_y(b, lx1, rx0, 0.0f, zb, zf, 1);
 }
 
+/* An index card (P3 item 6): a small upright slab standing on its bottom
+   edge — a FILE/ALIAS/NOTE's body in a room. Faces +/-Z, x centered, y in
+   [0,h], thickness t (a future size cue: fat manuscript, thin note).
+   Outward normals; built from the same exposed-face helpers as the wall. */
+void make_card(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t) {
+    sol_f32 hw = w * 0.5f, ht = t * 0.5f;
+    face_z(b, -hw, hw, 0.0f, h,  ht,  1);     /* front / back */
+    face_z(b, -hw, hw, 0.0f, h, -ht, -1);
+    face_x(b, -hw, 0.0f, h, -ht, ht, -1);     /* edges */
+    face_x(b,  hw, 0.0f, h, -ht, ht,  1);
+    face_y(b, -hw, hw, h,    -ht, ht,  1);    /* top */
+    face_y(b, -hw, hw, 0.0f, -ht, ht, -1);    /* bottom */
+}
+
 /* A walkable slab — the second EMBODIMENT of a room-graph edge (a path
    between distant rooms; the shared doorway wall is the first). Length runs
    along X, width along Z, the walking surface at y=0 (the slab hangs below,
@@ -322,6 +336,7 @@ static void emit_room(MeshBuilder *b, const float *p) {
 }
 static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
 static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1], p[2]); }
+static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -333,7 +348,8 @@ static const MeshRefEntry REGISTRY[] = {
                  { 6.0f, 4.0f, 3.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f }, emit_room },
     { "wall", 6, { "w", "h", "ox", "ow", "oh", "t" },
                  { 4.0f, 3.0f, 1.5f, 1.0f, 2.2f, 0.15f }, emit_wall },
-    { "path", 3, { "len", "w", "t" }, { 6.0f, 1.5f, 0.15f }, emit_path }
+    { "path", 3, { "len", "w", "t" }, { 6.0f, 1.5f, 0.15f }, emit_path },
+    { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 

@@ -14,6 +14,7 @@
 #include "image.h"
 #include "glb.h"
 #include "ui.h"                  /* the 2D overlay (P3 item 2) */
+#include "mirror.h"              /* mirror rooms reflect real folders (P3 item 6) */
 #include "font.h"                /* the SDF glyph atlas (P3 item 3) */
 #include "text.h"                /* text_shape seam + ui_text (P3 item 3b) */
 
@@ -613,6 +614,7 @@ static sol_u32 add_glb_to_scene(AppState *state, const char *path, float x, floa
                               quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
         scene_material_set(&state->scene, h, model.parts[m].material);
     }
+    scene_meta_set(&state->scene, anchor, "name", path);   /* the pin's tag (item 6) */
     glb_free(&model);
     return anchor;
 }
@@ -626,6 +628,40 @@ static vec3 object_world_pos(Scene *s, sol_u32 handle) {
         return vec3_make(w.m[12], w.m[13], w.m[14]);
     }
     return vec3_make(0.0f, 0.5f, 0.0f);
+}
+
+/* The human label for an object: its "name" meta (own, then its group
+   root's), else its content path's basename (a FILE card is named by its
+   file), else its mesh ref, else "#handle" into buf (>= 16 bytes). */
+static const char *object_label(Scene *s, sol_u32 handle, char *buf) {
+    SceneObject *o = scene_get(s, handle);
+    const char  *m;
+    sol_u32      walk;
+    if (!o) return "?";
+    m = scene_meta_get(s, handle, "name");
+    if (m) return m;
+    walk = handle;                              /* a part borrows its group's name */
+    while (o && o->parent != 0) {
+        walk = o->parent;
+        o = scene_get(s, walk);
+        m = o ? scene_meta_get(s, walk, "name") : (const char *)0;
+        if (m) return m;
+    }
+    o = scene_get(s, handle);
+    if (o->content) {
+        const char *slash = strrchr(o->content, '/');
+        return slash ? slash + 1 : o->content;
+    }
+    if (o->mesh_ref) return o->mesh_ref;
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    sprintf(buf, "#%u", (unsigned)handle);
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+    return buf;
 }
 
 /* Which room contains point p? (P3 item 7.) Rooms are the §1.10 anchors; a
@@ -721,6 +757,17 @@ static sol_u32 pick_at(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y, fl
     return scene_pick(&st->scene, ray, t_out);
 }
 
+/* The selection UNIT's root, mirroring the drag rule (item 6): a card
+   (non-PLAIN kind) selects INDIVIDUALLY — its parent is a room, and
+   grouping by root would highlight the whole room; a prop selects as its
+   import group (book/candle parts light together). */
+static sol_u32 selection_root(Scene *s, sol_u32 handle) {
+    SceneObject *o = scene_get(s, handle);
+    if (!o) return 0;
+    if (o->kind != KIND_PLAIN) return handle;
+    return group_root(s, handle);
+}
+
 /* Cast a pick ray through a screen point (NDC) and select the nearest object,
    reporting its stable handle + nid. In orbit, a hit re-targets the pivot. */
 static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
@@ -757,25 +804,35 @@ static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
    boundary, not built speculatively. The grab offset keeps the object under
    the grip point instead of snapping its origin to the cursor. */
 static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
-    sol_u32      root = group_root(&st->scene, hit);
-    SceneObject *o    = scene_get(&st->scene, root);
+    SceneObject *ho = scene_get(&st->scene, hit);
+    SceneObject *o;
+    sol_u32      target;
+    vec3         wpos;
     Ray          r;
     float        t;
 
-    if (root == st->floor_handle) return;   /* the floor is the room, not a card —
-                                               and in orbit it covers most of the
-                                               screen, so grabbing it would eat
-                                               camera rotation */
-    if (scene_meta_get(&st->scene, root, "room_type")) return;   /* room structure
-                                               (item 5 anchors) is architecture,
-                                               not a placeable card */
-    if (!o || o->parent != 0) return;
+    if (!ho) return;
+    if (ho->kind != KIND_PLAIN) {
+        target = hit;       /* cards (item 6) move INDIVIDUALLY, though parented
+                               to their room — drag math runs in world space and
+                               writes back local (assumes unrotated, unscaled
+                               parents: true of every room anchor) */
+    } else {
+        target = group_root(&st->scene, hit);    /* props move as their group */
+        if (target == st->floor_handle) return;  /* the floor is the room, not a card */
+        if (scene_meta_get(&st->scene, target, "room_type")) return;   /* architecture */
+        o = scene_get(&st->scene, target);
+        if (!o || o->parent != 0) return;        /* child props: world->local boundary */
+    }
+    o = scene_get(&st->scene, target);
+    if (!o) return;
+    wpos = object_world_pos(&st->scene, target);
     r = pick_ray(st, w);
-    if (!ray_vs_plane(r, o->pos, vec3_make(0.0f, 1.0f, 0.0f), &t) || t > DRAG_MAX_DIST)
+    if (!ray_vs_plane(r, wpos, vec3_make(0.0f, 1.0f, 0.0f), &t) || t > DRAG_MAX_DIST)
         return;
-    st->drag_handle    = root;
-    st->drag_offset    = vec3_sub(o->pos, vec3_add(r.origin, vec3_scale(r.dir, t)));
-    st->drag_start_pos = o->pos;
+    st->drag_handle    = target;
+    st->drag_offset    = vec3_sub(wpos, vec3_add(r.origin, vec3_scale(r.dir, t)));
+    st->drag_start_pos = wpos;                   /* world, throughout */
     st->drag_moved     = SOL_FALSE;
 }
 
@@ -790,7 +847,8 @@ static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
 /* Poll GLFW into a CameraInput (the platform layer; camera.c stays GLFW-free).
    Movement/look are level-triggered (held keys); the mode toggle is edge-
    triggered so it fires once per press. */
-static void scene_resolve_meshes(Scene *s);   /* defined with init_scene below */
+static void scene_resolve_meshes(Scene *s);    /* defined with init_scene below */
+static void apply_kind_materials(Scene *s);    /* likewise */
 
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
@@ -893,14 +951,19 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             if (fp || st->drag_moved) {
                 SceneObject *o = scene_get(&st->scene, st->drag_handle);
                 if (o) {
+                    vec3 parent_org = o->parent
+                        ? object_world_pos(&st->scene, o->parent)
+                        : vec3_make(0.0f, 0.0f, 0.0f);
+                    vec3 wpos = vec3_add(parent_org, o->pos);   /* unrotated parents */
                     Ray   r = pick_ray(st, w);
                     float t;
-                    if (ray_vs_plane(r, o->pos, vec3_make(0.0f, 1.0f, 0.0f), &t) &&
+                    if (ray_vs_plane(r, wpos, vec3_make(0.0f, 1.0f, 0.0f), &t) &&
                         t <= DRAG_MAX_DIST) {
-                        o->pos = vec3_add(vec3_add(r.origin, vec3_scale(r.dir, t)),
-                                          st->drag_offset);
+                        vec3 new_world = vec3_add(vec3_add(r.origin, vec3_scale(r.dir, t)),
+                                                  st->drag_offset);
+                        o->pos = vec3_sub(new_world, parent_org);
                         if (fp && !st->drag_moved) {
-                            vec3 d = vec3_sub(o->pos, st->drag_start_pos);
+                            vec3 d = vec3_sub(new_world, st->drag_start_pos);
                             if (vec3_dot(d, d) > 1e-6f) st->drag_moved = SOL_TRUE;
                         }
                     }
@@ -911,6 +974,12 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         if (!lmb && st->lmb_was_down) {                 /* ---- release ---- */
             if (st->drag_handle != 0 && st->drag_moved) {
                 SceneObject *o = scene_get(&st->scene, st->drag_handle);
+                if (o && o->kind != KIND_PLAIN) {       /* a dragged card is PLACED:
+                                                           the tray's claim ends here */
+                    const char *u = scene_meta_get(&st->scene, st->drag_handle, "unplaced");
+                    if (u && strcmp(u, "1") == 0)
+                        scene_meta_set(&st->scene, st->drag_handle, "unplaced", "0");
+                }
                 if (scene_save(&st->scene, "scene.stml"))
                     printf("placed #%u at (%.2f, %.2f, %.2f) — saved\n",
                            (unsigned)st->drag_handle,
@@ -982,6 +1051,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         Scene fresh;
         if (scene_load(&fresh, "scene.stml")) {
             scene_resolve_meshes(&fresh);
+            apply_kind_materials(&fresh);
             scene_free(&st->scene);
             st->scene = fresh;
             st->selected_handle = 0;       /* the old selection died with its scene */
@@ -1141,6 +1211,28 @@ static void scene_resolve_meshes(Scene *s) {
                     o->mesh_ref, o->nid ? o->nid : "(no nid)");
         }
         mb_free(&mb);
+    }
+}
+
+/* Cosmetic until 6e serializes materials: a card's color DERIVES from its
+   kind on every load (kind round-trips; materials don't yet), so mirrors
+   look right after a reload without material io. */
+static void apply_kind_materials(Scene *s) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        Material     m;
+        if (o->kind == KIND_PLAIN) continue;
+        m = material_default();
+        switch (o->kind) {
+            case KIND_FILE:      m.base_color = vec3_make(0.90f, 0.88f, 0.80f); m.roughness = 0.85f; break;
+            case KIND_FOLDER:    m.base_color = vec3_make(0.78f, 0.60f, 0.32f); m.roughness = 0.75f; break;
+            case KIND_ALIAS:     m.base_color = vec3_make(0.55f, 0.68f, 0.92f); m.roughness = 0.80f; break;
+            case KIND_NOTE:      m.base_color = vec3_make(0.95f, 0.90f, 0.55f); m.roughness = 0.90f; break;
+            case KIND_TOMBSTONE: m.base_color = vec3_make(0.32f, 0.32f, 0.36f); m.roughness = 0.95f; break;
+            default: break;
+        }
+        o->material = m;
     }
 }
 
@@ -1333,7 +1425,7 @@ static int init_scene(AppState *state) {
         hall_p[4] = 0.0f;  /* east open: the doorway wall closes it */
         hall_p[5] = 1.0f;  hall_p[6] = 1.0f;  hall_p[7] = 1.0f;
 
-        cell_p[0] = 5.0f;  cell_p[1] = 5.0f;  cell_p[2] = 2.5f;
+        cell_p[0] = 6.0f;  cell_p[1] = 6.0f;  cell_p[2] = 2.5f;
         cell_p[3] = 1.0f;  cell_p[4] = 1.0f;  cell_p[5] = 1.0f;
         cell_p[6] = 0.0f;  /* west open: the shared doorway wall is there */
         cell_p[7] = 1.0f;
@@ -1358,12 +1450,15 @@ static int init_scene(AppState *state) {
         scene_mesh_ref_set(&state->scene, sh, "room");
         scene_mesh_params_set(&state->scene, sh, hall_p, 8);
 
-        /* the cell: interior x in [6.15, 11.15] — past the wall's thickness */
+        /* the cell: interior x in [6.15, 12.15] — past the wall's thickness.
+           It is the palace's first MIRROR (item 6): it reflects the solarium
+           repo itself. Membership follows disk; arrangement follows you. */
         cell = scene_add(&state->scene, 0, empty,
-                  vec3_make(8.65f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_meta_set(&state->scene, cell, "room_type", "room");
-        scene_meta_set(&state->scene, cell, "name", "the cell");
-        scene_meta_set(&state->scene, cell, "ambient", "0.35");   /* doorway-sealed: its own
+                  vec3_make(9.15f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_meta_set(&state->scene, cell, "room_type", "mirror");
+        scene_meta_set(&state->scene, cell, "name", "the archive");
+        scene_meta_set(&state->scene, cell, "source_path", ".");
+        scene_meta_set(&state->scene, cell, "ambient", "0.45");   /* doorway-sealed: its own
                   shell has an open side (the shared wall closes it), so the
                   flags-derived answer would be "open" — the builder knows better */
         sc = scene_add(&state->scene, cell, empty,
@@ -1374,8 +1469,8 @@ static int init_scene(AppState *state) {
         /* the folly: a platform floating north, past the path */
         folly = scene_add(&state->scene, 0, empty,
                   vec3_make(0.0f, 0.0f, -12.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_meta_set(&state->scene, folly, "room_type", "room");
-        scene_meta_set(&state->scene, folly, "name", "the folly");
+        scene_meta_set(&state->scene, folly, "room_type", "workspace");
+        scene_meta_set(&state->scene, folly, "name", "the folly");   /* the first workspace (6d) */
         sf = scene_add(&state->scene, folly, empty,
                   vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
         scene_mesh_ref_set(&state->scene, sf, "room");
@@ -1410,9 +1505,18 @@ static int init_scene(AppState *state) {
         wood.base_color = vec3_make(0.46f, 0.36f, 0.27f);    /* the path: timber */
         wood.roughness  = 0.85f;
         scene_material_set(&state->scene, path, wood);
+
+        /* the mirror reflects THIS repo: one card per disk entry, waiting in
+           the tray. The room's crowding IS the folder's size, felt (item 6). */
+        {
+            int n = room_mirror_scan(&state->scene, cell, ".");
+            if (n >= 0) printf("mirror 'the archive' <- '.': %d cards\n", n);
+            else        fprintf(stderr, "mirror: could not scan '.'\n");
+        }
     }
 
     scene_resolve_meshes(&state->scene);
+    apply_kind_materials(&state->scene);
     state->floor_handle = floor;             /* room structure: drag excludes it */
 
     /* PBR materials for the procedural objects (item 8a) */
@@ -1458,6 +1562,10 @@ static int init_scene(AppState *state) {
             sw->pos    = vec3_make(0.3f, 0.0f, 0.0f);   /* tight radius (the cube's is 1.5) */
         }
     }
+
+    /* names: the pin's tag (item 6) reads these */
+    scene_meta_set(&state->scene, state->box_handle, "name", "the box");
+    scene_meta_set(&state->scene, page, "name", "the page");
 
     /* overbuilt slots demo (mostly empty this phase) */
     scene_meta_set(&state->scene, state->box_handle, "title",  "Test Box");
@@ -1697,7 +1805,7 @@ static void render(AppState *state) {
 
     ensure_render_target(state, state->fb_width, state->fb_height);
 
-    sel_root = group_root(&state->scene, state->selected_handle);  /* 0 if nothing selected */
+    sel_root = selection_root(&state->scene, state->selected_handle);  /* 0 if nothing selected */
 
     /* ---- pass 0: depth from the light's POV -> the shadow map (item 9b) ---- */
     {
@@ -1763,7 +1871,7 @@ static void render(AppState *state) {
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         model = scene_world_matrix(&state->scene, o);
-        hl    = (sel_root != 0 && group_root(&state->scene, o->handle) == sel_root)
+        hl    = (sel_root != 0 && selection_root(&state->scene, o->handle) == sel_root)
               ? 1.0f : 0.0f;                       /* light the whole selected group */
         draw_mesh(state, o->mesh, model, view, proj, eye, hl, o->material);
     }
@@ -1935,19 +2043,32 @@ static void render(AppState *state) {
        projected through the same view-proj the scene used, then drawn in
        screen space — constant pixel size, always crisp, faces the camera by
        construction. Culled when behind the camera (w<=0: see
-       mat4_project_point). The tag quad is the item-3 label's seat. */
+       mat4_project_point). The tag names the object (item 6: a FILE card's
+       tag is its filename — the seat item 2 reserved, filled at last). */
     if (state->selected_handle != 0 &&
         scene_get(&state->scene, state->selected_handle)) {
         vec3 world = object_world_pos(&state->scene, state->selected_handle);
         vec3 ndc;
         if (mat4_project_point(mat4_mul(proj, view), world, &ndc)) {
+            char        lbuf[16];
+            const char *label = object_label(&state->scene, state->selected_handle, lbuf);
+            float ts2 = 0.32f * us;
+            float text_w = 0.0f;
             float sx = (ndc.x * 0.5f + 0.5f) * (float)state->fb_width;
             float sy = (0.5f - ndc.y * 0.5f) * (float)state->fb_height;   /* NDC y-up -> UI y-down */
-            float tw = 64.0f * us, th = 20.0f * us;      /* the tag, sat above the point */
-            float tx = sx - tw * 0.5f, ty = sy - 46.0f * us;
+            float tw, th = 20.0f * us, tx, ty;
+            if (state->ui_font)
+                text_measure(state->ui_font, label, ts2, &text_w, (float *)0);
+            tw = text_w + 16.0f * us;                    /* the tag fits its name */
+            if (tw < 48.0f * us) tw = 48.0f * us;
+            tx = sx - tw * 0.5f;
+            ty = sy - 46.0f * us;
             ui_line(sx, sy, sx, ty + th, 1.5f * us, 0.95f, 0.80f, 0.45f, 0.9f);   /* leader */
             ui_quad(tx, ty, tw, th, 0.05f, 0.07f, 0.10f, 0.75f);
             ui_quad_outline(tx, ty, tw, th, 1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
+            if (state->ui_font)
+                ui_text(state->ui_font, label, sx - text_w * 0.5f,
+                        ty + 14.5f * us, ts2, 1.0f, 1.0f, 1.0f, 0.95f);
         }
     }
     ui_end();

@@ -15,6 +15,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ObjectKind <-> its serialized name. Indexed by the enum; KIND_PLAIN is
+   never written (absent attribute = plain, which keeps old files byte-stable
+   and old readers forward-compatible). */
+static const char *KIND_NAMES[] = {
+    "plain", "file", "folder", "alias", "note", "tombstone"
+};
+#define KIND_COUNT (sizeof(KIND_NAMES) / sizeof(KIND_NAMES[0]))
+
+static ObjectKind kind_from_name(const char *s) {
+    sol_u32 i;
+    for (i = 1; i < KIND_COUNT; i++) {
+        if (strcmp(s, KIND_NAMES[i]) == 0) return (ObjectKind)i;
+    }
+    return KIND_PLAIN;          /* unknown kinds degrade to props, not errors */
+}
+
 static void write_vec3(FILE *f, const char *tag, vec3 v) {
     fprintf(f, "    <%s x=\"%.9g\" y=\"%.9g\" z=\"%.9g\" />\n",
             tag, (double)v.x, (double)v.y, (double)v.z);
@@ -98,6 +114,8 @@ sol_bool scene_save(Scene *s, const char *path) {
         fprintf(f, "  <object");
         write_attr(f, "nid", o->nid ? o->nid : "");
         write_attr(f, "parent", pnid);
+        if (o->kind != KIND_PLAIN && (sol_u32)o->kind < KIND_COUNT)
+            write_attr(f, "kind", KIND_NAMES[o->kind]);
         fprintf(f, ">\n");
 
         write_vec3(f, "pos", o->pos);
@@ -253,6 +271,10 @@ sol_bool scene_load(Scene *s, const char *path) {
             SceneObject *o = scene_get(s, h);
             free(o->nid);                       /* drop the freshly-minted one */
             o->nid = dup_cstr(nid);             /* keep the file's identity */
+        }
+        {
+            const char *ks = stml_attr(on, "kind");
+            if (ks) scene_kind_set(s, h, kind_from_name(ks));
         }
 
         mn   = stml_child(on, "mesh");

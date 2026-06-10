@@ -47,6 +47,10 @@ void    make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h,
    width along Z, deck at y=0 (places flush with room floors). */
 void    make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t);
 
+/* An index card (P3 item 6): a FILE/ALIAS/NOTE's body — an upright slab
+   standing on its bottom edge, facing +/-Z. */
+void    make_card(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t);
+
 /* A wall with a doorway, built as the pieces AROUND the gap — left panel,
    right panel, header — never a boolean cut (§1.4). Real thickness t (centered
    on the XY plane): each piece is a box emitting only its EXPOSED faces, incl.

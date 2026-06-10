@@ -8,10 +8,12 @@
    trip -Wunused-function. scene.h (via sol_types.h) gives us the plain types. */
 
 #include "scene.h"
+#include "mirror.h"  /* room_mirror_scan (item 6) — headless against a temp dir */
 #include "nid.h"     /* NID_LEN — for stack buffers holding a copied nid */
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>   /* mkdir — this test file is C11/POSIX, not c89check'd */
 
 static vec3 v3(float x, float y, float z) {
     vec3 v; v.x = x; v.y = y; v.z = z; return v;
@@ -74,6 +76,9 @@ int main(void) {
         scene_mesh_ref_set(&scene, anchor_h, "room");
         scene_mesh_params_set(&scene, anchor_h, room_p, 3);
     }
+
+    /* kind (item 6): the box plays a FILE card for the round-trip */
+    scene_kind_set(&scene, box_h, KIND_FILE);
 
     scene_meta_set(&scene, box_h, "title",  "Test Box");
     scene_meta_set(&scene, box_h, "author", "Solarium");
@@ -179,6 +184,20 @@ int main(void) {
                 return 1;
             }
             printf("parametric mesh-ref (room w/d/h) round-trips: ok\n");
+        }
+
+        /* kind (item 6): semantic type survives the trip; plain stays absent */
+        {
+            sol_u32      bb_h = scene_handle_for_nid(&b, a_box_nid);
+            sol_u32      bf_h = scene_handle_for_nid(&b, a_floor_nid);
+            SceneObject *bb   = scene_get(&b, bb_h);
+            SceneObject *bf   = scene_get(&b, bf_h);
+            if (!bb || bb->kind != KIND_FILE || !bf || bf->kind != KIND_PLAIN) {
+                printf("FAIL: object kind did not round-trip\n");
+                scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            printf("object kind round-trips (file kept, plain absent): ok\n");
         }
 
         /* the emitters themselves are headless now (mesh.c is pure CPU since
@@ -328,6 +347,55 @@ int main(void) {
             printf("after delete, save+reload keeps survivors and drops the floor: ok\n");
             scene_free(&d);
         }
+    }
+
+    /* mirror scan (item 6): reflect a real directory — every entry becomes a
+       FILE card with the path as identity; a rescan adds NOTHING (idempotent:
+       membership follows disk, and disk didn't change) */
+    {
+        Scene   m;
+        sol_u32 room, card;
+        int     n1, n2;
+        FILE   *f1;
+
+        mkdir("mirror_test_dir", 0755);                    /* EEXIST is fine */
+        f1 = fopen("mirror_test_dir/alpha.txt", "w");
+        if (f1) { fputs("a\n", f1); fclose(f1); }
+        f1 = fopen("mirror_test_dir/beta.txt", "w");
+        if (f1) { fputs("b\n", f1); fclose(f1); }
+
+        scene_init(&m);
+        room = scene_add(&m, 0, empty, v3(0.0f, 0.0f, 0.0f), q_identity(), v3(1.0f, 1.0f, 1.0f));
+        n1 = room_mirror_scan(&m, room, "mirror_test_dir");
+        n2 = room_mirror_scan(&m, room, "mirror_test_dir");
+        if (n1 != 2 || n2 != 0) {
+            printf("FAIL: mirror scan added %d then %d (want 2 then 0)\n", n1, n2);
+            scene_free(&m);
+            return 1;
+        }
+        card = 0;
+        {
+            sol_u32 i;
+            for (i = 0; i < m.count; i++) {
+                if (m.objects[i].content &&
+                    strcmp(m.objects[i].content, "mirror_test_dir/alpha.txt") == 0) {
+                    card = m.objects[i].handle;
+                }
+            }
+        }
+        {
+            SceneObject *co = scene_get(&m, card);
+            const char  *u  = scene_meta_get(&m, card, "unplaced");
+            if (!co || co->kind != KIND_FILE || co->parent != room ||
+                !u || strcmp(u, "1") != 0 ||
+                !co->mesh_ref || strcmp(co->mesh_ref, "card") != 0) {
+                printf("FAIL: scanned card is not a tray'd FILE card\n");
+                scene_free(&m);
+                return 1;
+            }
+        }
+        printf("mirror scan (2 cards, idempotent rescan, tray'd FILE kind): ok\n");
+        scene_free(&m);
     }
 
     /* the raw blind spot: a multiline value containing the literal terminator

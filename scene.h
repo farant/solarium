@@ -9,12 +9,28 @@
 typedef struct { char *key; char *value; }     MetaEntry;
 typedef struct { char *type; sol_u32 target; } Relation;
 
+/* What an object MEANS (P3 item 6) — the first semantic typing. PLAIN =
+   props/geometry (everything before item 6). FILE and FOLDER live in mirror
+   rooms, governed by reconciliation; an ALIAS is a user-placed REFERENCE to
+   a path (never reconciled; staleness is flagged, not removed); a NOTE is
+   the user's own text; a TOMBSTONE marks a vanished file whose attachments
+   survive. content holds the path for FILE/FOLDER/ALIAS. */
+typedef enum {
+    KIND_PLAIN = 0,
+    KIND_FILE,
+    KIND_FOLDER,
+    KIND_ALIAS,
+    KIND_NOTE,
+    KIND_TOMBSTONE
+} ObjectKind;
+
 /* One object in the scene. Identity is the stable `handle`, NOT the array
    index — that decoupling survives deletion/reload. */
 typedef struct {
     sol_u32 handle;    /* runtime identity: stable, monotonic, never reused; not the index */
     sol_u32 parent;    /* parent handle; 0 = root */
     char   *nid;       /* persistent identity (ULID-style); minted in scene_add */
+    ObjectKind kind;   /* semantic type (item 6); KIND_PLAIN for props */
     vec3    pos;
     quat    rot;
     vec3    scale;
@@ -53,6 +69,7 @@ void        scene_rel_add(Scene *s, sol_u32 handle, const char *type, sol_u32 ta
 void        scene_content_set(Scene *s, sol_u32 handle, const char *path);
 void        scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name);
 void        scene_mesh_params_set(Scene *s, sol_u32 handle, const float *params, int count);
+void        scene_kind_set(Scene *s, sol_u32 handle, ObjectKind kind);
 void        scene_material_set(Scene *s, sol_u32 handle, Material mat);   /* texture handles shared, not owned */
 
 /* serialization — defined in scene_io.c */

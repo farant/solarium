@@ -53,6 +53,7 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     o = &s->objects[s->count++];
     o->handle = s->next_handle++;   /* monotonic; decoupled from array index */
     o->parent = parent;
+    o->kind   = KIND_PLAIN;
     o->nid = (char *)malloc(NID_LEN + 1);
     if (o->nid) nid_generate(o->nid);   /* identity born here; stable across re-saves */
     o->pos = pos;
@@ -210,6 +211,11 @@ void scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name) {
     if (!o) return;
     free(o->mesh_ref);
     o->mesh_ref = sol_strdup(name);
+}
+
+void scene_kind_set(Scene *s, sol_u32 handle, ObjectKind kind) {
+    SceneObject *o = scene_get(s, handle);
+    if (o) o->kind = kind;
 }
 
 void scene_mesh_params_set(Scene *s, sol_u32 handle, const float *params, int count) {
