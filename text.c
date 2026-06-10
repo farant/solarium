@@ -123,22 +123,22 @@ void ui_text(const Font *f, const char *utf8, float x, float y, float scale,
 #define WRAP_BUF 2048
 #define WORD_BUF 256
 
-int ui_text_wrapped(const Font *f, const char *utf8, float x, float y,
-                    float scale, float max_width,
-                    float r, float g, float b, float a) {
-    char        out[WRAP_BUF];
+int text_wrap(const Font *f, const char *utf8, float scale, float max_width,
+              char *out, int cap) {
     char        word[WORD_BUF];
     const char *p = utf8;
     size_t      oi = 0;
     float       line_w, space_w, limit;
     int         lines = 1;
 
-    if (!f || max_width <= 0.0f || scale <= 0.0f) return 0;
+    if (!out || cap <= 0) return 0;
+    out[0] = '\0';
+    if (!f || !utf8 || max_width <= 0.0f || scale <= 0.0f) return 0;
     text_measure(f, " ", 1.0f, &space_w, (float *)0);
     limit  = max_width / scale;        /* compare in base-size units */
     line_w = 0.0f;
 
-    while (*p != '\0' && oi + WORD_BUF + 2 < WRAP_BUF) {
+    while (*p != '\0' && oi + WORD_BUF + 2 < (size_t)cap) {
         size_t wl = 0;
         float  ww;
 
@@ -170,6 +170,14 @@ int ui_text_wrapped(const Font *f, const char *utf8, float x, float y,
         line_w += ww;
     }
     out[oi] = '\0';
-    ui_text(f, out, x, y, scale, r, g, b, a);
+    return lines;
+}
+
+int ui_text_wrapped(const Font *f, const char *utf8, float x, float y,
+                    float scale, float max_width,
+                    float r, float g, float b, float a) {
+    char out[WRAP_BUF];
+    int  lines = text_wrap(f, utf8, scale, max_width, out, WRAP_BUF);
+    if (lines > 0) ui_text(f, out, x, y, scale, r, g, b, a);
     return lines;
 }

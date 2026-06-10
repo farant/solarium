@@ -40,10 +40,15 @@ void ui_text(const Font *f, const char *utf8, float x, float y, float scale,
 void text_measure(const Font *f, const char *utf8, float scale,
                   float *out_w, float *out_h);
 
-/* Greedy word wrap: draw utf8 with lines broken at spaces so no line
-   exceeds max_width px. A single word wider than that gets its own line,
-   unbroken; runs of separating spaces collapse at breaks; '\n' passes
-   through. Returns the number of lines drawn. */
+/* Greedy word wrap as a STRING transform: copy utf8 into out[cap] with '\n'
+   inserted so no line exceeds max_width px at scale. A single word wider
+   than that gets its own line, unbroken; runs of separating spaces collapse
+   at breaks; '\n' passes through. Returns the line count (0 = nothing).
+   The screen overlay and world text (item 8) both wrap through this door. */
+int text_wrap(const Font *f, const char *utf8, float scale, float max_width,
+              char *out, int cap);
+
+/* Wrap + draw in one step (the screen-overlay convenience). */
 int ui_text_wrapped(const Font *f, const char *utf8, float x, float y,
                     float scale, float max_width,
                     float r, float g, float b, float a);

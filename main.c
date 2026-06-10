@@ -17,6 +17,7 @@
 #include "mirror.h"              /* mirror rooms reflect real folders (P3 item 6) */
 #include "font.h"                /* the SDF glyph atlas (P3 item 3) */
 #include "text.h"                /* text_shape seam + ui_text (P3 item 3b) */
+#include "wtext.h"               /* world-space SDF text — note cards (P3 item 8) */
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -571,6 +572,7 @@ typedef struct {
     sol_bool    b_was_down;        /* edge-detect spawn-board (B) */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
+    sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
 } AppState;
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
@@ -1511,6 +1513,58 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
         }
         st->c_was_down = c_now;
+    }
+
+    /* N spawns a NOTE card (item 8): pinned to the board under the cursor,
+       else standing on the floor ahead. Its text lives in the inline `text`
+       meta — the multiline raw-block escaping ladder's first real customer;
+       in-app typing arrives in the next piece (edit scene.stml meanwhile). */
+    {
+        sol_bool n_now = glfwGetKey(w, GLFW_KEY_N) == GLFW_PRESS;
+        if (n_now && !st->n_was_down) {
+            Mesh    empty;
+            vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+            vec3    blocal;
+            sol_u32 board, h;
+            memset(&empty, 0, sizeof empty);
+            blocal = vec3_make(0.0f, 0.0f, 0.0f);
+            board  = board_under_ray(st, pick_ray(st, w), &blocal);
+            if (board != 0) {
+                h = scene_add(&st->scene, board, empty,
+                              vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+            } else {
+                vec3  f = camera_forward(&st->camera);
+                vec3  pos;
+                float yaw;
+                f.y = 0.0f;
+                if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+                f   = vec3_normalize(f);
+                pos = vec3_add(st->camera.pos, vec3_scale(f, 1.8f));
+                pos.y = 0.0f;                  /* bottom-origin card on the floor */
+                yaw = atan2f(-f.x, -f.z);      /* facing you */
+                h = scene_add(&st->scene, 0, empty, pos,
+                              quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw), one);
+            }
+            scene_kind_set(&st->scene, h, KIND_NOTE);
+            scene_meta_set(&st->scene, h, "name", "note");
+            scene_meta_set(&st->scene, h, "text",
+                           "a new note. typing arrives next - for now its text "
+                           "lives in scene.stml as <meta key=\"text\">.");
+            scene_mesh_ref_set(&st->scene, h, "card");
+            if (board != 0) {
+                SceneObject *no = scene_get(&st->scene, h);
+                float ch = mesh_ref_param("card", (const float *)0, 0, "h");
+                if (no) no->pos = board_pin_pos(&st->scene, board, h,
+                                                blocal, 0.0f, -0.5f * ch);
+            }
+            scene_resolve_meshes(&st->scene);
+            apply_kind_materials(&st->scene);
+            st->selected_handle = h;
+            scene_save(&st->scene, "scene.stml");
+            printf("note #%u spawned%s\n", (unsigned)h,
+                   board ? " on the board" : "");
+        }
+        st->n_was_down = n_now;
     }
 
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
@@ -2510,6 +2564,57 @@ static void render(AppState *state) {
         draw_mesh(state, o->mesh, model, view, proj, eye, hl, o->material);
     }
 
+    /* world text (item 8): card labels + note bodies, drawn as depth-tested
+       INK after the opaque geometry, still inside the HDR pass — it rides
+       through ACES like everything else. Same atlas as the HUD; the SDF
+       fwidth threshold keeps it crisp at any distance. */
+    if (state->ui_font) {
+        const Font *uf  = state->ui_font;
+        const float lh  = font_line_height(uf);            /* px at base size */
+        mat4        vp  = mat4_mul(proj, view);
+        for (i = 0; i < state->scene.count; i++) {
+            SceneObject *o = &state->scene.objects[i];
+            float cw, ch, ct, margin, usable, px2m, name_w;
+            float ink_r, ink_g, ink_b;
+            mat4  face;
+            char  lbuf[16];
+            const char *nm;
+            if (o->kind == KIND_PLAIN) continue;            /* cards only */
+            if (!o->mesh_ref || strcmp(o->mesh_ref, "card") != 0) continue;
+            cw = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "w");
+            ch = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "h");
+            ct = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "t");
+            face = mat4_mul(scene_world_matrix(&state->scene, o),
+                            mat4_translate(vec3_make(0.0f, 0.0f, ct * 0.5f + 0.0008f)));
+            if (o->kind == KIND_TOMBSTONE) {                /* light ink on slate */
+                ink_r = 0.82f; ink_g = 0.82f; ink_b = 0.86f;
+            } else {                                        /* dark ink on paper */
+                ink_r = 0.10f; ink_g = 0.09f; ink_b = 0.08f;
+            }
+            margin = 0.025f;
+            usable = cw - 2.0f * margin;
+            /* the label: the card's name across the top, shrunk to fit */
+            nm = object_label(&state->scene, o->handle, lbuf);
+            px2m = 0.038f / lh;                             /* ~3.8cm line */
+            text_measure(uf, nm, 1.0f, &name_w, (float *)0);
+            if (name_w * px2m > usable && name_w > 0.0f)
+                px2m = usable / name_w;                     /* shrink, don't clip */
+            wtext_block(uf, vp, face, nm,
+                        -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
+                        ink_r, ink_g, ink_b);
+            /* the note body: the inline text meta, wrapped to the card */
+            if (o->kind == KIND_NOTE) {
+                const char *txt = scene_meta_get(&state->scene, o->handle, "text");
+                if (txt && txt[0]) {
+                    float bpx2m = 0.028f / lh;              /* ~2.8cm body lines */
+                    wtext_block(uf, vp, face, txt,
+                                -cw * 0.5f + margin, ch - margin - 0.055f,
+                                bpx2m, usable, ink_r, ink_g, ink_b);
+                }
+            }
+        }
+    }
+
     rhi_end_pass();
 
     /* ---- pass 2: fullscreen pass to the window — sample the HDR buffer, encode
@@ -2789,6 +2894,12 @@ int main(void) {
         for (i = 0; i < check.count; i++) {
             SceneObject *o = &check.objects[i];
             if (!o->mesh_ref) continue;
+            if (strcmp(o->mesh_ref, "arrow") == 0) continue;
+            /* ^ arrows are SCENE-derived (item 8): their geometry comes from
+               arrows_rebuild, not the registry — and a dangling edge
+               legitimately draws nothing, so "every ref must reconstruct"
+               is the registry's invariant, not theirs (iotest covers their
+               rel round-trip instead) */
             refs++;
             if (o->mesh.index_count > 0) {
                 solid++;
@@ -2833,6 +2944,9 @@ int main(void) {
     if (!state.mono_font)
         fprintf(stderr, "font: fonts/DejaVuSansMono.ttf failed to load — mono disabled\n");
 
+    if (!wtext_init())                    /* world text (item 8): same atlas, MVP ride */
+        fprintf(stderr, "wtext_init failed — card text disabled\n");
+
     last = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
@@ -2857,6 +2971,7 @@ int main(void) {
 
     font_destroy(state.mono_font);
     font_destroy(state.ui_font);
+    wtext_shutdown();
     ui_shutdown();
     scene_free(&state.scene);
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
