@@ -9,8 +9,14 @@
 #include "sol_base.h"
 #include "sol_types.h"
 
+/* Standing eye height above the floor. Walk mode settles toward it while you
+   move (doorway openings default to 2.2, so this clears them comfortably);
+   main.c also spawns the camera here. */
+#define CAMERA_EYE_HEIGHT 1.65f
+
 typedef enum {
-    CAMERA_WALK = 0,   /* first-person: movement locked to the ground plane */
+    CAMERA_WALK = 0,   /* first-person: movement locked to the ground plane;
+                          height settles to CAMERA_EYE_HEIGHT while moving */
     CAMERA_FLY,        /* first-person: full-3D movement + vertical */
     CAMERA_ORBIT       /* orbit a target: drag to rotate, scroll to dolly */
 } CameraMode;

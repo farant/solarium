@@ -3,11 +3,12 @@
 #include "camera.h"
 #include "sol_math.h"
 
-#include <math.h>   /* cosf, sinf, sqrtf, asinf, atan2f */
+#include <math.h>   /* cosf, sinf, sqrtf, asinf, atan2f, expf */
 
-#define CAMERA_ZOOM_SPEED 0.5f   /* units per scroll notch */
-#define CAMERA_MIN_DIST   1.0f
-#define CAMERA_MAX_DIST   50.0f
+#define CAMERA_ZOOM_SPEED  0.5f   /* units per scroll notch */
+#define CAMERA_MIN_DIST    1.0f
+#define CAMERA_MAX_DIST    50.0f
+#define CAMERA_SETTLE_RATE 8.0f   /* 1/s; how fast walk height eases to eye level */
 
 static const vec3 WORLD_UP = {0.0f, 1.0f, 0.0f};
 
@@ -17,7 +18,7 @@ void camera_init(Camera *c, vec3 pos, float yaw, float pitch) {
     c->pitch      = pitch;
     c->fov        = sol_radians(45.0f);
     c->mode       = CAMERA_WALK;
-    c->move_speed = 3.0f;        /* units/sec */
+    c->move_speed = 4.5f;        /* units/sec; a brisk indoor walk */
     c->target     = vec3_make(0.0f, 0.0f, 0.0f);
     c->distance   = 5.0f;
 }
@@ -72,6 +73,14 @@ void camera_update(Camera *c, const CameraInput *in, float dt) {
     if (vec3_dot(move, move) > 0.0f) {      /* normalize so diagonals aren't faster */
         move   = vec3_normalize(move);
         c->pos = vec3_add(c->pos, vec3_scale(move, c->move_speed * dt));
+        if (c->mode == CAMERA_WALK) {
+            /* settle toward standing eye height — but only while moving, so a
+               camera_focus framing (which parks the eye at the surface's height
+               and leaves us in walk mode) holds until you step away. The
+               exponential form makes the ease framerate-independent. */
+            float k = 1.0f - expf(-CAMERA_SETTLE_RATE * dt);
+            c->pos.y += (CAMERA_EYE_HEIGHT - c->pos.y) * k;
+        }
     }
 }
 

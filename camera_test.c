@@ -33,14 +33,27 @@ int main(void) {
         }
     }
 
-    /* WALK: moving forward stays on the ground plane (y unchanged) but moves */
+    /* WALK: moving forward travels in the ground plane and the height settles
+       toward standing eye level (dt=1 closes essentially the whole gap) */
     clear_input(&in);
     in.forward = SOL_TRUE;
-    c.pos = vec3_make(0.0f, 1.5f, 0.0f);
+    c.pos = vec3_make(0.0f, 2.5f, 0.0f);
     camera_update(&c, &in, 1.0f);
     printf("walk forward -> pos=(%.3f, %.3f, %.3f)\n", c.pos.x, c.pos.y, c.pos.z);
-    if (!approx(c.pos.y, 1.5f)) { printf("FAIL: walk changed height\n"); return 1; }
+    if (!approx(c.pos.y, CAMERA_EYE_HEIGHT)) {
+        printf("FAIL: walk did not settle to eye height\n"); return 1;
+    }
     if (approx(c.pos.z, 0.0f)) { printf("FAIL: walk did not move\n"); return 1; }
+
+    /* WALK idle: no movement input -> height holds, even away from eye level.
+       This is the camera_focus contract: a framed view (parked at the surface's
+       height, mode=WALK) must not drift until you step away. */
+    clear_input(&in);
+    in.look_dx = 0.1f;                        /* looking around is not stepping */
+    c.pos = vec3_make(0.0f, 0.9f, 0.0f);
+    camera_update(&c, &in, 1.0f);
+    printf("walk idle -> pos=(%.3f, %.3f, %.3f)\n", c.pos.x, c.pos.y, c.pos.z);
+    if (!approx(c.pos.y, 0.9f)) { printf("FAIL: idle walk drifted\n"); return 1; }
 
     /* FLY: looking up (pitch=45) and moving forward gains height */
     clear_input(&in);

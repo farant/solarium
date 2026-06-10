@@ -1839,10 +1839,10 @@ static int init_scene(AppState *state) {
         populate_default_scene(state);
     }
 
-    /* place the camera where the old fixed view sat: back + raised, facing the
-       scene (-Z) with a slight downward tilt (item 3b) */
-    camera_init(&state->camera, vec3_make(0.0f, 2.5f, 5.0f),
-                sol_radians(-90.0f), sol_radians(-20.0f));
+    /* spawn standing at the south edge of the scene, facing -Z at eye height
+       with a slight downward tilt (2.5 was above the 2.2 doorway lintels) */
+    camera_init(&state->camera, vec3_make(0.0f, CAMERA_EYE_HEIGHT, 5.0f),
+                sol_radians(-90.0f), sol_radians(-10.0f));
     state->f_was_down = SOL_FALSE;
     state->exposure   = 1.0f;
     state->ambient_scale = 1.0f;   /* zero-init would fade up from black */
