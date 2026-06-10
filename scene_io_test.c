@@ -187,7 +187,7 @@ int main(void) {
             MeshBuilder mb;
             float       wall_p[6];
             mb_init(&mb);
-            if (!mesh_ref_build("room", (const float *)0, &mb) ||
+            if (!mesh_ref_build("room", (const float *)0, 0, &mb) ||
                 mb.vertex_count != 24 || mb.index_count != 36) {
                 printf("FAIL: room shell should be 6 quads (24v/36i), got %uv/%ui\n",
                        (unsigned)mb.vertex_count, (unsigned)mb.index_count);
@@ -196,15 +196,16 @@ int main(void) {
             }
             mb_free(&mb);
             /* a doorway flush with the floor: left panel (6 exposed faces) +
-               right panel (6) + header (4: front/back/lintel/top) = 16 quads
-               = 64 verts; a full-height opening at the left edge degenerates
-               to the right panel alone = 6 quads = 24 verts */
+               right panel (6) + header (4) + the threshold (1: the opening's
+               floor across the wall thickness) = 17 quads = 68 verts; a
+               full-height opening at the left edge degenerates to the right
+               panel + threshold = 7 quads = 28 verts */
             mb_init(&mb);
             wall_p[0] = 4.0f; wall_p[1] = 3.0f;
             wall_p[2] = 1.5f; wall_p[3] = 1.0f; wall_p[4] = 2.2f;
             wall_p[5] = 0.15f;
-            if (!mesh_ref_build("wall", wall_p, &mb) || mb.vertex_count != 64) {
-                printf("FAIL: doorway wall should be 16 exposed faces (64v), got %u\n",
+            if (!mesh_ref_build("wall", wall_p, 6, &mb) || mb.vertex_count != 68) {
+                printf("FAIL: doorway wall should be 17 exposed faces (68v), got %u\n",
                        (unsigned)mb.vertex_count);
                 mb_free(&mb); scene_free(&b); scene_free(&scene);
                 return 1;
@@ -212,15 +213,37 @@ int main(void) {
             mb_free(&mb);
             mb_init(&mb);
             wall_p[2] = 0.0f; wall_p[4] = 3.0f;   /* full-height opening at the left edge */
-            mesh_ref_build("wall", wall_p, &mb);
-            if (mb.vertex_count != 24) {
-                printf("FAIL: degenerate pieces must be skipped (want 24v, got %u)\n",
+            mesh_ref_build("wall", wall_p, 6, &mb);
+            if (mb.vertex_count != 28) {
+                printf("FAIL: degenerate pieces must be skipped (want 28v, got %u)\n",
                        (unsigned)mb.vertex_count);
                 mb_free(&mb); scene_free(&b); scene_free(&scene);
                 return 1;
             }
             mb_free(&mb);
-            printf("room + wall emitters (incl. degenerate-piece skip): ok\n");
+            /* item 7: presence flags — a bare platform is just the floor */
+            mb_init(&mb);
+            {
+                float folly_p[8];
+                folly_p[0] = 5.0f; folly_p[1] = 5.0f; folly_p[2] = 3.0f;
+                folly_p[3] = 0.0f; folly_p[4] = 0.0f; folly_p[5] = 0.0f;
+                folly_p[6] = 0.0f; folly_p[7] = 0.0f;
+                mesh_ref_build("room", folly_p, 8, &mb);
+            }
+            if (mb.vertex_count != 4 || mb.index_count != 6) {
+                printf("FAIL: floor-only room should be 1 quad (4v/6i)\n");
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            mb_init(&mb);
+            if (!mesh_ref_build("path", (const float *)0, 0, &mb) || mb.vertex_count != 24) {
+                printf("FAIL: path slab should be 6 faces (24v)\n");
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            printf("room + wall + path emitters (flags, degenerate skip): ok\n");
         }
 
         /* identity + hierarchy survived: B's box (found by A's nid) must have a

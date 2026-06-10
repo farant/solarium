@@ -260,19 +260,21 @@ sol_bool scene_load(Scene *s, const char *path) {
         if (mref) {
             scene_mesh_ref_set(s, h, mref);
             {   /* parametric ref: read the schema-named attrs, defaults for
-                   absent ones; no attrs at all -> count 0 (pure defaults),
-                   which also keeps default-built files byte-stable */
+                   absent ones. Store only the file's own PREFIX length (the
+                   last present attr) — storing the full schema count would
+                   make a re-save write attrs the file never had, breaking
+                   byte-identity whenever a schema grows. */
                 const char *const *names;
                 const float       *defs;
                 int n = mesh_ref_schema(mref, &names, &defs);
                 if (n > 0) {
                     float p[MESH_REF_MAX_PARAMS];
-                    int   k, present = 0;
+                    int   k, last = -1;
                     for (k = 0; k < n; k++) {
                         p[k] = attr_f(mn, names[k], defs[k]);
-                        if (stml_attr(mn, names[k])) present = 1;
+                        if (stml_attr(mn, names[k])) last = k;
                     }
-                    if (present) scene_mesh_params_set(s, h, p, n);
+                    if (last >= 0) scene_mesh_params_set(s, h, p, last + 1);
                 }
             }
         }

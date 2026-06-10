@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>              /* strcmp — room-shell refs (item 7) */
 #include <math.h>                /* cosf — spot-light cone cosines (item 9a) */
 
 #define GLFW_INCLUDE_NONE
@@ -84,6 +85,7 @@ static const char *FRAGMENT_SRC =
     "uniform sampler2D uShadowMap;\n"                        /* depth from the light's POV (item 9b) */
     "uniform samplerCube uIrradianceMap;\n"                  /* diffuse IBL (B3) */
     "uniform float uUseIBL;\n"                               /* 0 = flat ambient fallback */
+    "uniform float uAmbientScale;\n"                         /* 1 outdoors; <1 inside a sealed room (item 7) */
     "uniform samplerCube uPrefilterMap;\n"                   /* specular IBL: prefiltered env (C3) */
     "uniform sampler2D   uBrdfLUT;\n"                        /* specular IBL: BRDF integration */
     "out vec4 FragColor;\n"
@@ -187,7 +189,7 @@ static const char *FRAGMENT_SRC =
     "    } else {\n"
     "        ambient = 0.03 * albedo * ao;\n"                  /* fallback if the .hdr didn't load */
     "    }\n"
-    "    vec3 color = ambient + Lo;\n"
+    "    vec3 color = ambient * uAmbientScale + Lo;\n"          /* sealed rooms dim the sky's ambient (item 7) */
     "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* selection tint (linear) */
     "    FragColor = vec4(color, 1.0);\n"                     /* LINEAR -> the HDR buffer; 7c tonemaps + encodes */
     "}\n";
@@ -530,6 +532,9 @@ typedef struct {
     RhiPipeline     brdf_lut_pipeline;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     sol_bool    l_was_down;     /* edge-detect the scene-reload key (P3 item 1) */
+    /* room graph (P3 item 7) */
+    sol_u32     current_room;   /* containing room's anchor handle; 0 = outside (derived per frame) */
+    float       ambient_scale;  /* eased toward the room's ambient (sealed = dim) */
     /* text (P3 item 3) */
     Font       *ui_font;        /* DejaVu Sans, SDF atlas; NULL if load failed */
     Font       *mono_font;      /* DejaVu Sans Mono — code + aligned readouts */
@@ -621,6 +626,58 @@ static vec3 object_world_pos(Scene *s, sol_u32 handle) {
         return vec3_make(w.m[12], w.m[13], w.m[14]);
     }
     return vec3_make(0.0f, 0.5f, 0.0f);
+}
+
+/* Which room contains point p? (P3 item 7.) Rooms are the §1.10 anchors; a
+   room's VOLUME is derived from its shell child's parametric (w,d,h) — no
+   mesh test, no event tracking, so the answer stays correct across
+   teleports, reloads, and dragged rooms. Smallest containing volume wins
+   (nested rooms). Returns the anchor's handle, 0 = not in any room. */
+static sol_u32 room_containing(Scene *s, vec3 p) {
+    sol_u32 i, best = 0;
+    float   best_vol = 1e30f;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *shell = &s->objects[i];
+        vec3         org;
+        float        w, d, h, vol;
+        mat4         wm;
+        if (!shell->mesh_ref || strcmp(shell->mesh_ref, "room") != 0) continue;
+        if (!scene_get(s, shell->parent)) continue;        /* a shell needs its anchor */
+        w = shell->mesh_param_count > 0 ? shell->mesh_params[0] : 6.0f;
+        d = shell->mesh_param_count > 1 ? shell->mesh_params[1] : 4.0f;
+        h = shell->mesh_param_count > 2 ? shell->mesh_params[2] : 3.0f;
+        wm  = scene_world_matrix(s, shell);
+        org = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
+        if (p.x < org.x - w * 0.5f || p.x > org.x + w * 0.5f) continue;
+        if (p.z < org.z - d * 0.5f || p.z > org.z + d * 0.5f) continue;
+        if (p.y < org.y || p.y > org.y + h) continue;
+        vol = w * d * h;
+        if (vol < best_vol) { best_vol = vol; best = shell->parent; }
+    }
+    return best;
+}
+
+/* The room's ambient level: an explicit "ambient" meta on the anchor wins
+   (the builder knows a doorway-sealed room is dim even though its own shell
+   has an open side); otherwise derived from the shell's presence flags —
+   fully sealed dims the sky's light, anything open stays bright. */
+static float room_ambient(Scene *s, sol_u32 anchor) {
+    const char *m = scene_meta_get(s, anchor, "ambient");
+    sol_u32     i;
+    if (m) return (float)strtod(m, (char **)0);
+    for (i = 0; i < s->count; i++) {
+        SceneObject *shell = &s->objects[i];
+        if (shell->parent != anchor || !shell->mesh_ref ||
+            strcmp(shell->mesh_ref, "room") != 0) continue;
+        if (shell->mesh_param_count >= 8) {
+            int k;
+            for (k = 3; k < 8; k++) {
+                if (shell->mesh_params[k] < 0.5f) return 1.0f;   /* an open side */
+            }
+        }
+        return 0.35f;          /* sealed (flags all present, or defaulted) */
+    }
+    return 1.0f;
 }
 
 /* The top-level ancestor of an object: walk the parent chain to the root. For a
@@ -1077,9 +1134,7 @@ static void scene_resolve_meshes(Scene *s) {
         MeshBuilder  mb;
         if (!o->mesh_ref || o->mesh.index_count != 0) continue;
         mb_init(&mb);
-        if (mesh_ref_build(o->mesh_ref,
-                           o->mesh_param_count > 0 ? o->mesh_params : (const float *)0,
-                           &mb)) {
+        if (mesh_ref_build(o->mesh_ref, o->mesh_params, o->mesh_param_count, &mb)) {
             o->mesh = mesh_from_builder(&mb);
         } else {
             fprintf(stderr, "scene: unknown mesh ref \"%s\" on %s — left empty\n",
@@ -1258,40 +1313,103 @@ static int init_scene(AppState *state) {
     scene_mesh_ref_set(&state->scene, state->box_handle, "box");
     scene_mesh_ref_set(&state->scene, page, "page");
 
-    /* the palace's first ROOM (item 5): an anchor pinning the §1.10 data
-       model (room_type + source_path in meta; geometry and, later, contents
-       parented to it), with a parametric sealed shell as its first kit piece
-       and a freestanding doorway wall inside to prove the around-the-gap
-       construction. The existing scene now lives indoors. */
+    /* The palace's first ROOMS (items 5+7): three §1.10 anchors and the two
+       edge EMBODIMENTS that connect them — a shared thick doorway wall (the
+       hall's open east side into a sealed cell) and a path across the void
+       (the hall's open north side out to a bare folly platform). The graph
+       lives in the existing relation slots: each connector carries
+       `connects` edges to both rooms. Geometry children parent to their
+       anchor (drag-excluded via room_type); connectors parent to the hall. */
     {
         Material stone = material_default();
-        sol_u32  room_anchor, shell, doorway;
-        float    room_p[3], wall_p[6];
-        room_p[0] = 12.0f; room_p[1] = 10.0f; room_p[2] = 3.5f;     /* w d h */
-        wall_p[0] = 4.0f;  wall_p[1] = 3.0f;                        /* w h */
-        wall_p[2] = 1.5f;  wall_p[3] = 1.0f;  wall_p[4] = 2.2f;     /* ox ow oh */
-        wall_p[5] = 0.15f;                                          /* thickness */
+        Material wood  = material_default();
+        sol_u32  hall, cell, folly, sh, sc, sf, doorwall, path;
+        float    hall_p[8], cell_p[8], folly_p[8], wall_p[6], path_p[3];
+        quat     yaw90 = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                              sol_radians(90.0f));
 
-        room_anchor = scene_add(&state->scene, 0, empty,
+        hall_p[0] = 12.0f; hall_p[1] = 10.0f; hall_p[2] = 3.5f;
+        hall_p[3] = 0.0f;  /* north open: the path leaves here */
+        hall_p[4] = 0.0f;  /* east open: the doorway wall closes it */
+        hall_p[5] = 1.0f;  hall_p[6] = 1.0f;  hall_p[7] = 1.0f;
+
+        cell_p[0] = 5.0f;  cell_p[1] = 5.0f;  cell_p[2] = 2.5f;
+        cell_p[3] = 1.0f;  cell_p[4] = 1.0f;  cell_p[5] = 1.0f;
+        cell_p[6] = 0.0f;  /* west open: the shared doorway wall is there */
+        cell_p[7] = 1.0f;
+
+        folly_p[0] = 5.0f; folly_p[1] = 5.0f; folly_p[2] = 3.0f;   /* h = its volume only */
+        folly_p[3] = 0.0f; folly_p[4] = 0.0f; folly_p[5] = 0.0f;   /* a bare platform */
+        folly_p[6] = 0.0f; folly_p[7] = 0.0f;
+
+        wall_p[0] = 10.0f; wall_p[1] = 3.5f;                  /* spans the hall's east side */
+        wall_p[2] = 4.5f;  wall_p[3] = 1.0f; wall_p[4] = 2.2f;
+        wall_p[5] = 0.15f;
+
+        path_p[0] = 4.5f;  path_p[1] = 1.5f; path_p[2] = 0.15f;
+
+        hall = scene_add(&state->scene, 0, empty,
                   vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_meta_set(&state->scene, room_anchor, "room_type", "room");
-        scene_meta_set(&state->scene, room_anchor, "source_path", "");   /* item 6 fills this */
-
-        shell = scene_add(&state->scene, room_anchor, empty,
+        scene_meta_set(&state->scene, hall, "room_type", "room");
+        scene_meta_set(&state->scene, hall, "name", "the hall");
+        scene_meta_set(&state->scene, hall, "source_path", "");   /* item 6 fills this */
+        sh = scene_add(&state->scene, hall, empty,
                   vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_mesh_ref_set(&state->scene, shell, "room");
-        scene_mesh_params_set(&state->scene, shell, room_p, 3);
+        scene_mesh_ref_set(&state->scene, sh, "room");
+        scene_mesh_params_set(&state->scene, sh, hall_p, 8);
 
-        doorway = scene_add(&state->scene, room_anchor, empty,
-                  vec3_make(-3.0f, 0.0f, -2.5f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_mesh_ref_set(&state->scene, doorway, "wall");
-        scene_mesh_params_set(&state->scene, doorway, wall_p, 6);
+        /* the cell: interior x in [6.15, 11.15] — past the wall's thickness */
+        cell = scene_add(&state->scene, 0, empty,
+                  vec3_make(8.65f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_meta_set(&state->scene, cell, "room_type", "room");
+        scene_meta_set(&state->scene, cell, "name", "the cell");
+        scene_meta_set(&state->scene, cell, "ambient", "0.35");   /* doorway-sealed: its own
+                  shell has an open side (the shared wall closes it), so the
+                  flags-derived answer would be "open" — the builder knows better */
+        sc = scene_add(&state->scene, cell, empty,
+                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&state->scene, sc, "room");
+        scene_mesh_params_set(&state->scene, sc, cell_p, 8);
+
+        /* the folly: a platform floating north, past the path */
+        folly = scene_add(&state->scene, 0, empty,
+                  vec3_make(0.0f, 0.0f, -12.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_meta_set(&state->scene, folly, "room_type", "room");
+        scene_meta_set(&state->scene, folly, "name", "the folly");
+        sf = scene_add(&state->scene, folly, empty,
+                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&state->scene, sf, "room");
+        scene_mesh_params_set(&state->scene, sf, folly_p, 8);
+
+        /* edge 1: the shared doorway wall (rotated into the YZ plane at the
+           hall/cell boundary). ONE wall — two abutting walls would be the
+           z-fight lesson at architecture scale. */
+        doorwall = scene_add(&state->scene, hall, empty,
+                  vec3_make(6.075f, 0.0f, 0.0f), yaw90, vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&state->scene, doorwall, "wall");
+        scene_mesh_params_set(&state->scene, doorwall, wall_p, 6);
+        scene_rel_add(&state->scene, doorwall, "connects", hall);
+        scene_rel_add(&state->scene, doorwall, "connects", cell);
+
+        /* edge 2: the path across the void (length runs local X; rotated to
+           span world Z from the hall's north opening to the folly) */
+        path = scene_add(&state->scene, hall, empty,
+                  vec3_make(0.0f, 0.0f, -7.25f), yaw90, vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&state->scene, path, "path");
+        scene_mesh_params_set(&state->scene, path, path_p, 3);
+        scene_rel_add(&state->scene, path, "connects", hall);
+        scene_rel_add(&state->scene, path, "connects", folly);
 
         stone.base_color = vec3_make(0.58f, 0.55f, 0.50f);   /* warm gray stone */
         stone.roughness  = 0.92f;
-        scene_material_set(&state->scene, shell, stone);
+        scene_material_set(&state->scene, sh, stone);
+        scene_material_set(&state->scene, sc, stone);
+        scene_material_set(&state->scene, sf, stone);
         stone.base_color = vec3_make(0.62f, 0.58f, 0.52f);   /* the wall a shade lighter */
-        scene_material_set(&state->scene, doorway, stone);
+        scene_material_set(&state->scene, doorwall, stone);
+        wood.base_color = vec3_make(0.46f, 0.36f, 0.27f);    /* the path: timber */
+        wood.roughness  = 0.85f;
+        scene_material_set(&state->scene, path, wood);
     }
 
     scene_resolve_meshes(&state->scene);
@@ -1368,6 +1486,7 @@ static int init_scene(AppState *state) {
                 sol_radians(-90.0f), sol_radians(-20.0f));
     state->f_was_down = SOL_FALSE;
     state->exposure   = 1.0f;
+    state->ambient_scale = 1.0f;   /* zero-init would fade up from black */
 
     /* the spot light: warm, aimed at the table. Moved INSIDE the item-5 room
        (it sat at y=5, above the 3.5m ceiling — which would have shadowed the
@@ -1416,6 +1535,19 @@ static void update(AppState *state, double dt) {
     quat qy, qx;
 
     state->angle += (float)dt * 0.8f;
+
+    /* item 7: containment is DERIVED state, recomputed each frame — walking
+       through a doorway "transitions" only in the sense that this query's
+       answer changes. The ambient eases toward the room's level (an
+       exponential glide; no pop at the threshold). */
+    {
+        float target;
+        state->current_room = room_containing(&state->scene, state->camera.pos);
+        target = state->current_room
+               ? room_ambient(&state->scene, state->current_room) : 1.0f;
+        state->ambient_scale += (target - state->ambient_scale)
+                              * (1.0f - (float)exp(-dt * 5.0));
+    }
 
     /* spin the anchor -> its child (the box) orbits the origin */
     anchor = scene_get(&state->scene, state->anchor_handle);
@@ -1498,6 +1630,7 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
         /* IBL: irradiance (diffuse, B3) unit 5; prefilter + BRDF LUT (specular, C3)
            units 6/7. (0-3 material textures, 4 shadow.) */
         rhi_set_uniform_float("uUseIBL", state->irradiance_cubemap.id ? 1.0f : 0.0f);
+        rhi_set_uniform_float("uAmbientScale", state->ambient_scale);   /* item 7: room feel */
         if (state->irradiance_cubemap.id) {
             rhi_bind_texture(state->irradiance_cubemap, 5);
             rhi_set_uniform_int("uIrradianceMap", 5);
@@ -1671,8 +1804,8 @@ static void render(AppState *state) {
 
     /* the debug readout panel — live state, monospace-aligned (3c; this
        retired the window-title sprintf hack). ui_text positions BASELINES. */
-    ui_quad(8.0f * us, 8.0f * us, 300.0f * us, 104.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
-    ui_quad_outline(8.0f * us, 8.0f * us, 300.0f * us, 104.0f * us,
+    ui_quad(8.0f * us, 8.0f * us, 300.0f * us, 124.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
+    ui_quad_outline(8.0f * us, 8.0f * us, 300.0f * us, 124.0f * us,
                     1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
     if (state->ui_font) {
         float ts   = 0.45f * us;
@@ -1696,6 +1829,14 @@ static void render(AppState *state) {
             sprintf(line, "cam %s  exposure %.2f", mode, (double)state->exposure);
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 1.0f, 1.0f, 1.0f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
+            {
+                const char *rn = state->current_room
+                    ? scene_meta_get(&state->scene, state->current_room, "name") : (const char *)0;
+                sprintf(line, "room %s", rn ? rn
+                        : (state->current_room ? "(unnamed)" : "outside"));
+                ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.80f, 0.85f, 1.0f, 0.85f);
+                mb += font_line_height(state->mono_font) * ms;
+            }
             if (sel) {
                 sprintf(line, "sel #%-3u %-8s %.1f %.1f %.1f",
                         (unsigned)state->selected_handle,

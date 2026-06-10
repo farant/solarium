@@ -140,38 +140,47 @@ static void push_quad4(MeshBuilder *b,
     mb_push_triangle(b, a, d, e);
 }
 
-/* A sealed room shell: every face INTERIOR — normals point inward and the
+/* A room shell: every present face INTERIOR — normals point inward and the
    winding is CCW from inside, so the geometry stays correct if back-face
    culling is ever enabled. Origin at the floor's center, y in [0,h].
    World-scale UVs: u/v run in meters, so a texture tiles at the same density
-   on a 2m wall and an 8m wall. */
-void make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h) {
+   on a 2m wall and an 8m wall. Each wall and the ceiling is OPTIONAL (the
+   follies direction: three-walled stages, roofless cells, bare platforms);
+   the floor is always present — a room you can't stand in isn't a room. */
+void make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h,
+               int wall_n, int wall_e, int wall_s, int wall_w, int ceil) {
     sol_f32 hw = w * 0.5f, hd = d * 0.5f;
 
-    /* floor (normal +Y) and ceiling (normal -Y) */
+    /* floor (normal +Y); ceiling (normal -Y) if present */
     push_quad4(b, -hw, 0.0f, -hd, 0.0f, 0.0f,   -hw, 0.0f,  hd, 0.0f, d,
                    hw, 0.0f,  hd, w,    d,       hw, 0.0f, -hd, w,    0.0f,
                0.0f, 1.0f, 0.0f);
-    push_quad4(b, -hw, h,    -hd, 0.0f, 0.0f,    hw, h,    -hd, w,    0.0f,
-                   hw, h,     hd, w,    d,      -hw, h,     hd, 0.0f, d,
-               0.0f, -1.0f, 0.0f);
+    if (ceil)
+        push_quad4(b, -hw, h,    -hd, 0.0f, 0.0f,    hw, h,    -hd, w,    0.0f,
+                       hw, h,     hd, w,    d,      -hw, h,     hd, 0.0f, d,
+                   0.0f, -1.0f, 0.0f);
 
     /* north wall (z = -hd, faces +Z into the room) / south (z = +hd, faces -Z) */
-    push_quad4(b, -hw, 0.0f, -hd, 0.0f, 0.0f,    hw, 0.0f, -hd, w,    0.0f,
-                   hw, h,    -hd, w,    h,      -hw, h,    -hd, 0.0f, h,
-               0.0f, 0.0f, 1.0f);
-    push_quad4(b,  hw, 0.0f,  hd, 0.0f, 0.0f,   -hw, 0.0f,  hd, w,    0.0f,
-                  -hw, h,     hd, w,    h,       hw, h,     hd, 0.0f, h,
-               0.0f, 0.0f, -1.0f);
+    if (wall_n)
+        push_quad4(b, -hw, 0.0f, -hd, 0.0f, 0.0f,    hw, 0.0f, -hd, w,    0.0f,
+                       hw, h,    -hd, w,    h,      -hw, h,    -hd, 0.0f, h,
+                   0.0f, 0.0f, 1.0f);
+    if (wall_s)
+        push_quad4(b,  hw, 0.0f,  hd, 0.0f, 0.0f,   -hw, 0.0f,  hd, w,    0.0f,
+                      -hw, h,     hd, w,    h,       hw, h,     hd, 0.0f, h,
+                   0.0f, 0.0f, -1.0f);
 
     /* west wall (x = -hw, faces +X) / east (x = +hw, faces -X) */
-    push_quad4(b, -hw, 0.0f,  hd, 0.0f, 0.0f,   -hw, 0.0f, -hd, d,    0.0f,
-                  -hw, h,    -hd, d,    h,      -hw, h,     hd, 0.0f, h,
-               1.0f, 0.0f, 0.0f);
-    push_quad4(b,  hw, 0.0f, -hd, 0.0f, 0.0f,    hw, 0.0f,  hd, d,    0.0f,
-                   hw, h,     hd, d,    h,       hw, h,    -hd, 0.0f, h,
-               -1.0f, 0.0f, 0.0f);
+    if (wall_w)
+        push_quad4(b, -hw, 0.0f,  hd, 0.0f, 0.0f,   -hw, 0.0f, -hd, d,    0.0f,
+                      -hw, h,    -hd, d,    h,      -hw, h,     hd, 0.0f, h,
+                   1.0f, 0.0f, 0.0f);
+    if (wall_e)
+        push_quad4(b,  hw, 0.0f, -hd, 0.0f, 0.0f,    hw, 0.0f,  hd, d,    0.0f,
+                       hw, h,     hd, d,    h,       hw, h,    -hd, 0.0f, h,
+                   -1.0f, 0.0f, 0.0f);
 }
+
 
 /* Axis-aligned face helpers for the wall pieces: a rect facing +/-Z, +/-X,
    or +/-Y, corners ordered CCW from the normal's side, world-scale UVs. */
@@ -266,6 +275,27 @@ void make_wall_with_opening(MeshBuilder *b, sol_f32 w, sol_f32 h,
         if (!has_left)  face_x(b, lx1, oh, h, zb, zf, -1);   /* header's exposed end */
         if (!has_right) face_x(b, rx0, oh, h, zb, zf,  1);
     }
+
+    /* the THRESHOLD: the opening's floor across the wall's thickness. The
+       rooms' own floors stop at their interiors, so without this, walking
+       through a doorway crosses a wall-thick strip of void. Top face only —
+       an underside at the same y=0 would z-fight it. */
+    face_y(b, lx1, rx0, 0.0f, zb, zf, 1);
+}
+
+/* A walkable slab — the second EMBODIMENT of a room-graph edge (a path
+   between distant rooms; the shared doorway wall is the first). Length runs
+   along X, width along Z, the walking surface at y=0 (the slab hangs below,
+   y in [-t, 0]) so it places flush with room floors. Outward normals — it
+   is seen from outside, unlike a room. */
+void make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t) {
+    sol_f32 hl = len * 0.5f, hw = w * 0.5f;
+    face_y(b, -hl, hl, 0.0f, -hw, hw,  1);    /* deck */
+    face_y(b, -hl, hl, -t,   -hw, hw, -1);    /* underside */
+    face_z(b, -hl, hl, -t, 0.0f,  hw,  1);    /* sides */
+    face_z(b, -hl, hl, -t, 0.0f, -hw, -1);
+    face_x(b, -hl, -t, 0.0f, -hw, hw, -1);    /* ends */
+    face_x(b,  hl, -t, 0.0f, -hw, hw,  1);
 }
 
 /* ------------------------------------------------------------ the registry */
@@ -286,16 +316,24 @@ typedef struct {
 static void emit_box(MeshBuilder *b, const float *p)  { (void)p; make_box(b, 1.0f, 1.0f, 1.0f); }
 static void emit_grid(MeshBuilder *b, const float *p) { (void)p; make_grid(b, 6.0f, 6.0f, 8); }
 static void emit_page(MeshBuilder *b, const float *p) { (void)p; make_page(b, 0.9f, 1.2f); }
-static void emit_room(MeshBuilder *b, const float *p) { make_room(b, p[0], p[1], p[2]); }
+static void emit_room(MeshBuilder *b, const float *p) {
+    make_room(b, p[0], p[1], p[2],
+              p[3] > 0.5f, p[4] > 0.5f, p[5] > 0.5f, p[6] > 0.5f, p[7] > 0.5f);
+}
 static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
+static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1], p[2]); }
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
     { "grid", 0, { 0 }, { 0.0f }, emit_grid },
     { "page", 0, { 0 }, { 0.0f }, emit_page },
-    { "room", 3, { "w", "d", "h" },              { 6.0f, 4.0f, 3.0f },             emit_room },
+    /* room: dims + per-wall/ceiling presence flags (1 = present; absent
+       attrs default to a sealed shell, so older files keep their meaning) */
+    { "room", 8, { "w", "d", "h", "wn", "we", "ws", "ww", "ceil" },
+                 { 6.0f, 4.0f, 3.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f }, emit_room },
     { "wall", 6, { "w", "h", "ox", "ow", "oh", "t" },
-                 { 4.0f, 3.0f, 1.5f, 1.0f, 2.2f, 0.15f }, emit_wall }
+                 { 4.0f, 3.0f, 1.5f, 1.0f, 2.2f, 0.15f }, emit_wall },
+    { "path", 3, { "len", "w", "t" }, { 6.0f, 1.5f, 0.15f }, emit_path }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 
@@ -315,10 +353,17 @@ int mesh_ref_schema(const char *ref, const char *const **names, const float **de
     return e->param_count;
 }
 
-sol_bool mesh_ref_build(const char *ref, const float *params, MeshBuilder *b) {
+sol_bool mesh_ref_build(const char *ref, const float *params, int count, MeshBuilder *b) {
     const MeshRefEntry *e = registry_find(ref);
+    float               full[MESH_REF_MAX_PARAMS];
+    int                 k;
     if (!e) return SOL_FALSE;
-    e->emit(b, params ? params : e->defaults);
+    /* merge the caller's prefix with the defaults: a file written before a
+       schema grew (a 3-param room from before the presence flags) must get
+       defaults for the new tail, never an uninitialized read */
+    for (k = 0; k < e->param_count; k++)
+        full[k] = (params && k < count) ? params[k] : e->defaults[k];
+    e->emit(b, full);
     return SOL_TRUE;
 }
 

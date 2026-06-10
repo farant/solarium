@@ -34,11 +34,18 @@ void    make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d);
 void    make_grid(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_u32 subdiv);
 void    make_page(MeshBuilder *b, sol_f32 w, sol_f32 h);   /* upright XY quad, +Z, upright UVs */
 
-/* A sealed room shell (P3 item 5): floor + 4 walls + ceiling, all faces
+/* A room shell (P3 items 5+7): floor + optional walls/ceiling, all faces
    INTERIOR (inward normals, inward winding — the viewer is inside), origin at
    the floor's center, y in [0,h]. World-scale UVs (1 unit per meter) so texel
-   density is uniform across differently-sized rooms. */
-void    make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h);
+   density is uniform across differently-sized rooms. The presence flags are
+   the follies vocabulary: a sealed cell, a three-walled stage, or a bare
+   platform are all the same emitter. The floor is always present. */
+void    make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h,
+                  int wall_n, int wall_e, int wall_s, int wall_w, int ceil);
+
+/* A walkable slab (P3 item 7): a room-graph edge embodied — length along X,
+   width along Z, deck at y=0 (places flush with room floors). */
+void    make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t);
 
 /* A wall with a doorway, built as the pieces AROUND the gap — left panel,
    right panel, header — never a boolean cut (§1.4). Real thickness t (centered
@@ -61,10 +68,12 @@ void    make_wall_with_opening(MeshBuilder *b, sol_f32 w, sol_f32 h,
    static lifetime). Returns the parameter count, or -1 for an unknown ref. */
 int mesh_ref_schema(const char *ref, const char *const **names, const float **defaults);
 
-/* Build the named geometry into b. params may be NULL (use the defaults) or
-   an array of at least the schema's count. SOL_FALSE = unknown ref; the
-   caller keeps the object as an empty (placed data is never destroyed). */
-sol_bool mesh_ref_build(const char *ref, const float *params, MeshBuilder *b);
+/* Build the named geometry into b. params[0..count) is a PREFIX of the
+   schema's parameters; the tail fills from the defaults (so files written
+   before a schema grew keep working — pass NULL/0 for all-defaults).
+   SOL_FALSE = unknown ref; the caller keeps the object as an empty (placed
+   data is never destroyed). */
+sol_bool mesh_ref_build(const char *ref, const float *params, int count, MeshBuilder *b);
 
 /* upload a finished builder to GPU buffers (computes tangents first, then
    uploads via the RHI, never GL). Mutates b (writes the tangents); b is freed
