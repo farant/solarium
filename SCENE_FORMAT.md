@@ -96,19 +96,53 @@ Consequences:
 
 ```
 <scene version="1">
-  <object nid="..." parent="..." labels="ns::tag ...">
+  <object nid="..." parent="..." kind="file">
     <pos x="" y="" z="" />
     <rot x="" y="" z="" w="" />          quaternion
     <scale x="" y="" z="" />
-    <mesh ref="..." />                    geometry by reference (regenerated)
-    <material ref="..." />                placeholder until item 5/8
+    <mesh ref="room" w="12" d="10" h="3.5" />   geometry by reference + params
+    <mat r="" g="" b="" metal="" rough="" />    scalar PBR factors (P3 6e)
     <meta key="..." (>free text value     repeatable; string -> string
     <rel type="..." target="nid" />       repeatable; typed edge to another object
-    <content path="..." />                attached doc/note (item 5+); optional
+    <content path="..." />                FILE/ALIAS: the real path; else doc/note
   </object>
   ...
 </scene>
 ```
+
+**`kind`** (P3 item 6) — the object's semantic type: `file`, `folder`, `alias`,
+`note`, `tombstone`. Absent = a plain prop (old files unchanged); unknown
+values degrade to plain. `content` carries the real path for
+file/folder/alias.
+
+**Parametric mesh refs** (P3 item 5) — the ref's parameters are named
+attributes; the names and defaults come from the mesh registry's SCHEMA
+(mesh.c), so the writer, loader, and resolver read one table. Absent params
+take defaults (a schema can GROW without breaking old files); the loader
+stores only the file's own attribute prefix, keeping re-saves byte-identical.
+Current vocabulary: `box`, `grid`, `page` (no params), `room` (w,d,h + wall/
+ceiling presence flags wn,we,ws,ww,ceil), `wall` (w,h,ox,ow,oh,t), `path`
+(len,w,t), `card` (w,h,t).
+
+**`<mat>`** (P3 6e) — scalar factors only, written when they differ from the
+default; texture handles are runtime (glb parts re-derive theirs on
+re-import, the page image rebinds by name at load).
+
+**Derived objects are never written** (P3 6e): a glb import's part children
+(meta `derived=1`) regenerate from the anchor's `glb` meta on every load —
+the file stores arrangement and references, never geometry, including
+imports.
+
+**Meta vocabulary in use** (all optional, all plain string->string):
+- `name` — display label (the selection pin; the prop-binding key)
+- `room_type` (`room` | `mirror` | `workspace`) + `source_path` — room
+  anchors (§1.10); a mirror reconciles membership against its directory
+- `ambient` — the room's interior light scale (overrides the seal-derived
+  default)
+- `unplaced` (`1`/`0`) — tray state: set on arrival, cleared by the first drag
+- `stale` (`1`/`0`) — an alias whose target path vanished (flagged, never
+  removed)
+- `glb` — an import anchor's source file; `derived` — its regenerated parts
 
 - **`<scene version>`** — format version, for future migration.
 - **`<object>`** — `nid` (required, persistent ID), `parent` (a `nid`; absent or
@@ -118,8 +152,8 @@ Consequences:
   Composed at render time as `M = T · R · S`. Stored as TRS (not a baked matrix)
   so authoring tools can edit components and item 8 can build a correct normal
   matrix from real scale.
-- **`<mesh>` / `<material>`** — references by name; geometry/material is
-  reconstructed, never serialized.
+- **`<mesh>`** — geometry by reference + schema-named parameters; always
+  reconstructed, never serialized. **`<mat>`** — scalar factors only.
 - **Overbuilt slots** (`<meta>`, `<rel>`, `<content>`) — present in the model and
   serialized though mostly empty this phase; they cannot be retrofitted onto a
   render-only scene (TODO2.md §1.4/§1.5).
