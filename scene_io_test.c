@@ -278,7 +278,30 @@ int main(void) {
                 return 1;
             }
             mb_free(&mb);
-            printf("room + wall + path emitters (flags, degenerate skip): ok\n");
+            /* item 8: the board is a closed 6-face slab, and the by-name
+               param reader follows the same prefix+defaults merge as _build */
+            mb_init(&mb);
+            if (!mesh_ref_build("board", (const float *)0, 0, &mb) ||
+                mb.vertex_count != 24 || mb.index_count != 36) {
+                printf("FAIL: board should be 6 faces (24v/36i), got %uv/%ui\n",
+                       (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            {
+                float bp[1];
+                bp[0] = 2.5f;
+                if (mesh_ref_param("board", (const float *)0, 0, "w") != 1.8f ||
+                    mesh_ref_param("board", bp, 1, "w") != 2.5f ||
+                    mesh_ref_param("board", bp, 1, "h") != 1.2f ||
+                    mesh_ref_param("board", bp, 1, "nope") != 0.0f) {
+                    printf("FAIL: mesh_ref_param prefix/default/unknown rules\n");
+                    scene_free(&b); scene_free(&scene);
+                    return 1;
+                }
+            }
+            printf("room + wall + path + board emitters (flags, degenerate skip, params): ok\n");
         }
 
         /* identity + hierarchy survived: B's box (found by A's nid) must have a

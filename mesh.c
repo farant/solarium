@@ -337,6 +337,7 @@ static void emit_room(MeshBuilder *b, const float *p) {
 static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
 static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1], p[2]); }
 static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
+static void emit_board(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -349,7 +350,11 @@ static const MeshRefEntry REGISTRY[] = {
     { "wall", 6, { "w", "h", "ox", "ow", "oh", "t" },
                  { 4.0f, 3.0f, 1.5f, 1.0f, 2.2f, 0.15f }, emit_wall },
     { "path", 3, { "len", "w", "t" }, { 6.0f, 1.5f, 0.15f }, emit_path },
-    { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card }
+    { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
+    /* board: a card grown to furniture scale (item 8) — same slab geometry,
+       bottom-origin, front face toward local +Z. Its OWN ref name is its
+       identity: the drag code recognizes a pinboard by mesh_ref "board". */
+    { "board", 3, { "w", "h", "t" }, { 1.8f, 1.2f, 0.05f }, emit_board }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 
@@ -367,6 +372,22 @@ int mesh_ref_schema(const char *ref, const char *const **names, const float **de
     if (names)    *names    = e->param_names;
     if (defaults) *defaults = e->defaults;
     return e->param_count;
+}
+
+/* Effective value of ONE schema parameter by name: the object's own saved
+   prefix if it reaches that far, else the registry default — the same merge
+   rule as mesh_ref_build, for callers that need a dimension without emitting
+   (item 8: the drag code reads a board's w/h to rect-test the cursor hit).
+   Unknown ref or name returns 0 — a visibly degenerate dimension. */
+float mesh_ref_param(const char *ref, const float *params, int count, const char *name) {
+    const MeshRefEntry *e = registry_find(ref);
+    int                 k;
+    if (!e) return 0.0f;
+    for (k = 0; k < e->param_count; k++) {
+        if (strcmp(e->param_names[k], name) == 0)
+            return (params && k < count) ? params[k] : e->defaults[k];
+    }
+    return 0.0f;
 }
 
 sol_bool mesh_ref_build(const char *ref, const float *params, int count, MeshBuilder *b) {

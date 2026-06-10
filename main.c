@@ -560,6 +560,15 @@ typedef struct {
     vec3        drag_offset;       /* grab offset: pos - first plane hit */
     vec3        drag_start_pos;    /* pos at press (did it really move?) */
     sol_bool    drag_moved;        /* orbit: the slop latch; both: gates the save */
+    /* whiteboard carry (P3 item 8): a card can hop onto/off a board mid-drag */
+    sol_u32     drag_prev_parent;  /* pre-drag placement, restored if the drop */
+    vec3        drag_prev_pos;     /*   is refused (a FILE card snaps home and */
+    quat        drag_prev_rot;     /*   pins an ALIAS instead)                 */
+    sol_u32     drag_ground_parent;/* parent while off-board (never a board)   */
+    sol_u32     drag_board;        /* board hosting the carry; 0 = ground mode */
+    float       drag_board_ox;     /* grab offset in board-local XY            */
+    float       drag_board_oy;
+    sol_bool    b_was_down;        /* edge-detect spawn-board (B) */
 } AppState;
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
@@ -844,14 +853,72 @@ static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
 }
 
 /* Drag-to-place (item 4). The cursor is a RAY — one constraint short of a
-   position — so dragging pins the object to the ray's hit on a horizontal
-   plane at its own height (slide across the floor, height preserved). */
+   position — so dragging pins the object to the ray's hit on a plane. The
+   plane is CONTEXT (item 8): the FLOOR plane on the ground (y=0 — never a
+   plane at the object's own height: through an object at eye level such a
+   plane is nearly edge-on to the gaze, and a near-parallel ray sweeps huge
+   distances for tiny mouse moves), or a board's face when the cursor is
+   over one. The grab offset carries the object's height, so a floor-plane
+   drag still slides things horizontally with height preserved. */
 #define DRAG_MAX_DIST 60.0f     /* a grazing ray races to the horizon; clamp */
 
+/* Is this object a pinboard? Identity = its registry ref name. */
+static sol_bool object_is_board(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    return (o && o->mesh_ref && strcmp(o->mesh_ref, "board") == 0)
+               ? SOL_TRUE : SOL_FALSE;
+}
+
+/* The board under the cursor: the nearest FRONT-face plane hit landing within
+   the board rectangle. Back/edge-on approaches are skipped — pinning through
+   the back would bury the card inside the slab. *out_local = the hit in
+   board-local space (bottom-origin: x in [-w/2, w/2], y in [0, h]). */
+static sol_u32 board_under_ray(AppState *st, Ray r, vec3 *out_local) {
+    sol_u32 i, best = 0;
+    float   best_t = DRAG_MAX_DIST;
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        float bw, bh, bt, t;
+        vec3  n, face, local;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) continue;
+        bw   = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w");
+        bh   = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h");
+        bt   = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "t");
+        n    = quat_rotate(scene_world_rotation(&st->scene, o->handle),
+                           vec3_make(0.0f, 0.0f, 1.0f));
+        face = mat4_mul_point(scene_world_matrix(&st->scene, o),
+                              vec3_make(0.0f, 0.0f, bt * 0.5f));
+        if (vec3_dot(r.dir, n) >= 0.0f) continue;          /* back or edge-on */
+        if (!ray_vs_plane(r, face, n, &t) || t >= best_t) continue;
+        local = scene_world_to_local(&st->scene, o->handle,
+                                     vec3_add(r.origin, vec3_scale(r.dir, t)));
+        if (local.x < -bw * 0.5f || local.x > bw * 0.5f) continue;
+        if (local.y < 0.0f || local.y > bh) continue;
+        best   = o->handle;
+        best_t = t;
+        if (out_local) *out_local = local;
+    }
+    return best;
+}
+
+/* A pinned card's board-local position: the cursor hit plus the grab offset
+   in the board plane, Z pinned so the card's back just clears the face. */
+#define BOARD_PIN_EPS 0.003f
+static vec3 board_pin_pos(Scene *s, sol_u32 board, sol_u32 card, vec3 local,
+                          float ox, float oy) {
+    SceneObject *bo   = scene_get(s, board);
+    SceneObject *co   = scene_get(s, card);
+    const char  *cref = (co && co->mesh_ref) ? co->mesh_ref : "card";
+    float bt = bo ? mesh_ref_param("board", bo->mesh_params, bo->mesh_param_count, "t") : 0.05f;
+    float ct = co ? mesh_ref_param(cref, co->mesh_params, co->mesh_param_count, "t") : 0.03f;
+    return vec3_make(local.x + ox, local.y + oy, bt * 0.5f + ct * 0.5f + BOARD_PIN_EPS);
+}
+
 /* Begin carrying: the GROUP ROOT moves (dragging a part would tear it off
-   its import), and only root-level objects — a child's pos is parent-LOCAL,
-   and the world->local conversion (inverse parent matrix) is a noted
-   boundary, not built speculatively. The grab offset keeps the object under
+   its import), and only root-level objects for PLAIN props. Cards move
+   individually wherever they sit — the rotated-parent boundary item 4 noted
+   is built now (scene_world_to_local), so a card on a vertical board begins
+   its drag in the board's own plane. The grab offset keeps the object under
    the grip point instead of snapping its origin to the cursor. */
 static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
     SceneObject *ho = scene_get(&st->scene, hit);
@@ -864,22 +931,53 @@ static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
     if (!ho) return;
     if (ho->kind != KIND_PLAIN) {
         target = hit;       /* cards (item 6) move INDIVIDUALLY, though parented
-                               to their room — drag math runs in world space and
-                               writes back local (assumes unrotated, unscaled
-                               parents: true of every room anchor) */
+                               to a room or a board */
     } else {
         target = group_root(&st->scene, hit);    /* props move as their group */
         if (target == st->floor_handle) return;  /* the floor is the room, not a card */
         if (scene_meta_get(&st->scene, target, "room_type")) return;   /* architecture */
         o = scene_get(&st->scene, target);
-        if (!o || o->parent != 0) return;        /* child props: world->local boundary */
+        if (!o || o->parent != 0) return;        /* child PROPS stay grouped */
     }
     o = scene_get(&st->scene, target);
     if (!o) return;
-    wpos = object_world_pos(&st->scene, target);
+
+    /* remember the pre-drag placement: a refused drop restores it (a FILE
+       card snaps home when its drop pins an alias), and pulling a card off
+       a board needs the board's OWN parent as the landing frame */
+    st->drag_prev_parent   = o->parent;
+    st->drag_prev_pos      = o->pos;
+    st->drag_prev_rot      = o->rot;
+    st->drag_ground_parent = o->parent;
+    st->drag_board         = 0;
+    st->drag_board_ox      = 0.0f;
+    st->drag_board_oy      = 0.0f;
+    if (object_is_board(&st->scene, o->parent)) {
+        SceneObject *bo = scene_get(&st->scene, o->parent);
+        st->drag_ground_parent = bo ? bo->parent : 0;
+    }
+
     r = pick_ray(st, w);
-    if (!ray_vs_plane(r, wpos, vec3_make(0.0f, 1.0f, 0.0f), &t) || t > DRAG_MAX_DIST)
-        return;
+    if (object_is_board(&st->scene, o->parent)) {
+        /* begin in board mode: the constraint plane is the board's face */
+        vec3 local;
+        if (board_under_ray(st, r, &local) == o->parent) {
+            st->drag_board     = o->parent;
+            st->drag_board_ox  = o->pos.x - local.x;
+            st->drag_board_oy  = o->pos.y - local.y;
+            st->drag_handle    = target;
+            st->drag_offset    = vec3_make(0.0f, 0.0f, 0.0f);
+            st->drag_start_pos = object_world_pos(&st->scene, target);
+            st->drag_moved     = SOL_FALSE;
+            return;
+        }
+        /* edge grab beside the face: fall through to the ground plane */
+    }
+    wpos = object_world_pos(&st->scene, target);
+    if (!ray_vs_plane(r, vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 1.0f, 0.0f), &t) ||
+        t > DRAG_MAX_DIST)
+        return;                                  /* no floor under the cursor: look
+                                                    down a little to start a drag */
     st->drag_handle    = target;
     st->drag_offset    = vec3_sub(wpos, vec3_add(r.origin, vec3_scale(r.dir, t)));
     st->drag_start_pos = wpos;                   /* world, throughout */
@@ -1003,20 +1101,58 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             if (fp || st->drag_moved) {
                 SceneObject *o = scene_get(&st->scene, st->drag_handle);
                 if (o) {
-                    vec3 parent_org = o->parent
-                        ? object_world_pos(&st->scene, o->parent)
-                        : vec3_make(0.0f, 0.0f, 0.0f);
-                    vec3 wpos = vec3_add(parent_org, o->pos);   /* unrotated parents */
-                    Ray   r = pick_ray(st, w);
-                    float t;
-                    if (ray_vs_plane(r, wpos, vec3_make(0.0f, 1.0f, 0.0f), &t) &&
-                        t <= DRAG_MAX_DIST) {
-                        vec3 new_world = vec3_add(vec3_add(r.origin, vec3_scale(r.dir, t)),
-                                                  st->drag_offset);
-                        o->pos = vec3_sub(new_world, parent_org);
-                        if (fp && !st->drag_moved) {
-                            vec3 d = vec3_sub(new_world, st->drag_start_pos);
-                            if (vec3_dot(d, d) > 1e-6f) st->drag_moved = SOL_TRUE;
+                    Ray     r     = pick_ray(st, w);
+                    sol_u32 board = 0;
+                    vec3    blocal;
+                    blocal = vec3_make(0.0f, 0.0f, 0.0f);
+                    /* only freely-owned cards seek boards: a FILE/FOLDER card
+                       is the mirror's record and stays in its room (§1.3) —
+                       its drop pins an ALIAS instead (see release below) */
+                    if (o->kind == KIND_ALIAS || o->kind == KIND_NOTE)
+                        board = board_under_ray(st, r, &blocal);
+                    if (board != 0) {                  /* ---- board mode ---- */
+                        if (st->drag_board != board) { /* entering / switching */
+                            st->drag_board    = board;
+                            st->drag_board_ox = 0.0f;  /* mid-drag entry: center
+                                                          the card on the cursor */
+                            st->drag_board_oy = -0.5f * mesh_ref_param(
+                                o->mesh_ref ? o->mesh_ref : "card",
+                                o->mesh_params, o->mesh_param_count, "h");
+                            o->rot = quat_identity();  /* flat against the face */
+                        }
+                        o->parent = board;
+                        o->pos = board_pin_pos(&st->scene, board, st->drag_handle,
+                                               blocal, st->drag_board_ox,
+                                               st->drag_board_oy);
+                        st->drag_moved = SOL_TRUE;     /* a reparent is a real move */
+                    } else {                           /* ---- ground mode ---- */
+                        float t;
+                        if (st->drag_board != 0) {     /* leaving a board: step off;
+                                                          the floor write-back below
+                                                          lands it under the cursor
+                                                          (zero offset -> on the
+                                                          floor, not floating at
+                                                          board height) */
+                            vec3 woff = object_world_pos(&st->scene, st->drag_handle);
+                            st->drag_board  = 0;
+                            o->parent       = st->drag_ground_parent;
+                            o->rot          = st->drag_prev_rot;
+                            o->pos          = scene_world_to_local(&st->scene,
+                                                                   o->parent, woff);
+                            st->drag_offset = vec3_make(0.0f, 0.0f, 0.0f);
+                        }
+                        if (ray_vs_plane(r, vec3_make(0.0f, 0.0f, 0.0f),
+                                         vec3_make(0.0f, 1.0f, 0.0f), &t) &&
+                            t <= DRAG_MAX_DIST) {
+                            vec3 new_world = vec3_add(vec3_add(r.origin, vec3_scale(r.dir, t)),
+                                                      st->drag_offset);
+                            /* chain-aware write-back: correct under ROTATED
+                               parents too (the item-4 boundary, built) */
+                            o->pos = scene_world_to_local(&st->scene, o->parent, new_world);
+                            if (fp && !st->drag_moved) {
+                                vec3 d = vec3_sub(new_world, st->drag_start_pos);
+                                if (vec3_dot(d, d) > 1e-6f) st->drag_moved = SOL_TRUE;
+                            }
                         }
                     }
                 }
@@ -1032,6 +1168,46 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     if (u && strcmp(u, "1") == 0) {
                         scene_meta_set(&st->scene, st->drag_handle, "unplaced", "0");
                         apply_kind_materials(&st->scene);   /* its tray glow goes out */
+                    }
+                }
+                if (o && (o->kind == KIND_FILE || o->kind == KIND_FOLDER) && o->content) {
+                    /* a mirror's record never leaves its room (§1.3: membership
+                       follows disk) — dropping it on a board snaps the record
+                       home and pins an ALIAS at the drop point instead */
+                    vec3    blocal;
+                    sol_u32 board = board_under_ray(st, pick_ray(st, w), &blocal);
+                    if (board != 0) {
+                        const char *cpath = o->content;     /* heap string: the
+                                                               pointer survives
+                                                               the scene_add */
+                        char        lbuf[16];
+                        const char *nm = object_label(&st->scene, st->drag_handle, lbuf);
+                        Mesh        empty;
+                        vec3        one = vec3_make(1.0f, 1.0f, 1.0f);
+                        float       ch  = mesh_ref_param("card", (const float *)0, 0, "h");
+                        sol_u32     a;
+                        o->parent = st->drag_prev_parent;   /* snap home */
+                        o->pos    = st->drag_prev_pos;
+                        o->rot    = st->drag_prev_rot;
+                        memset(&empty, 0, sizeof empty);
+                        a = scene_add(&st->scene, board, empty,
+                                      vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+                        scene_kind_set(&st->scene, a, KIND_ALIAS);
+                        scene_content_set(&st->scene, a, cpath);
+                        scene_meta_set(&st->scene, a, "name", nm);
+                        scene_mesh_ref_set(&st->scene, a, "card");
+                        {
+                            SceneObject *ao = scene_get(&st->scene, a);
+                            if (ao) ao->pos = board_pin_pos(&st->scene, board, a,
+                                                            blocal, 0.0f, -0.5f * ch);
+                        }
+                        scene_resolve_meshes(&st->scene);
+                        apply_kind_materials(&st->scene);
+                        st->selected_handle = a;
+                        printf("pinned alias '%s' to the board — the record stays home\n", nm);
+                        o = scene_get(&st->scene, st->drag_handle);  /* re-fetch:
+                                                               scene_add may move
+                                                               the objects array */
                     }
                 }
                 if (scene_save(&st->scene, "scene.stml"))
@@ -1139,6 +1315,36 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
         }
         st->g_was_down = g_now;
+    }
+
+    /* B spawns a whiteboard facing you (item 8): plain furniture that
+       persists like everything else; drag ALIAS/NOTE cards onto its face. */
+    {
+        sol_bool b_now = glfwGetKey(w, GLFW_KEY_B) == GLFW_PRESS;
+        if (b_now && !st->b_was_down) {
+            Mesh    empty;
+            vec3    f = camera_forward(&st->camera);
+            vec3    pos, one;
+            float   yaw;
+            sol_u32 h;
+            f.y = 0.0f;
+            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+            f   = vec3_normalize(f);
+            pos = vec3_add(st->camera.pos, vec3_scale(f, 2.2f));
+            pos.y = 0.9f;                  /* bottom-origin: face center ~1.5 */
+            yaw = atan2f(-f.x, -f.z);      /* board +Z looks back at you */
+            one = vec3_make(1.0f, 1.0f, 1.0f);
+            memset(&empty, 0, sizeof empty);
+            h = scene_add(&st->scene, 0, empty, pos,
+                          quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw), one);
+            scene_mesh_ref_set(&st->scene, h, "board");
+            scene_meta_set(&st->scene, h, "name", "board");
+            scene_resolve_meshes(&st->scene);
+            st->selected_handle = h;
+            scene_save(&st->scene, "scene.stml");
+            printf("board #%u spawned — drag cards onto it\n", (unsigned)h);
+        }
+        st->b_was_down = b_now;
     }
 
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c

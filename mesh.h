@@ -79,6 +79,11 @@ int mesh_ref_schema(const char *ref, const char *const **names, const float **de
    data is never destroyed). */
 sol_bool mesh_ref_build(const char *ref, const float *params, int count, MeshBuilder *b);
 
+/* One effective parameter by name, same prefix+defaults merge as _build —
+   for reading a dimension without emitting (a board's w/h for the drag
+   rect-test). Unknown ref/name -> 0. */
+float mesh_ref_param(const char *ref, const float *params, int count, const char *name);
+
 /* upload a finished builder to GPU buffers (computes tangents first, then
    uploads via the RHI, never GL). Mutates b (writes the tangents); b is freed
    after. Lives in mesh_gpu.c so everything above stays pure CPU — emitters
