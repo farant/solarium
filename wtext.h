@@ -27,4 +27,20 @@ void wtext_block(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
                  float x, float top_y, float px_to_m, float wrap_w_m,
                  float r, float g, float b);
 
+/* The BENT block (item 9: text riding the turning leaf). The bend maps a
+   text-plane x to a point on a curve in the model's XZ section — (bx, bz)
+   with unit tangent (tx, tz) — bending the plane around axes parallel to
+   text-Y (columns stay straight). Each glyph quad's left and right edges
+   are evaluated on the curve, so glyphs are piecewise-flat chords: small
+   relative to any sane curl radius, and the SDF threshold keeps them
+   crisp through the whole motion. `lift` displaces along the curve's 2D
+   normal (-tz, tx): the side of the surface the text sits on. No wrap —
+   bent text is pre-paginated. */
+typedef void (*WtextBend)(float x, void *user, float *bx, float *bz,
+                          float *tx, float *tz);
+void wtext_block_bent(const Font *f, mat4 viewproj, mat4 model,
+                      const char *utf8, float x, float top_y, float px_to_m,
+                      WtextBend bend, void *user, float lift,
+                      float r, float g, float b);
+
 #endif /* WTEXT_H */

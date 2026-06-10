@@ -489,6 +489,15 @@ static const char *BRDF_LUT_FRAGMENT_SRC =
 
 #define EDIT_BUF_CAP 2048   /* a note's text, while it is being typed */
 
+/* The turning leaf's 2D section (item 9): one struct both the leaf MESH
+   and the leaf TEXT evaluate, so paper and ink bend identically. */
+typedef struct {
+    float alpha, kappa;     /* hinge angle + curl */
+    float wA, wR, wL;       /* arc / right-rest / left-rest blend weights */
+    float pinch, rise, xf;  /* the resting fan profile */
+    float wb;
+} LeafShape;
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
@@ -611,6 +620,15 @@ typedef struct {
     const Font *reader_font;       /* mono for code, sans for prose */
     float       reader_px2m;       /* body text scale, meters per font px */
     sol_bool    arrow_l_was, arrow_r_was;     /* page-turn edges */
+    /* the turning leaf (piece 5): an inextensible paper arc swept by the
+       hinge angle, bowing opposite the travel (the lag) — strongest
+       mid-flight, flat at both ends. Blank parchment; the spread's text
+       swaps under it at the midpoint, when the leaf stands edge-on. */
+    int         reader_turning;    /* 0 idle, +1 forward, -1 back */
+    float       reader_turn_t;
+    int         reader_turn_old;   /* the spread we are turning AWAY from */
+    Mesh        reader_leaf;       /* rebuilt per frame (curl = vertex map) */
+    LeafShape   reader_leaf_shape; /* this frame's section: mesh + ink share it */
 } AppState;
 
 #define READER_IDLE      0
@@ -618,6 +636,8 @@ typedef struct {
 #define READER_OPEN      2
 #define READER_RETURNING 3
 #define READER_RISE_SECS 0.45f
+#define READER_TURN_SECS 0.50f
+#define READER_LAG_MAX   0.85f    /* tip lag, radians, at mid-turn */
 #define READER_FILE_CAP  (256L * 1024L)
 
 /* Union AABB over all of a model's meshes (local space) — for auto-fitting an
@@ -1263,7 +1283,7 @@ static void reader_load_content(AppState *st, const char *path) {
     xf = wb * BOOK_GUTTER_FRAC;
     field_w = wb - xf - 2.0f * mg;
     field_h = 2.0f * zh - 2.0f * mg;
-    st->reader_px2m = (bp[1] * 0.026f) / font_line_height(st->reader_font);
+    st->reader_px2m = (bp[1] * 0.022f) / font_line_height(st->reader_font);
     st->reader_lines_per_page = (int)(field_h /
         (font_line_height(st->reader_font) * st->reader_px2m));
     if (st->reader_lines_per_page < 1) st->reader_lines_per_page = 1;
@@ -1395,6 +1415,8 @@ static void reader_open(AppState *st, sol_u32 handle) {
            object_label(s, root, lbuf));
 }
 
+static void reader_build_leaf(AppState *st, float alpha, float lag);  /* below */
+
 /* Send the book home — from wherever it is, even mid-rise. */
 static void reader_close(AppState *st) {
     if (st->reader_state == READER_IDLE || st->reader_state == READER_RETURNING)
@@ -1405,12 +1427,29 @@ static void reader_close(AppState *st) {
     st->reader_b_rot = st->reader_rest_rot;
     st->reader_t     = 0.0f;
     st->reader_state = READER_RETURNING;
+    st->reader_turning = 0;                    /* a turn dies with the close */
+    mesh_destroy(&st->reader_leaf);
 }
 
 /* Per-frame: ease along the current arc (position lerp, rotation slerp,
-   both under one smoothstep so they arrive together). */
+   both under one smoothstep so they arrive together), and sweep the
+   turning leaf while the book is open. */
 static void reader_update(AppState *st, float dt) {
     float s;
+    if (st->reader_state == READER_OPEN && st->reader_turning != 0) {
+        st->reader_turn_t += dt / READER_TURN_SECS;
+        if (st->reader_turn_t >= 1.0f) {
+            st->reader_turning = 0;
+            mesh_destroy(&st->reader_leaf);
+        } else {
+            float e     = sol_smoothstep(st->reader_turn_t);
+            float alpha = (st->reader_turning > 0) ? SOL_PI * e
+                                                   : SOL_PI * (1.0f - e);
+            float lag   = READER_LAG_MAX * sinf(SOL_PI * e)
+                        * (float)st->reader_turning;
+            reader_build_leaf(st, alpha, lag);
+        }
+    }
     if (st->reader_state == READER_IDLE || st->reader_state == READER_OPEN)
         return;
     st->reader_t += dt / READER_RISE_SECS;
@@ -1423,13 +1462,136 @@ static void reader_update(AppState *st, float dt) {
         if (st->reader_state == READER_RISING) {
             st->reader_state = READER_OPEN;
         } else {                                   /* landed: the rig dies */
-            st->reader_state  = READER_IDLE;
-            st->reader_source = 0;
+            st->reader_state   = READER_IDLE;
+            st->reader_source  = 0;
+            st->reader_turning = 0;
             mesh_destroy(&st->reader_cover);
             mesh_destroy(&st->reader_block);
+            mesh_destroy(&st->reader_leaf);
             reader_free_text(st);
         }
     }
+}
+
+/* The turning leaf at hinge angle `alpha` with tip-lag `lag` (radians;
+   sign = travel direction). Paper is INEXTENSIBLE, so the flying shape is
+   a constant-curvature arc preserving arclength: the tangent angle
+   marches psi(s) = alpha - kappa*s from the spine outward, position is
+   its integral — at kappa -> 0 it collapses to the rigid hinge. The leaf
+   is SEWN at the gutter pinch, and near either end of the sweep its shape
+   BLENDS into the resting page-fan profile (right page at alpha=0, the
+   mirrored left at alpha=pi), so it peels off and lands seamlessly
+   instead of popping in at field height (Fran's catch). Both faces are
+   emitted a paper-thickness apart. Book-local coordinates. */
+#define LEAF_SEG 16
+
+/* the leaf section at arclength s -> book-local (x, y): blended arc + rest */
+static void leaf_eval(const LeafShape *L, float s, float *ou, float *ov) {
+    float ua, va, vr;
+    if (L->kappa > -1e-4f && L->kappa < 1e-4f) {     /* rigid hinge limit */
+        ua = s * cosf(L->alpha);
+        va = s * sinf(L->alpha);
+    } else {
+        ua = (sinf(L->alpha) - sinf(L->alpha - L->kappa * s)) / L->kappa;
+        va = (cosf(L->alpha - L->kappa * s) - cosf(L->alpha)) / L->kappa;
+    }
+    vr  = L->rise * sol_smoothstep(s / L->xf);       /* the resting profile */
+    *ou = L->wA * ua + (L->wR - L->wL) * s;
+    *ov = L->pinch + L->wA * va + (L->wR + L->wL) * vr;
+}
+
+/* WtextBend over the leaf: positive text-x rides the recto (right-page
+   layout); NEGATIVE x mirrors through the spine for the verso (left-page
+   layout) — and the mirrored parameterization flips the tangent, which
+   flips the normal, which puts the lift on the verso's own side. Output
+   frame: the hinge page matrix's (x, z) = book x, height above pinch. */
+static void leaf_bend(float x, void *user, float *bx, float *bz,
+                      float *tx, float *tz) {
+    const LeafShape *L = (const LeafShape *)user;
+    float s = (x < 0.0f) ? -x : x;
+    float u0, v0, u1, v1, dx, dz, nl;
+    leaf_eval(L, s, &u0, &v0);
+    leaf_eval(L, s + 0.002f, &u1, &v1);
+    *bx = u0;
+    *bz = v0 - L->pinch;
+    dx = u1 - u0;
+    dz = v1 - v0;
+    if (x < 0.0f) { dx = -dx; dz = -dz; }
+    nl = sqrtf(dx * dx + dz * dz);
+    if (nl < 1e-9f) { *tx = 1.0f; *tz = 0.0f; return; }
+    *tx = dx / nl;
+    *tz = dz / nl;
+}
+
+static void reader_build_leaf(AppState *st, float alpha, float lag) {
+    const float *bp = st->reader_params;
+    LeafShape   *L  = &st->reader_leaf_shape;
+    float wb    = bp[0] - bp[4];
+    float zh    = bp[1] * 0.5f - bp[4];
+    float stack = (bp[2] - 2.0f * bp[3]) * 0.5f;
+    float blend;
+    float u[LEAF_SEG + 1], v[LEAF_SEG + 1];
+    int   i;
+    MeshBuilder mb;
+
+    if (stack < 0.004f) stack = 0.004f;
+    L->alpha = alpha;
+    L->kappa = lag / wb;
+    L->pinch = bp[3] + stack * 0.25f + 0.0012f;  /* the sewing line + a hair */
+    L->rise  = stack * 0.75f;                    /* pinch -> flat field */
+    L->xf    = wb * BOOK_GUTTER_FRAC;
+    L->wb    = wb;
+
+    blend = SOL_PI * 0.22f;                      /* the peel/land window */
+    L->wR = 1.0f - alpha / blend;
+    if (L->wR < 0.0f) L->wR = 0.0f;
+    L->wL = 1.0f - (SOL_PI - alpha) / blend;
+    if (L->wL < 0.0f) L->wL = 0.0f;
+    L->wA = 1.0f - L->wR - L->wL;
+
+    for (i = 0; i <= LEAF_SEG; i++) {
+        float q = (float)i / (float)LEAF_SEG;
+        float s = wb * (0.45f * q + 0.55f * q * q);   /* denser at the spine */
+        leaf_eval(L, s, &u[i], &v[i]);
+    }
+
+    mesh_destroy(&st->reader_leaf);
+    mb_init(&mb);
+    for (i = 0; i < LEAF_SEG; i++) {
+        float du = u[i + 1] - u[i], dv = v[i + 1] - v[i];
+        float nl = sqrtf(du * du + dv * dv);
+        float nx = (nl > 1e-9f) ? -dv / nl : 0.0f;   /* left of travel: the
+                                                        recto side at alpha=0 */
+        float ny = (nl > 1e-9f) ?  du / nl : 1.0f;
+        float off = 0.0005f;                         /* half paper thickness */
+        float u0  = (float)i / (float)LEAF_SEG;
+        float u1  = (float)(i + 1) / (float)LEAF_SEG;
+        sol_u32 a, b2, c, d;
+        /* recto */
+        a  = mb_push_vertex(&mb, u[i]   + nx * off, v[i]   + ny * off, -zh,
+                            nx, ny, 0.0f, u0, 0.0f);
+        b2 = mb_push_vertex(&mb, u[i]   + nx * off, v[i]   + ny * off,  zh,
+                            nx, ny, 0.0f, u0, 1.0f);
+        c  = mb_push_vertex(&mb, u[i+1] + nx * off, v[i+1] + ny * off,  zh,
+                            nx, ny, 0.0f, u1, 1.0f);
+        d  = mb_push_vertex(&mb, u[i+1] + nx * off, v[i+1] + ny * off, -zh,
+                            nx, ny, 0.0f, u1, 0.0f);
+        mb_push_triangle(&mb, a, b2, c);
+        mb_push_triangle(&mb, a, c, d);
+        /* verso */
+        a  = mb_push_vertex(&mb, u[i]   - nx * off, v[i]   - ny * off,  zh,
+                            -nx, -ny, 0.0f, u0, 1.0f);
+        b2 = mb_push_vertex(&mb, u[i]   - nx * off, v[i]   - ny * off, -zh,
+                            -nx, -ny, 0.0f, u0, 0.0f);
+        c  = mb_push_vertex(&mb, u[i+1] - nx * off, v[i+1] - ny * off, -zh,
+                            -nx, -ny, 0.0f, u1, 0.0f);
+        d  = mb_push_vertex(&mb, u[i+1] - nx * off, v[i+1] - ny * off,  zh,
+                            -nx, -ny, 0.0f, u1, 1.0f);
+        mb_push_triangle(&mb, a, b2, c);
+        mb_push_triangle(&mb, a, c, d);
+    }
+    st->reader_leaf = mesh_from_builder(&mb);
+    mb_free(&mb);
 }
 
 /* One page of the spread: lines [page*L, page*L+L), drawn by temporarily
@@ -1450,6 +1612,28 @@ static void reader_draw_page(AppState *st, mat4 vp, mat4 page_m, int page,
     st->reader_text[b2] = '\0';
     wtext_block(st->reader_font, vp, page_m, st->reader_text + a,
                 x_left, top_y, st->reader_px2m, 0.0f, 0.13f, 0.10f, 0.08f);
+    st->reader_text[b2] = saved;
+}
+
+/* the same page range, bent over the turning leaf (the ink rides the
+   paper: leaf_bend evaluates the SAME section the mesh was built from) */
+static void reader_draw_page_bent(AppState *st, mat4 vp, mat4 hinge_m,
+                                  int page, float x_left, float top_y,
+                                  float lift) {
+    int  L = st->reader_lines_per_page;
+    int  first = page * L, last, a, b2;
+    char saved;
+    if (!st->reader_text || first >= st->reader_line_count) return;
+    last = first + L;
+    if (last > st->reader_line_count) last = st->reader_line_count;
+    a  = st->reader_line_off[first];
+    b2 = st->reader_line_off[last] - 1;
+    saved = st->reader_text[b2];
+    st->reader_text[b2] = '\0';
+    wtext_block_bent(st->reader_font, vp, hinge_m, st->reader_text + a,
+                     x_left, top_y, st->reader_px2m,
+                     leaf_bend, &st->reader_leaf_shape, lift,
+                     0.13f, 0.10f, 0.08f);
     st->reader_text[b2] = saved;
 }
 
@@ -1502,10 +1686,20 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         int L       = st->reader_lines_per_page;
         int pages   = (st->reader_line_count + L - 1) / L;
         int spreads = (pages + 1) / 2;
-        if (rnow && !st->arrow_r_was && st->reader_spread + 1 < spreads)
-            st->reader_spread++;
-        if (lnow && !st->arrow_l_was && st->reader_spread > 0)
-            st->reader_spread--;
+        if (st->reader_turning == 0) {          /* one leaf in flight at a time */
+            if (rnow && !st->arrow_r_was && st->reader_spread + 1 < spreads) {
+                st->reader_turn_old = st->reader_spread;
+                st->reader_spread++;            /* commit; the leaf covers it */
+                st->reader_turning  = 1;
+                st->reader_turn_t   = 0.0f;
+            }
+            if (lnow && !st->arrow_l_was && st->reader_spread > 0) {
+                st->reader_turn_old = st->reader_spread;
+                st->reader_spread--;
+                st->reader_turning  = -1;
+                st->reader_turn_t   = 0.0f;
+            }
+        }
         st->arrow_l_was = lnow;
         st->arrow_r_was = rnow;
     } else {
@@ -3012,6 +3206,9 @@ static void render(AppState *state) {
         if (state->reader_block.index_count > 0)
             draw_mesh(state, state->reader_block, bm, view, proj, eye, 0.0f,
                       state->reader_block_mat);
+        if (state->reader_turning != 0 && state->reader_leaf.index_count > 0)
+            draw_mesh(state, state->reader_leaf, bm, view, proj, eye, 0.0f,
+                      state->reader_block_mat);
     }
 
     /* world text (item 8): card labels + note bodies, drawn as depth-tested
@@ -3046,9 +3243,51 @@ static void render(AppState *state) {
             if (state->reader_text) {
                 int L      = state->reader_lines_per_page;
                 int pages  = (state->reader_line_count + L - 1) / L;
-                int pl     = state->reader_spread * 2;
-                reader_draw_page(state, vp, page, pl,     -wb + mg, zh - mg);
-                reader_draw_page(state, vp, page, pl + 1,  xf + mg, zh - mg);
+                int pl       = state->reader_spread * 2;
+                int left_pg  = pl, right_pg = pl + 1;
+                sol_bool hug_r, hug_l;
+                /* while a leaf is in flight it CARRIES the moving text, so
+                   the static page it will land on keeps the OLD text for
+                   the whole turn — at landing the leaf's ink and the
+                   static page's ink coincide, and the handoff is seamless */
+                if (state->reader_turning > 0)
+                    left_pg = state->reader_turn_old * 2;
+                if (state->reader_turning < 0)
+                    right_pg = state->reader_turn_old * 2 + 1;
+                /* while the leaf still HUGS a page (the blend weights say
+                   so), that page's static text stays off entirely: the
+                   leaf's own ink is the page's text, mm-coincident static
+                   ink would z-flicker, and the next page's text should
+                   only appear under a leaf that is visibly airborne */
+                hug_r = state->reader_turning != 0 &&
+                        state->reader_leaf_shape.wR > 0.35f;
+                hug_l = state->reader_turning != 0 &&
+                        state->reader_leaf_shape.wL > 0.35f;
+                if (!hug_l)
+                    reader_draw_page(state, vp, page, left_pg,  -wb + mg, zh - mg);
+                if (!hug_r)
+                    reader_draw_page(state, vp, page, right_pg,  xf + mg, zh - mg);
+                if (state->reader_turning != 0) {
+                    /* the leaf's ink: recto = the right-page side, verso =
+                       the left-page side (negative layout x mirrors through
+                       the spine); the paper itself depth-occludes whichever
+                       side faces away — no facing logic anywhere */
+                    mat4 hinge = mat4_mul(bm, mat4_mul(
+                        mat4_translate(vec3_make(0.0f,
+                            state->reader_leaf_shape.pinch, 0.0f)),
+                        quat_to_mat4(quat_from_axis_angle(
+                            vec3_make(1.0f, 0.0f, 0.0f), sol_radians(-90.0f)))));
+                    int recto = (state->reader_turning > 0)
+                              ? state->reader_turn_old * 2 + 1
+                              : state->reader_spread * 2 + 1;
+                    int verso = (state->reader_turning > 0)
+                              ? state->reader_spread * 2
+                              : state->reader_turn_old * 2;
+                    reader_draw_page_bent(state, vp, hinge, recto,
+                                          xf + mg, zh - mg, 0.0012f);
+                    reader_draw_page_bent(state, vp, hinge, verso,
+                                          -wb + mg, zh - mg, 0.0009f);
+                }
                 {   /* the folio line, foot of the right page */
                     char  fbuf[48];
                     float flh = font_line_height(state->reader_font)
