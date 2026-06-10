@@ -80,6 +80,14 @@ int main(void) {
     /* kind (item 6): the box plays a FILE card for the round-trip */
     scene_kind_set(&scene, box_h, KIND_FILE);
 
+    /* material (6e): scalar PBR factors round-trip */
+    {
+        Material bm = material_default();
+        bm.base_color.x = 0.85f; bm.base_color.y = 0.45f; bm.base_color.z = 0.35f;
+        bm.roughness = 0.5f;
+        scene_material_set(&scene, box_h, bm);
+    }
+
     scene_meta_set(&scene, box_h, "title",  "Test Box");
     scene_meta_set(&scene, box_h, "author", "Solarium");
     scene_rel_add(&scene, box_h, "orbits", anchor_h);
@@ -198,6 +206,14 @@ int main(void) {
                 return 1;
             }
             printf("object kind round-trips (file kept, plain absent): ok\n");
+            if (bb->material.base_color.x != 0.85f ||
+                bb->material.base_color.z != 0.35f ||
+                bb->material.roughness    != 0.5f) {
+                printf("FAIL: material factors did not round-trip\n");
+                scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            printf("material factors (color + roughness) round-trip: ok\n");
         }
 
         /* the emitters themselves are headless now (mesh.c is pure CPU since

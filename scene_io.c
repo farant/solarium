@@ -107,6 +107,10 @@ sol_bool scene_save(Scene *s, const char *path) {
     for (i = 0; i < s->count; i++) {
         SceneObject *o    = &s->objects[i];
         const char  *pnid = "";                       /* root -> parent="" */
+        const char  *derived = scene_meta_get(s, o->handle, "derived");
+        if (derived && strcmp(derived, "1") == 0) continue;   /* glb parts (6e):
+                  regenerated from the anchor's ref on load, never persisted —
+                  the file stores arrangement and references, not geometry */
         if (o->parent != 0) {
             SceneObject *par = scene_get(s, o->parent);
             if (par && par->nid) pnid = par->nid;     /* reference BY nid, not handle */
@@ -141,6 +145,25 @@ sol_bool scene_save(Scene *s, const char *path) {
                     fprintf(f, " %s=\"%.9g\"", names[k], (double)o->mesh_params[k]);
             }
             fprintf(f, " />\n");
+        }
+
+        {   /* material (6e): the scalar PBR factors, written when they differ
+               from the default. Texture handles are runtime-only — glb parts
+               re-derive theirs on re-import; the page rebinds at load. */
+            Material d = material_default();
+            if (o->material.base_color.x != d.base_color.x ||
+                o->material.base_color.y != d.base_color.y ||
+                o->material.base_color.z != d.base_color.z ||
+                o->material.metallic  != d.metallic ||
+                o->material.roughness != d.roughness) {
+                fprintf(f, "    <mat r=\"%.9g\" g=\"%.9g\" b=\"%.9g\""
+                           " metal=\"%.9g\" rough=\"%.9g\" />\n",
+                        (double)o->material.base_color.x,
+                        (double)o->material.base_color.y,
+                        (double)o->material.base_color.z,
+                        (double)o->material.metallic,
+                        (double)o->material.roughness);
+            }
         }
 
         for (j = 0; j < o->meta_count; j++) {
@@ -313,6 +336,19 @@ sol_bool scene_load(Scene *s, const char *path) {
             StmlNode   *cn = stml_child(on, "content");
             const char *p  = cn ? stml_attr(cn, "path") : (const char *)0;
             if (p) scene_content_set(s, h, p);
+        }
+
+        {                                                          /* material (6e) */
+            StmlNode *mat = stml_child(on, "mat");
+            if (mat) {
+                Material mm  = material_default();
+                mm.base_color.x = attr_f(mat, "r", mm.base_color.x);
+                mm.base_color.y = attr_f(mat, "g", mm.base_color.y);
+                mm.base_color.z = attr_f(mat, "b", mm.base_color.z);
+                mm.metallic     = attr_f(mat, "metal", mm.metallic);
+                mm.roughness    = attr_f(mat, "rough", mm.roughness);
+                scene_material_set(s, h, mm);
+            }
         }
     }
 

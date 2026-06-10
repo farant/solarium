@@ -581,6 +581,24 @@ static Aabb union_bounds(const GlbModel *model) {
     return b;
 }
 
+/* Attach a loaded model's parts under `anchor` as DERIVED children: offset
+   by -center so the anchor pivots the model in place. Derived objects are
+   never serialized (6e) — the file stores the anchor + its glb ref, and
+   parts regenerate from the .glb on every load, exactly as procedural
+   meshes regenerate from their registry refs. */
+static void glb_attach_parts(AppState *state, sol_u32 anchor, const GlbModel *model) {
+    Aabb    b      = union_bounds(model);
+    vec3    center = vec3_scale(vec3_add(b.min, b.max), 0.5f);
+    sol_u32 m;
+    for (m = 0; m < model->count; m++) {
+        sol_u32 h = scene_add(&state->scene, anchor, model->parts[m].mesh,
+                              vec3_make(-center.x, -center.y, -center.z),
+                              quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_material_set(&state->scene, h, model->parts[m].material);
+        scene_meta_set(&state->scene, h, "derived", "1");
+    }
+}
+
 /* Load a glTF .glb, auto-fit it (longest side ~1.2 units), and stand it on the
    floor centered at (x,z). Node transforms are already baked by the loader.
    Returns the group anchor's handle (0 on failure) so the caller can re-pose it. */
@@ -589,7 +607,7 @@ static sol_u32 add_glb_to_scene(AppState *state, const char *path, float x, floa
     Aabb     b;
     vec3     center, ext;
     float    maxdim, scale;
-    sol_u32  m, anchor;
+    sol_u32  anchor;
     Mesh     empty = {0};
 
     if (!glb_load(path, &model)) { fprintf(stderr, "glb load failed: %s\n", path); return 0; }
@@ -606,20 +624,49 @@ static sol_u32 add_glb_to_scene(AppState *state, const char *path, float x, floa
 
     /* group the parts under one empty anchor placed at the model's CENTER (so the
        anchor's rotation pivots the model in place); the anchor's y lifts the model
-       so it sits on the floor at (x,z). Parts are children offset by -center, so
-       each part's WORLD matrix is unchanged from a corner-anchored layout. */
+       so it sits on the floor at (x,z). The anchor carries the glb ref (6e):
+       it is the durable identity; the parts are derived data. */
     anchor = scene_add(&state->scene, 0, empty,
                        vec3_make(x, scale * (center.y - b.min.y), z),
                        quat_identity(), vec3_make(scale, scale, scale));
-    for (m = 0; m < model.count; m++) {
-        sol_u32 h = scene_add(&state->scene, anchor, model.parts[m].mesh,
-                              vec3_make(-center.x, -center.y, -center.z),
-                              quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_material_set(&state->scene, h, model.parts[m].material);
-    }
+    glb_attach_parts(state, anchor, &model);
     scene_meta_set(&state->scene, anchor, "name", path);   /* the pin's tag (item 6) */
+    scene_meta_set(&state->scene, anchor, "glb", path);    /* geometry by reference (6e) */
     glb_free(&model);
     return anchor;
+}
+
+/* Re-import every glb anchor's parts after a load (6e): anchors persist —
+   position, name, relations, the identity — while parts regenerate from
+   the file. Skips anchors that already carry derived children. Handles are
+   collected first: attaching parts adds objects and can realloc the array. */
+static void scene_reimport_glbs(AppState *state) {
+    sol_u32 anchors[32];
+    sol_u32 i, j, n = 0;
+    for (i = 0; i < state->scene.count && n < 32; i++) {
+        const SceneObject *o = &state->scene.objects[i];
+        if (!scene_meta_get(&state->scene, o->handle, "glb")) continue;
+        for (j = 0; j < state->scene.count; j++) {        /* already has parts? */
+            const SceneObject *c = &state->scene.objects[j];
+            const char *d;
+            if (c->parent != o->handle) continue;
+            d = scene_meta_get(&state->scene, c->handle, "derived");
+            if (d && strcmp(d, "1") == 0) break;
+        }
+        if (j < state->scene.count) continue;
+        anchors[n++] = o->handle;
+    }
+    for (i = 0; i < n; i++) {
+        const char *path = scene_meta_get(&state->scene, anchors[i], "glb");
+        GlbModel    model;
+        if (!path || !glb_load(path, &model)) {
+            fprintf(stderr, "glb re-import failed: %s — anchor kept, body missing\n",
+                    path ? path : "(no path)");
+            continue;                       /* the placed anchor outlives its asset */
+        }
+        glb_attach_parts(state, anchors[i], &model);
+        glb_free(&model);
+    }
 }
 
 /* World-space position of an object (its world matrix's translation column),
@@ -852,6 +899,8 @@ static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
    triggered so it fires once per press. */
 static void scene_resolve_meshes(Scene *s);    /* defined with init_scene below */
 static void apply_kind_materials(Scene *s);    /* likewise */
+static int  rescan_mirrors(AppState *st);      /* likewise */
+static sol_bool load_palace(AppState *st);     /* likewise */
 
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
@@ -1050,42 +1099,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     {
         sol_bool r_now = glfwGetKey(w, GLFW_KEY_R) == GLFW_PRESS;
         if (r_now && !st->r_was_down) {
-            sol_u32 mirrors[16];
-            sol_u32 i, mc = 0, before;
-            int     total = 0;
-            for (i = 0; i < st->scene.count && mc < 16; i++) {   /* collect first:
-                       scanning ADDS objects, which can realloc the array */
-                const SceneObject *o  = &st->scene.objects[i];
-                const char        *rt = scene_meta_get(&st->scene, o->handle, "room_type");
-                const char        *sp = scene_meta_get(&st->scene, o->handle, "source_path");
-                if (rt && strcmp(rt, "mirror") == 0 && sp && sp[0] != '\0')
-                    mirrors[mc++] = o->handle;
-            }
-            before = st->scene.count;               /* arrivals append past here */
-            for (i = 0; i < mc; i++) {
-                const char *sp = scene_meta_get(&st->scene, mirrors[i], "source_path");
-                int n = sp ? room_mirror_scan(&st->scene, mirrors[i], sp) : -1;
-                if (n > 0) total += n;
-            }
-            total += workspace_validate_aliases(&st->scene);   /* stale flags (6d) */
-            if (total > 0) {
-                scene_resolve_meshes(&st->scene);
-                apply_kind_materials(&st->scene);
-                scene_save(&st->scene, "scene.stml");
-                /* point at the first arrival: selection gold + the pin's name
-                   tag beat scanning fifty identical cards for the new one */
-                for (i = before; i < st->scene.count; i++) {
-                    if (st->scene.objects[i].kind == KIND_FILE ||
-                        st->scene.objects[i].kind == KIND_FOLDER) {
-                        char        lbuf[16];
-                        st->selected_handle = st->scene.objects[i].handle;
-                        printf("arrived: %s\n",
-                               object_label(&st->scene, st->selected_handle, lbuf));
-                        break;
-                    }
-                }
-            }
-            printf("rescan: %d change(s) across %u mirror(s)\n", total, (unsigned)mc);
+            int total = rescan_mirrors(st);
+            if (total > 0) scene_save(&st->scene, "scene.stml");
+            printf("rescan: %d change(s)\n", total);
         }
         st->r_was_down = r_now;
     }
@@ -1143,26 +1159,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->bs_was_down = bs_now;
     }
 
-    /* L reloads scene.stml from disk (P3 item 1: the persistence proof, edge).
-       Procedural geometry reconstructs via the resolver; glb objects and
-       materials are not in the file yet (items 5/6), so they come back as
-       empties/defaults — the honest current boundary. The old scene's GPU
-       meshes are NOT destroyed: glb parts may share buffers (instanced
-       meshes), so per-object destroy could double-free a slot. A debug key
-       leaking boundedly is acceptable; the asset registry owns this later. */
+    /* L reverts to the palace on disk mid-session (since 6e the startup
+       loads it automatically; L remains the manual "reload my save" key).
+       Old GPU meshes are not destroyed (glb parts may share buffers) — a
+       bounded leak for a manual key; the asset registry owns this later. */
     l_now = glfwGetKey(w, GLFW_KEY_L) == GLFW_PRESS;
     if (l_now && !st->l_was_down) {
-        Scene fresh;
-        if (scene_load(&fresh, "scene.stml")) {
-            scene_resolve_meshes(&fresh);
-            apply_kind_materials(&fresh);
-            scene_free(&st->scene);
-            st->scene = fresh;
-            st->selected_handle = 0;       /* the old selection died with its scene */
+        if (load_palace(st))
             printf("reloaded scene.stml: %u objects\n", (unsigned)st->scene.count);
-        } else {
+        else
             fprintf(stderr, "scene.stml did not load — keeping the live scene\n");
-        }
     }
     st->l_was_down = l_now;
 
@@ -1357,146 +1363,122 @@ static void apply_kind_materials(Scene *s) {
     }
 }
 
-/* One-time setup: build the pipeline + meshes, populate the scene. */
-static int init_scene(AppState *state) {
-    RhiShader shader;
-    RhiPipelineDesc desc = {0};  /* {0} all descs: a future field defaults off, not garbage */
-    Mesh empty = {0};            /* zero mesh -> an empty (transform-only) */
+/* Find the PROP (KIND_PLAIN) with this name. Names are not unique across
+   kinds — the archive mirrors this very repo, so a FILE card named
+   "sword.glb" stands two rooms from the sword itself. The first binder
+   grabbed the card, whose parent is the archive anchor — and the whole
+   mirror room spun while the real sword froze (Fran's find). Kind
+   disambiguates: animated props are PLAIN; cards never are. */
+static sol_u32 find_prop_by_name(Scene *s, const char *name) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        const char *n;
+        if (s->objects[i].kind != KIND_PLAIN) continue;
+        n = scene_meta_get(s, s->objects[i].handle, "name");
+        if (n && strcmp(n, name) == 0) return s->objects[i].handle;
+    }
+    return 0;
+}
+
+/* After a load, re-find the animated/special objects (6e): runtime handles
+   are SESSION identity; names are the durable key we control. A missing
+   name yields 0, which every consumer already guards. */
+static void bind_runtime_handles(AppState *st) {
+    SceneObject *o;
+    sol_u32      i;
+    st->box_handle  = find_prop_by_name(&st->scene, "the box");
+    o = scene_get(&st->scene, st->box_handle);
+    st->anchor_handle = o ? o->parent : 0;
+    st->page_handle = find_prop_by_name(&st->scene, "the page");
+    st->sword_handle = find_prop_by_name(&st->scene, "sword.glb");
+    o = scene_get(&st->scene, st->sword_handle);
+    st->sword_precess_handle = o ? o->parent : 0;
+    st->floor_handle = 0;
+    for (i = 0; i < st->scene.count; i++) {
+        const SceneObject *f = &st->scene.objects[i];
+        if (f->parent == 0 && f->mesh_ref && strcmp(f->mesh_ref, "grid") == 0) {
+            st->floor_handle = f->handle;
+            break;
+        }
+    }
+    st->selected_handle = 0;
+    st->drag_handle     = 0;
+    st->current_room    = 0;
+}
+
+/* Reconcile every mirror against disk + validate aliases (6c/6d): resolves
+   and recolors when anything changed, and points the selection at the first
+   arrival (gold + name pin beat scanning fifty identical cards). Returns the
+   change count; the CALLER decides whether to save. */
+static int rescan_mirrors(AppState *st) {
+    sol_u32 mirrors[16];
+    sol_u32 i, mc = 0, before;
+    int     total = 0;
+    for (i = 0; i < st->scene.count && mc < 16; i++) {   /* collect first:
+               scanning ADDS objects, which can realloc the array */
+        const SceneObject *o  = &st->scene.objects[i];
+        const char        *rt = scene_meta_get(&st->scene, o->handle, "room_type");
+        const char        *sp = scene_meta_get(&st->scene, o->handle, "source_path");
+        if (rt && strcmp(rt, "mirror") == 0 && sp && sp[0] != '\0')
+            mirrors[mc++] = o->handle;
+    }
+    before = st->scene.count;                   /* arrivals append past here */
+    for (i = 0; i < mc; i++) {
+        const char *sp = scene_meta_get(&st->scene, mirrors[i], "source_path");
+        int n = sp ? room_mirror_scan(&st->scene, mirrors[i], sp) : -1;
+        if (n > 0) total += n;
+    }
+    total += workspace_validate_aliases(&st->scene);
+    if (total > 0) {
+        scene_resolve_meshes(&st->scene);
+        apply_kind_materials(&st->scene);
+        for (i = before; i < st->scene.count; i++) {
+            if (st->scene.objects[i].kind == KIND_FILE ||
+                st->scene.objects[i].kind == KIND_FOLDER) {
+                char lbuf[16];
+                st->selected_handle = st->scene.objects[i].handle;
+                printf("arrived: %s\n",
+                       object_label(&st->scene, st->selected_handle, lbuf));
+                break;
+            }
+        }
+    }
+    return total;
+}
+
+/* Load the palace from scene.stml and bring it fully to life (6e): glb
+   bodies re-imported from their anchors' refs, procedural meshes resolved,
+   kind colors applied, runtime handles re-found by name, the page's image
+   (a runtime texture handle) rebound, and the mirrors reconciled against
+   today's disk — the folder may have changed while the palace slept.
+   SOL_FALSE if the file is absent or won't parse. */
+static sol_bool load_palace(AppState *st) {
+    Scene fresh;
+    int   changes;
+    if (!scene_load(&fresh, "scene.stml")) return SOL_FALSE;
+    scene_free(&st->scene);
+    st->scene = fresh;
+    scene_reimport_glbs(st);
+    scene_resolve_meshes(&st->scene);
+    apply_kind_materials(&st->scene);
+    bind_runtime_handles(st);
+    {
+        SceneObject *p = scene_get(&st->scene, st->page_handle);
+        if (p) p->material.albedo_tex = st->albedo_tex;
+    }
+    changes = rescan_mirrors(st);
+    if (changes > 0) {
+        scene_save(&st->scene, "scene.stml");
+        printf("reconciled on load: %d change(s)\n", changes);
+    }
+    return SOL_TRUE;
+}
+
+/* First-run population: the default demo palace. Runs only when there is
+   no scene.stml to load (6e) — after that, the file IS the world. */
+static void populate_default_scene(AppState *state) {
+    Mesh    empty = {0};            /* zero mesh -> an empty (transform-only) */
     sol_u32 anchor, floor, page;
-
-    shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
-    if (!shader.id) return 0;
-
-    /* one pipeline, shared by all objects (same 8-float layout) */
-    desc.shader = shader;
-    desc.attrs[0].location = 0; desc.attrs[0].format = RHI_FORMAT_FLOAT3; desc.attrs[0].offset = 0;
-    desc.attrs[1].location = 1; desc.attrs[1].format = RHI_FORMAT_FLOAT3;
-    desc.attrs[1].offset = 3 * sizeof(float);
-    desc.attrs[2].location = 2; desc.attrs[2].format = RHI_FORMAT_FLOAT2;
-    desc.attrs[2].offset = 6 * sizeof(float);
-    desc.attrs[3].location = 3; desc.attrs[3].format = RHI_FORMAT_FLOAT4;
-    desc.attrs[3].offset = 8 * sizeof(float);   /* tangent (item 8d); unused by the shader until 8d-2 */
-    desc.attr_count = 4;
-    desc.stride     = 12 * sizeof(float);
-    desc.depth_test = SOL_TRUE;
-    desc.blend      = SOL_FALSE;
-    state->pipeline = rhi_create_pipeline(&desc);
-
-    /* the fullscreen post pass: no vertex attributes (gl_VertexID builds the
-       triangle), no depth test (it's a screen-space overlay) */
-    {
-        RhiShader       post_shader;
-        RhiPipelineDesc post_desc = {0};
-        post_shader = rhi_create_shader(POST_VERTEX_SRC, POST_FRAGMENT_SRC);
-        if (!post_shader.id) return 0;
-        post_desc.shader     = post_shader;
-        post_desc.attr_count = 0;
-        post_desc.stride     = 0;
-        post_desc.depth_test = SOL_FALSE;
-        post_desc.blend      = SOL_FALSE;
-        state->post_pipeline = rhi_create_pipeline(&post_desc);
-    }
-
-    /* the shadow map + its two pipelines (item 9b): a depth-only pass that reads
-       just position, and a fullscreen inspector that shows the depth map. */
-    {
-        RhiShader       sh_shader, dbg_shader;
-        RhiPipelineDesc sh_desc = {0}, dbg_desc = {0};
-
-        state->shadow_rt = rhi_create_depth_target(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
-        if (!state->shadow_rt.id) return 0;
-
-        sh_shader = rhi_create_shader(SHADOW_VERTEX_SRC, SHADOW_FRAGMENT_SRC);
-        if (!sh_shader.id) return 0;
-        sh_desc.shader     = sh_shader;
-        sh_desc.attrs[0].location = 0; sh_desc.attrs[0].format = RHI_FORMAT_FLOAT3; sh_desc.attrs[0].offset = 0;
-        sh_desc.attr_count = 1;                 /* position only */
-        sh_desc.stride     = 12 * sizeof(float);  /* same VBO; skip the other 9 floats */
-        sh_desc.depth_test = SOL_TRUE;
-        sh_desc.blend      = SOL_FALSE;
-        state->shadow_pipeline = rhi_create_pipeline(&sh_desc);
-
-        dbg_shader = rhi_create_shader(POST_VERTEX_SRC, SHADOW_DEBUG_FRAGMENT_SRC);
-        if (!dbg_shader.id) return 0;
-        dbg_desc.shader     = dbg_shader;
-        dbg_desc.attr_count = 0;
-        dbg_desc.stride     = 0;
-        dbg_desc.depth_test = SOL_FALSE;
-        dbg_desc.blend      = SOL_FALSE;
-        state->shadow_debug_pipeline = rhi_create_pipeline(&dbg_desc);
-    }
-
-    /* the skybox pipeline (Phase A2): fullscreen triangle, no attrs, depth off */
-    {
-        RhiShader       sky_shader;
-        RhiPipelineDesc sky_desc = {0};
-        sky_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_FRAGMENT_SRC);
-        if (!sky_shader.id) return 0;
-        sky_desc.shader     = sky_shader;
-        sky_desc.attr_count = 0;
-        sky_desc.stride     = 0;
-        sky_desc.depth_test = SOL_FALSE;
-        sky_desc.blend      = SOL_FALSE;
-        state->skybox_pipeline = rhi_create_pipeline(&sky_desc);
-    }
-
-    /* the cubemap skybox pipeline (B1): same fullscreen triangle, samplerCube */
-    {
-        RhiShader       cube_shader;
-        RhiPipelineDesc cube_desc = {0};
-        cube_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_CUBE_FRAGMENT_SRC);
-        if (!cube_shader.id) return 0;
-        cube_desc.shader     = cube_shader;
-        cube_desc.attr_count = 0;
-        cube_desc.stride     = 0;
-        cube_desc.depth_test = SOL_FALSE;
-        cube_desc.blend      = SOL_FALSE;
-        state->skybox_cube_pipeline = rhi_create_pipeline(&cube_desc);
-    }
-
-    /* the irradiance convolution pipeline (B2): fullscreen triangle, depth off */
-    {
-        RhiShader       irr_shader;
-        RhiPipelineDesc irr_desc = {0};
-        irr_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, IRRADIANCE_FRAGMENT_SRC);
-        if (!irr_shader.id) return 0;
-        irr_desc.shader     = irr_shader;
-        irr_desc.attr_count = 0;
-        irr_desc.stride     = 0;
-        irr_desc.depth_test = SOL_FALSE;
-        irr_desc.blend      = SOL_FALSE;
-        state->irradiance_pipeline = rhi_create_pipeline(&irr_desc);
-    }
-
-    /* the specular prefilter pipeline (C1): fullscreen triangle, depth off */
-    {
-        RhiShader       pre_shader;
-        RhiPipelineDesc pre_desc = {0};
-        pre_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, PREFILTER_FRAGMENT_SRC);
-        if (!pre_shader.id) return 0;
-        pre_desc.shader     = pre_shader;
-        pre_desc.attr_count = 0;
-        pre_desc.stride     = 0;
-        pre_desc.depth_test = SOL_FALSE;
-        pre_desc.blend      = SOL_FALSE;
-        state->prefilter_pipeline = rhi_create_pipeline(&pre_desc);
-    }
-
-    /* the BRDF LUT pipeline (C2): fullscreen triangle, depth off */
-    {
-        RhiShader       brdf_shader;
-        RhiPipelineDesc brdf_desc = {0};
-        brdf_shader = rhi_create_shader(POST_VERTEX_SRC, BRDF_LUT_FRAGMENT_SRC);
-        if (!brdf_shader.id) return 0;
-        brdf_desc.shader     = brdf_shader;
-        brdf_desc.attr_count = 0;
-        brdf_desc.stride     = 0;
-        brdf_desc.depth_test = SOL_FALSE;
-        brdf_desc.blend      = SOL_FALSE;
-        state->brdf_lut_pipeline = rhi_create_pipeline(&brdf_desc);
-    }
-
-    state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* scene: floor (root), an empty anchor (root), and the box as the
        anchor's child — so spinning the anchor makes the box orbit it.
@@ -1694,19 +1676,167 @@ static int init_scene(AppState *state) {
     scene_rel_add(&state->scene, state->box_handle, "orbits", state->anchor_handle);
     scene_content_set(&state->scene, state->box_handle, "notes/box.txt");
 
-    /* Persist the room at FIRST startup only (item 4 changed this): once a
-       scene.stml exists it may hold the user's arrangement (drag-to-place
-       saves on release), and §1.2 says placed positions are sacred — the
-       default room must never clobber them. L loads the saved room; load-at-
-       startup becomes real in item 6. */
+    /* Persist the fresh default — unless a scene.stml EXISTS but failed to
+       load (corrupt?): never overwrite what might be the user's palace. */
     {
         FILE *probe = fopen("scene.stml", "rb");
         if (probe) {
             fclose(probe);
-            printf("scene.stml exists — startup save skipped (L loads your arrangement)\n");
+            printf("scene.stml exists but did not load — NOT overwriting it\n");
         } else if (scene_save(&state->scene, "scene.stml")) {
             printf("saved scene -> scene.stml\n");
         }
+    }
+}
+
+/* One-time setup: build the pipeline + meshes, populate the scene. */
+static int init_scene(AppState *state) {
+    RhiShader shader;
+    RhiPipelineDesc desc = {0};  /* {0} all descs: a future field defaults off, not garbage */
+
+    shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
+    if (!shader.id) return 0;
+
+    /* one pipeline, shared by all objects (same 8-float layout) */
+    desc.shader = shader;
+    desc.attrs[0].location = 0; desc.attrs[0].format = RHI_FORMAT_FLOAT3; desc.attrs[0].offset = 0;
+    desc.attrs[1].location = 1; desc.attrs[1].format = RHI_FORMAT_FLOAT3;
+    desc.attrs[1].offset = 3 * sizeof(float);
+    desc.attrs[2].location = 2; desc.attrs[2].format = RHI_FORMAT_FLOAT2;
+    desc.attrs[2].offset = 6 * sizeof(float);
+    desc.attrs[3].location = 3; desc.attrs[3].format = RHI_FORMAT_FLOAT4;
+    desc.attrs[3].offset = 8 * sizeof(float);   /* tangent (item 8d); unused by the shader until 8d-2 */
+    desc.attr_count = 4;
+    desc.stride     = 12 * sizeof(float);
+    desc.depth_test = SOL_TRUE;
+    desc.blend      = SOL_FALSE;
+    state->pipeline = rhi_create_pipeline(&desc);
+
+    /* the fullscreen post pass: no vertex attributes (gl_VertexID builds the
+       triangle), no depth test (it's a screen-space overlay) */
+    {
+        RhiShader       post_shader;
+        RhiPipelineDesc post_desc = {0};
+        post_shader = rhi_create_shader(POST_VERTEX_SRC, POST_FRAGMENT_SRC);
+        if (!post_shader.id) return 0;
+        post_desc.shader     = post_shader;
+        post_desc.attr_count = 0;
+        post_desc.stride     = 0;
+        post_desc.depth_test = SOL_FALSE;
+        post_desc.blend      = SOL_FALSE;
+        state->post_pipeline = rhi_create_pipeline(&post_desc);
+    }
+
+    /* the shadow map + its two pipelines (item 9b): a depth-only pass that reads
+       just position, and a fullscreen inspector that shows the depth map. */
+    {
+        RhiShader       sh_shader, dbg_shader;
+        RhiPipelineDesc sh_desc = {0}, dbg_desc = {0};
+
+        state->shadow_rt = rhi_create_depth_target(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+        if (!state->shadow_rt.id) return 0;
+
+        sh_shader = rhi_create_shader(SHADOW_VERTEX_SRC, SHADOW_FRAGMENT_SRC);
+        if (!sh_shader.id) return 0;
+        sh_desc.shader     = sh_shader;
+        sh_desc.attrs[0].location = 0; sh_desc.attrs[0].format = RHI_FORMAT_FLOAT3; sh_desc.attrs[0].offset = 0;
+        sh_desc.attr_count = 1;                 /* position only */
+        sh_desc.stride     = 12 * sizeof(float);  /* same VBO; skip the other 9 floats */
+        sh_desc.depth_test = SOL_TRUE;
+        sh_desc.blend      = SOL_FALSE;
+        state->shadow_pipeline = rhi_create_pipeline(&sh_desc);
+
+        dbg_shader = rhi_create_shader(POST_VERTEX_SRC, SHADOW_DEBUG_FRAGMENT_SRC);
+        if (!dbg_shader.id) return 0;
+        dbg_desc.shader     = dbg_shader;
+        dbg_desc.attr_count = 0;
+        dbg_desc.stride     = 0;
+        dbg_desc.depth_test = SOL_FALSE;
+        dbg_desc.blend      = SOL_FALSE;
+        state->shadow_debug_pipeline = rhi_create_pipeline(&dbg_desc);
+    }
+
+    /* the skybox pipeline (Phase A2): fullscreen triangle, no attrs, depth off */
+    {
+        RhiShader       sky_shader;
+        RhiPipelineDesc sky_desc = {0};
+        sky_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_FRAGMENT_SRC);
+        if (!sky_shader.id) return 0;
+        sky_desc.shader     = sky_shader;
+        sky_desc.attr_count = 0;
+        sky_desc.stride     = 0;
+        sky_desc.depth_test = SOL_FALSE;
+        sky_desc.blend      = SOL_FALSE;
+        state->skybox_pipeline = rhi_create_pipeline(&sky_desc);
+    }
+
+    /* the cubemap skybox pipeline (B1): same fullscreen triangle, samplerCube */
+    {
+        RhiShader       cube_shader;
+        RhiPipelineDesc cube_desc = {0};
+        cube_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_CUBE_FRAGMENT_SRC);
+        if (!cube_shader.id) return 0;
+        cube_desc.shader     = cube_shader;
+        cube_desc.attr_count = 0;
+        cube_desc.stride     = 0;
+        cube_desc.depth_test = SOL_FALSE;
+        cube_desc.blend      = SOL_FALSE;
+        state->skybox_cube_pipeline = rhi_create_pipeline(&cube_desc);
+    }
+
+    /* the irradiance convolution pipeline (B2): fullscreen triangle, depth off */
+    {
+        RhiShader       irr_shader;
+        RhiPipelineDesc irr_desc = {0};
+        irr_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, IRRADIANCE_FRAGMENT_SRC);
+        if (!irr_shader.id) return 0;
+        irr_desc.shader     = irr_shader;
+        irr_desc.attr_count = 0;
+        irr_desc.stride     = 0;
+        irr_desc.depth_test = SOL_FALSE;
+        irr_desc.blend      = SOL_FALSE;
+        state->irradiance_pipeline = rhi_create_pipeline(&irr_desc);
+    }
+
+    /* the specular prefilter pipeline (C1): fullscreen triangle, depth off */
+    {
+        RhiShader       pre_shader;
+        RhiPipelineDesc pre_desc = {0};
+        pre_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, PREFILTER_FRAGMENT_SRC);
+        if (!pre_shader.id) return 0;
+        pre_desc.shader     = pre_shader;
+        pre_desc.attr_count = 0;
+        pre_desc.stride     = 0;
+        pre_desc.depth_test = SOL_FALSE;
+        pre_desc.blend      = SOL_FALSE;
+        state->prefilter_pipeline = rhi_create_pipeline(&pre_desc);
+    }
+
+    /* the BRDF LUT pipeline (C2): fullscreen triangle, depth off */
+    {
+        RhiShader       brdf_shader;
+        RhiPipelineDesc brdf_desc = {0};
+        brdf_shader = rhi_create_shader(POST_VERTEX_SRC, BRDF_LUT_FRAGMENT_SRC);
+        if (!brdf_shader.id) return 0;
+        brdf_desc.shader     = brdf_shader;
+        brdf_desc.attr_count = 0;
+        brdf_desc.stride     = 0;
+        brdf_desc.depth_test = SOL_FALSE;
+        brdf_desc.blend      = SOL_FALSE;
+        state->brdf_lut_pipeline = rhi_create_pipeline(&brdf_desc);
+    }
+
+    state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
+
+    /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
+       loaded and brought fully to life. The default demo palace builds only
+       on first run (or after deleting the file to re-mint); L remains the
+       manual mid-session revert. */
+    if (load_palace(state)) {
+        printf("palace loaded from scene.stml (%u objects)\n",
+               (unsigned)state->scene.count);
+    } else {
+        populate_default_scene(state);
     }
 
     /* place the camera where the old fixed view sat: back + raised, facing the
