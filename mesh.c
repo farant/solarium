@@ -124,19 +124,202 @@ void make_page(MeshBuilder *b, sol_f32 w, sol_f32 h) {
     mb_push_triangle(b, v0, v2, v3);
 }
 
-/* The mesh-ref resolver, CPU half (P3 item 1): map a ref name to the emitter
-   call that regenerates its geometry. THE single source of truth for what
-   each name means — the scene built at startup and the scene loaded from
-   disk both come through here, so they cannot drift apart. Items 5/6/10
-   extend this vocabulary (room/file/terrain refs, parameters); they don't
-   rebuild the machine. Pure CPU (no upload) so it stays headless-testable.
-   Returns SOL_FALSE for an unknown name: the caller leaves the object as a
-   transform-only empty — a missing generator must never destroy placed data. */
-sol_bool mesh_ref_build(const char *ref, MeshBuilder *b) {
-    if (strcmp(ref, "box") == 0)  { make_box(b, 1.0f, 1.0f, 1.0f);  return SOL_TRUE; }
-    if (strcmp(ref, "grid") == 0) { make_grid(b, 6.0f, 6.0f, 8);    return SOL_TRUE; }
-    if (strcmp(ref, "page") == 0) { make_page(b, 0.9f, 1.2f);       return SOL_TRUE; }
-    return SOL_FALSE;
+/* One quad from 4 corners given in CCW order AS SEEN FROM the normal's side,
+   each with its own UV. The shared worker for the architectural emitters. */
+static void push_quad4(MeshBuilder *b,
+                       sol_f32 x0, sol_f32 y0, sol_f32 z0, sol_f32 u0, sol_f32 v0,
+                       sol_f32 x1, sol_f32 y1, sol_f32 z1, sol_f32 u1, sol_f32 v1,
+                       sol_f32 x2, sol_f32 y2, sol_f32 z2, sol_f32 u2, sol_f32 v2,
+                       sol_f32 x3, sol_f32 y3, sol_f32 z3, sol_f32 u3, sol_f32 v3,
+                       sol_f32 nx, sol_f32 ny, sol_f32 nz) {
+    sol_u32 a = mb_push_vertex(b, x0, y0, z0, nx, ny, nz, u0, v0);
+    sol_u32 c = mb_push_vertex(b, x1, y1, z1, nx, ny, nz, u1, v1);
+    sol_u32 d = mb_push_vertex(b, x2, y2, z2, nx, ny, nz, u2, v2);
+    sol_u32 e = mb_push_vertex(b, x3, y3, z3, nx, ny, nz, u3, v3);
+    mb_push_triangle(b, a, c, d);
+    mb_push_triangle(b, a, d, e);
+}
+
+/* A sealed room shell: every face INTERIOR — normals point inward and the
+   winding is CCW from inside, so the geometry stays correct if back-face
+   culling is ever enabled. Origin at the floor's center, y in [0,h].
+   World-scale UVs: u/v run in meters, so a texture tiles at the same density
+   on a 2m wall and an 8m wall. */
+void make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h) {
+    sol_f32 hw = w * 0.5f, hd = d * 0.5f;
+
+    /* floor (normal +Y) and ceiling (normal -Y) */
+    push_quad4(b, -hw, 0.0f, -hd, 0.0f, 0.0f,   -hw, 0.0f,  hd, 0.0f, d,
+                   hw, 0.0f,  hd, w,    d,       hw, 0.0f, -hd, w,    0.0f,
+               0.0f, 1.0f, 0.0f);
+    push_quad4(b, -hw, h,    -hd, 0.0f, 0.0f,    hw, h,    -hd, w,    0.0f,
+                   hw, h,     hd, w,    d,      -hw, h,     hd, 0.0f, d,
+               0.0f, -1.0f, 0.0f);
+
+    /* north wall (z = -hd, faces +Z into the room) / south (z = +hd, faces -Z) */
+    push_quad4(b, -hw, 0.0f, -hd, 0.0f, 0.0f,    hw, 0.0f, -hd, w,    0.0f,
+                   hw, h,    -hd, w,    h,      -hw, h,    -hd, 0.0f, h,
+               0.0f, 0.0f, 1.0f);
+    push_quad4(b,  hw, 0.0f,  hd, 0.0f, 0.0f,   -hw, 0.0f,  hd, w,    0.0f,
+                  -hw, h,     hd, w,    h,       hw, h,     hd, 0.0f, h,
+               0.0f, 0.0f, -1.0f);
+
+    /* west wall (x = -hw, faces +X) / east (x = +hw, faces -X) */
+    push_quad4(b, -hw, 0.0f,  hd, 0.0f, 0.0f,   -hw, 0.0f, -hd, d,    0.0f,
+                  -hw, h,    -hd, d,    h,      -hw, h,     hd, 0.0f, h,
+               1.0f, 0.0f, 0.0f);
+    push_quad4(b,  hw, 0.0f, -hd, 0.0f, 0.0f,    hw, 0.0f,  hd, d,    0.0f,
+                   hw, h,     hd, d,    h,       hw, h,    -hd, 0.0f, h,
+               -1.0f, 0.0f, 0.0f);
+}
+
+/* Axis-aligned face helpers for the wall pieces: a rect facing +/-Z, +/-X,
+   or +/-Y, corners ordered CCW from the normal's side, world-scale UVs. */
+static void face_z(MeshBuilder *b, sol_f32 x0, sol_f32 x1, sol_f32 y0, sol_f32 y1,
+                   sol_f32 z, int dir) {
+    if (dir > 0)
+        push_quad4(b, x0,y0,z, x0,y0,  x1,y0,z, x1,y0,  x1,y1,z, x1,y1,  x0,y1,z, x0,y1,
+                   0.0f, 0.0f, 1.0f);
+    else
+        push_quad4(b, x1,y0,z, x1,y0,  x0,y0,z, x0,y0,  x0,y1,z, x0,y1,  x1,y1,z, x1,y1,
+                   0.0f, 0.0f, -1.0f);
+}
+static void face_x(MeshBuilder *b, sol_f32 x, sol_f32 y0, sol_f32 y1,
+                   sol_f32 z0, sol_f32 z1, int dir) {
+    if (dir > 0)
+        push_quad4(b, x,y0,z1, z1,y0,  x,y0,z0, z0,y0,  x,y1,z0, z0,y1,  x,y1,z1, z1,y1,
+                   1.0f, 0.0f, 0.0f);
+    else
+        push_quad4(b, x,y0,z0, z0,y0,  x,y0,z1, z1,y0,  x,y1,z1, z1,y1,  x,y1,z0, z0,y1,
+                   -1.0f, 0.0f, 0.0f);
+}
+static void face_y(MeshBuilder *b, sol_f32 x0, sol_f32 x1, sol_f32 y,
+                   sol_f32 z0, sol_f32 z1, int dir) {
+    if (dir > 0)
+        push_quad4(b, x0,y,z0, x0,z0,  x0,y,z1, x0,z1,  x1,y,z1, x1,z1,  x1,y,z0, x1,z0,
+                   0.0f, 1.0f, 0.0f);
+    else
+        push_quad4(b, x0,y,z0, x0,z0,  x1,y,z0, x1,z0,  x1,y,z1, x1,z1,  x0,y,z1, x0,z1,
+                   0.0f, -1.0f, 0.0f);
+}
+
+/* The doorway wall: never wall-minus-box (§1.4: mesh CSG is a robustness tar
+   pit) — the pieces are BUILT AROUND the gap, the way a framed wall is built
+   around a rough opening: left panel, right panel, header. Each piece is a
+   REAL-THICKNESS box emitting only its EXPOSED faces — fronts/backs, outer
+   ends, tops/bottoms, and the doorway's reveal (jambs + lintel underside);
+   faces where pieces abut are skipped, so nothing is ever coplanar (two
+   quads at the same depth z-fight: the rasterizer picks a different winner
+   per pixel per frame — the shimmering-checkerboard artifact). A future
+   gothic arch is this same pattern with a segmented curved head. */
+void make_wall_with_opening(MeshBuilder *b, sol_f32 w, sol_f32 h,
+                            sol_f32 ox, sol_f32 ow, sol_f32 oh, sol_f32 t) {
+    sol_f32 left = -w * 0.5f;
+    sol_f32 zf, zb, lx0, lx1, rx0, rx1;
+    int     has_left, has_right, has_header;
+
+    if (t < 0.01f) t = 0.01f;                 /* paper-thin still must not z-fight */
+    if (ox < 0.0f) ox = 0.0f;                 /* clamp the opening into the wall */
+    if (ox > w)    ox = w;
+    if (ow > w - ox) ow = w - ox;
+    if (oh > h)      oh = h;
+    zf = t * 0.5f;
+    zb = -zf;
+
+    if (ow < 1e-5f || oh < 1e-5f) {           /* no opening: one solid box */
+        face_z(b, left, left + w, 0.0f, h, zf,  1);
+        face_z(b, left, left + w, 0.0f, h, zb, -1);
+        face_x(b, left,     0.0f, h, zb, zf, -1);
+        face_x(b, left + w, 0.0f, h, zb, zf,  1);
+        face_y(b, left, left + w, h,    zb, zf,  1);
+        face_y(b, left, left + w, 0.0f, zb, zf, -1);
+        return;
+    }
+
+    has_left   = ox > 1e-5f;
+    has_right  = ox + ow < w - 1e-5f;
+    has_header = oh < h - 1e-5f;
+    lx0 = left;          lx1 = left + ox;          /* left panel x-range  */
+    rx0 = left + ox + ow; rx1 = left + w;          /* right panel x-range */
+
+    if (has_left) {
+        face_z(b, lx0, lx1, 0.0f, h, zf,  1);
+        face_z(b, lx0, lx1, 0.0f, h, zb, -1);
+        face_x(b, lx0, 0.0f, h, zb, zf, -1);       /* outer end */
+        face_x(b, lx1, 0.0f, oh, zb, zf,  1);      /* jamb: the reveal, below the header */
+        face_y(b, lx0, lx1, h,    zb, zf,  1);     /* top */
+        face_y(b, lx0, lx1, 0.0f, zb, zf, -1);     /* bottom */
+    }
+    if (has_right) {
+        face_z(b, rx0, rx1, 0.0f, h, zf,  1);
+        face_z(b, rx0, rx1, 0.0f, h, zb, -1);
+        face_x(b, rx1, 0.0f, h, zb, zf,  1);       /* outer end */
+        face_x(b, rx0, 0.0f, oh, zb, zf, -1);      /* jamb */
+        face_y(b, rx0, rx1, h,    zb, zf,  1);
+        face_y(b, rx0, rx1, 0.0f, zb, zf, -1);
+    }
+    if (has_header) {
+        face_z(b, lx1, rx0, oh, h, zf,  1);
+        face_z(b, lx1, rx0, oh, h, zb, -1);
+        face_y(b, lx1, rx0, oh, zb, zf, -1);       /* lintel underside */
+        face_y(b, lx1, rx0, h,  zb, zf,  1);       /* header top */
+        if (!has_left)  face_x(b, lx1, oh, h, zb, zf, -1);   /* header's exposed end */
+        if (!has_right) face_x(b, rx0, oh, h, zb, zf,  1);
+    }
+}
+
+/* ------------------------------------------------------------ the registry */
+/* THE single source of truth for what each ref name means (P3 item 1) — the
+   scene built at startup and the scene loaded from disk both come through
+   here, so they cannot drift. Item 5 grew it into a SCHEMA: parameter names
+   feed the scene file's self-describing attributes, defaults make absent
+   attributes legal, and new kit pieces (arch, column, vault...) are one entry
+   + one emitter each. Pure CPU — headless-testable, linkable by scene_io. */
+typedef struct {
+    const char *name;
+    int         param_count;
+    const char *param_names[MESH_REF_MAX_PARAMS];
+    float       defaults[MESH_REF_MAX_PARAMS];
+    void      (*emit)(MeshBuilder *b, const float *p);
+} MeshRefEntry;
+
+static void emit_box(MeshBuilder *b, const float *p)  { (void)p; make_box(b, 1.0f, 1.0f, 1.0f); }
+static void emit_grid(MeshBuilder *b, const float *p) { (void)p; make_grid(b, 6.0f, 6.0f, 8); }
+static void emit_page(MeshBuilder *b, const float *p) { (void)p; make_page(b, 0.9f, 1.2f); }
+static void emit_room(MeshBuilder *b, const float *p) { make_room(b, p[0], p[1], p[2]); }
+static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
+
+static const MeshRefEntry REGISTRY[] = {
+    { "box",  0, { 0 }, { 0.0f }, emit_box  },
+    { "grid", 0, { 0 }, { 0.0f }, emit_grid },
+    { "page", 0, { 0 }, { 0.0f }, emit_page },
+    { "room", 3, { "w", "d", "h" },              { 6.0f, 4.0f, 3.0f },             emit_room },
+    { "wall", 6, { "w", "h", "ox", "ow", "oh", "t" },
+                 { 4.0f, 3.0f, 1.5f, 1.0f, 2.2f, 0.15f }, emit_wall }
+};
+#define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
+
+static const MeshRefEntry *registry_find(const char *ref) {
+    sol_u32 i;
+    for (i = 0; i < REGISTRY_COUNT; i++) {
+        if (strcmp(REGISTRY[i].name, ref) == 0) return &REGISTRY[i];
+    }
+    return (const MeshRefEntry *)0;
+}
+
+int mesh_ref_schema(const char *ref, const char *const **names, const float **defaults) {
+    const MeshRefEntry *e = registry_find(ref);
+    if (!e) return -1;
+    if (names)    *names    = e->param_names;
+    if (defaults) *defaults = e->defaults;
+    return e->param_count;
+}
+
+sol_bool mesh_ref_build(const char *ref, const float *params, MeshBuilder *b) {
+    const MeshRefEntry *e = registry_find(ref);
+    if (!e) return SOL_FALSE;
+    e->emit(b, params ? params : e->defaults);
+    return SOL_TRUE;
 }
 
 /* Per-vertex tangents from the UV gradient: for each triangle, solve for the
@@ -198,33 +381,6 @@ void mb_compute_tangents(MeshBuilder *b) {
     free(tan); free(bitan);
 }
 
-Mesh mesh_from_builder(MeshBuilder *b) {
-    Mesh m;
-    mb_compute_tangents(b);                  /* finalize tangents before upload */
-    m.vbuffer = rhi_create_buffer(RHI_BUFFER_VERTEX, b->vertices,
-                    (size_t)b->vertex_count * 12 * sizeof(sol_f32));
-    m.ibuffer = rhi_create_buffer(RHI_BUFFER_INDEX, b->indices,
-                    (size_t)b->index_count * sizeof(sol_u32));
-    m.index_count = (int)b->index_count;
-
-    /* local-space AABB over the vertex positions (floats [i*12 + 0..2]) */
-    if (b->vertex_count == 0) {
-        m.bounds.min.x = m.bounds.min.y = m.bounds.min.z = 0.0f;
-        m.bounds.max = m.bounds.min;
-    } else {
-        sol_f32 minx, miny, minz, maxx, maxy, maxz;
-        sol_u32 i;
-        minx = maxx = b->vertices[0];
-        miny = maxy = b->vertices[1];
-        minz = maxz = b->vertices[2];
-        for (i = 1; i < b->vertex_count; i++) {
-            sol_f32 x = b->vertices[i*12+0], y = b->vertices[i*12+1], z = b->vertices[i*12+2];
-            if (x < minx) minx = x;  if (x > maxx) maxx = x;
-            if (y < miny) miny = y;  if (y > maxy) maxy = y;
-            if (z < minz) minz = z;  if (z > maxz) maxz = z;
-        }
-        m.bounds.min.x = minx; m.bounds.min.y = miny; m.bounds.min.z = minz;
-        m.bounds.max.x = maxx; m.bounds.max.y = maxy; m.bounds.max.z = maxz;
-    }
-    return m;
-}
+/* mesh_from_builder lives in mesh_gpu.c (the one function here that uploads):
+   everything in THIS file is pure CPU, so the emitters + registry stay
+   headless-testable and linkable by scene_io for the param schema. */

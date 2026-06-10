@@ -709,6 +709,9 @@ static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
                                                and in orbit it covers most of the
                                                screen, so grabbing it would eat
                                                camera rotation */
+    if (scene_meta_get(&st->scene, root, "room_type")) return;   /* room structure
+                                               (item 5 anchors) is architecture,
+                                               not a placeable card */
     if (!o || o->parent != 0) return;
     r = pick_ray(st, w);
     if (!ray_vs_plane(r, o->pos, vec3_make(0.0f, 1.0f, 0.0f), &t) || t > DRAG_MAX_DIST)
@@ -1074,7 +1077,9 @@ static void scene_resolve_meshes(Scene *s) {
         MeshBuilder  mb;
         if (!o->mesh_ref || o->mesh.index_count != 0) continue;
         mb_init(&mb);
-        if (mesh_ref_build(o->mesh_ref, &mb)) {
+        if (mesh_ref_build(o->mesh_ref,
+                           o->mesh_param_count > 0 ? o->mesh_params : (const float *)0,
+                           &mb)) {
             o->mesh = mesh_from_builder(&mb);
         } else {
             fprintf(stderr, "scene: unknown mesh ref \"%s\" on %s — left empty\n",
@@ -1232,8 +1237,11 @@ static int init_scene(AppState *state) {
        the exact path a scene loaded from disk takes, so the built world and
        the reloaded world cannot drift apart. */
     scene_init(&state->scene);
+    /* the grid sits a hair above the item-5 room's floor: two coplanar quads
+       at y=0 would z-fight (equal depth -> per-pixel flicker). It reads as a
+       rug now that the room provides the actual floor. */
     floor = scene_add(&state->scene, 0, empty,
-              vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+              vec3_make(0.0f, 0.02f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     anchor = scene_add(&state->scene, 0, empty,
               vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     state->anchor_handle = anchor;
@@ -1249,6 +1257,43 @@ static int init_scene(AppState *state) {
     scene_mesh_ref_set(&state->scene, floor, "grid");
     scene_mesh_ref_set(&state->scene, state->box_handle, "box");
     scene_mesh_ref_set(&state->scene, page, "page");
+
+    /* the palace's first ROOM (item 5): an anchor pinning the §1.10 data
+       model (room_type + source_path in meta; geometry and, later, contents
+       parented to it), with a parametric sealed shell as its first kit piece
+       and a freestanding doorway wall inside to prove the around-the-gap
+       construction. The existing scene now lives indoors. */
+    {
+        Material stone = material_default();
+        sol_u32  room_anchor, shell, doorway;
+        float    room_p[3], wall_p[6];
+        room_p[0] = 12.0f; room_p[1] = 10.0f; room_p[2] = 3.5f;     /* w d h */
+        wall_p[0] = 4.0f;  wall_p[1] = 3.0f;                        /* w h */
+        wall_p[2] = 1.5f;  wall_p[3] = 1.0f;  wall_p[4] = 2.2f;     /* ox ow oh */
+        wall_p[5] = 0.15f;                                          /* thickness */
+
+        room_anchor = scene_add(&state->scene, 0, empty,
+                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_meta_set(&state->scene, room_anchor, "room_type", "room");
+        scene_meta_set(&state->scene, room_anchor, "source_path", "");   /* item 6 fills this */
+
+        shell = scene_add(&state->scene, room_anchor, empty,
+                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&state->scene, shell, "room");
+        scene_mesh_params_set(&state->scene, shell, room_p, 3);
+
+        doorway = scene_add(&state->scene, room_anchor, empty,
+                  vec3_make(-3.0f, 0.0f, -2.5f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&state->scene, doorway, "wall");
+        scene_mesh_params_set(&state->scene, doorway, wall_p, 6);
+
+        stone.base_color = vec3_make(0.58f, 0.55f, 0.50f);   /* warm gray stone */
+        stone.roughness  = 0.92f;
+        scene_material_set(&state->scene, shell, stone);
+        stone.base_color = vec3_make(0.62f, 0.58f, 0.52f);   /* the wall a shade lighter */
+        scene_material_set(&state->scene, doorway, stone);
+    }
+
     scene_resolve_meshes(&state->scene);
     state->floor_handle = floor;             /* room structure: drag excludes it */
 
@@ -1324,11 +1369,14 @@ static int init_scene(AppState *state) {
     state->f_was_down = SOL_FALSE;
     state->exposure   = 1.0f;
 
-    /* the spot light: elevated over the cluster, warm, aimed at the table (9a) */
-    state->light_pos       = vec3_make(2.5f, 5.0f, 2.5f);
+    /* the spot light: warm, aimed at the table. Moved INSIDE the item-5 room
+       (it sat at y=5, above the 3.5m ceiling — which would have shadowed the
+       entire interior); intensity drops with the shorter throw (inverse
+       square). */
+    state->light_pos       = vec3_make(2.2f, 3.1f, 2.2f);
     state->light_target    = vec3_make(0.0f, 0.5f, 0.0f);
     state->light_color     = vec3_make(1.0f, 0.95f, 0.85f);
-    state->light_intensity = 120.0f;
+    state->light_intensity = 70.0f;
     state->light_inner_deg = 22.0f;
     state->light_outer_deg = 38.0f;
 

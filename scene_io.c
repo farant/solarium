@@ -9,6 +9,7 @@
 
 #include "scene.h"
 #include "stml.h"
+#include "mesh.h"   /* mesh_ref_schema: the registry names the param attrs (item 5) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +108,20 @@ sol_bool scene_save(Scene *s, const char *path) {
         if (o->mesh_ref) {
             fprintf(f, "    <mesh");
             write_attr(f, "ref", o->mesh_ref);
+            /* parametric ref (item 5): the registry's schema names the
+               attributes — <mesh ref="room" w="6" d="4" h="3"/> — so the
+               file stays self-describing and the loader fills absent params
+               from the same table's defaults. Schema order keeps re-saves
+               byte-identical. An unknown ref's params can't be named, so
+               they are not written (a documented forward-compat boundary). */
+            if (o->mesh_param_count > 0) {
+                const char *const *names;
+                const float       *defs;
+                int n = mesh_ref_schema(o->mesh_ref, &names, &defs);
+                int k;
+                for (k = 0; k < n && k < o->mesh_param_count; k++)
+                    fprintf(f, " %s=\"%.9g\"", names[k], (double)o->mesh_params[k]);
+            }
             fprintf(f, " />\n");
         }
 
@@ -242,7 +257,25 @@ sol_bool scene_load(Scene *s, const char *path) {
 
         mn   = stml_child(on, "mesh");
         mref = mn ? stml_attr(mn, "ref") : (const char *)0;
-        if (mref) scene_mesh_ref_set(s, h, mref);
+        if (mref) {
+            scene_mesh_ref_set(s, h, mref);
+            {   /* parametric ref: read the schema-named attrs, defaults for
+                   absent ones; no attrs at all -> count 0 (pure defaults),
+                   which also keeps default-built files byte-stable */
+                const char *const *names;
+                const float       *defs;
+                int n = mesh_ref_schema(mref, &names, &defs);
+                if (n > 0) {
+                    float p[MESH_REF_MAX_PARAMS];
+                    int   k, present = 0;
+                    for (k = 0; k < n; k++) {
+                        p[k] = attr_f(mn, names[k], defs[k]);
+                        if (stml_attr(mn, names[k])) present = 1;
+                    }
+                    if (present) scene_mesh_params_set(s, h, p, n);
+                }
+            }
+        }
 
         for (j = 0; j < on->child_count; j++) {                     /* meta */
             StmlNode *c = on->children[j];

@@ -60,6 +60,7 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     o->scale = scale;
     o->mesh = mesh;
     o->mesh_ref = NULL;
+    o->mesh_param_count = 0;        /* 0 = registry defaults; count gates reads */
     o->material = material_default();
     o->meta = NULL; o->meta_count = 0; o->meta_cap = 0;
     o->relations = NULL; o->rel_count = 0; o->rel_cap = 0;
@@ -140,6 +141,12 @@ sol_u32 scene_pick(Scene *s, Ray ray, float *out_t) {
         if (o->mesh.index_count == 0) continue;            /* empties aren't pickable */
         world = scene_world_matrix(s, o);
         wbox  = aabb_transform(world, o->mesh.bounds);     /* local AABB -> world */
+        /* you cannot pick what you are INSIDE: a ray starting in the box hits
+           at t=0, so a room shell enclosing the camera (item 5) would shadow
+           every pick. Skip containers of the ray origin. */
+        if (ray.origin.x >= wbox.min.x && ray.origin.x <= wbox.max.x &&
+            ray.origin.y >= wbox.min.y && ray.origin.y <= wbox.max.y &&
+            ray.origin.z >= wbox.min.z && ray.origin.z <= wbox.max.z) continue;
         if (ray_vs_aabb(ray, wbox, &t) && t < best_t) {    /* keep the nearest */
             best_t = t;
             best   = o->handle;
@@ -203,6 +210,16 @@ void scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name) {
     if (!o) return;
     free(o->mesh_ref);
     o->mesh_ref = sol_strdup(name);
+}
+
+void scene_mesh_params_set(Scene *s, sol_u32 handle, const float *params, int count) {
+    SceneObject *o = scene_get(s, handle);
+    int i;
+    if (!o) return;
+    if (count < 0) count = 0;
+    if (count > MESH_REF_MAX_PARAMS) count = MESH_REF_MAX_PARAMS;
+    for (i = 0; i < count; i++) o->mesh_params[i] = params[i];
+    o->mesh_param_count = count;
 }
 
 void scene_material_set(Scene *s, sol_u32 handle, Material mat) {

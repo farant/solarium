@@ -28,19 +28,48 @@ void    mb_push_triangle(MeshBuilder *b, sol_u32 a, sol_u32 i, sol_u32 c);
 /* fill each vertex's tangent (xyz + handedness w) from positions + UVs + topology */
 void    mb_compute_tangents(MeshBuilder *b);
 
-/* primitive emitters (more to come: cylinder, arch, ...) */
+/* primitive emitters (more to come: arch, column, vault, stair — the gothic kit) */
 void    make_box(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 d);
 void    make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d);
 void    make_grid(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_u32 subdiv);
 void    make_page(MeshBuilder *b, sol_f32 w, sol_f32 h);   /* upright XY quad, +Z, upright UVs */
 
-/* mesh-ref resolver, CPU half: ref name -> emitter call into b (the single
-   source of truth for what "box"/"grid"/"page" mean). SOL_FALSE = unknown ref;
-   the caller keeps the object as an empty (placed data is never destroyed). */
-sol_bool mesh_ref_build(const char *ref, MeshBuilder *b);
+/* A sealed room shell (P3 item 5): floor + 4 walls + ceiling, all faces
+   INTERIOR (inward normals, inward winding — the viewer is inside), origin at
+   the floor's center, y in [0,h]. World-scale UVs (1 unit per meter) so texel
+   density is uniform across differently-sized rooms. */
+void    make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h);
 
-/* upload a finished builder to GPU buffers (computes tangents first, then uploads
-   via the RHI, never GL). Mutates b (writes the tangents); b is freed after. */
+/* A wall with a doorway, built as the pieces AROUND the gap — left panel,
+   right panel, header — never a boolean cut (§1.4). Real thickness t (centered
+   on the XY plane): each piece is a box emitting only its EXPOSED faces, incl.
+   the doorway's jambs + lintel underside, with abutting faces skipped so
+   nothing is coplanar (coplanar quads z-fight). x in [-w/2, w/2], y in [0,h];
+   the opening starts ox from the LEFT edge, ow wide, oh tall from the floor.
+   Degenerate pieces (an opening flush with an edge) are skipped, not emitted. */
+void    make_wall_with_opening(MeshBuilder *b, sol_f32 w, sol_f32 h,
+                               sol_f32 ox, sol_f32 ow, sol_f32 oh, sol_f32 t);
+
+/* The mesh-ref registry, CPU half (P3 items 1+5): ref name -> emitter, THE
+   single source of truth for what each name means. Item 5 made it a SCHEMA:
+   each entry declares its parameter names + defaults, so the scene file can
+   carry them as self-describing attributes (<mesh ref="room" w="6" .../>)
+   and the writer/loader/resolver all read one table. */
+#define MESH_REF_MAX_PARAMS 8
+
+/* Schema lookup: the entry's parameter names + defaults (borrowed pointers,
+   static lifetime). Returns the parameter count, or -1 for an unknown ref. */
+int mesh_ref_schema(const char *ref, const char *const **names, const float **defaults);
+
+/* Build the named geometry into b. params may be NULL (use the defaults) or
+   an array of at least the schema's count. SOL_FALSE = unknown ref; the
+   caller keeps the object as an empty (placed data is never destroyed). */
+sol_bool mesh_ref_build(const char *ref, const float *params, MeshBuilder *b);
+
+/* upload a finished builder to GPU buffers (computes tangents first, then
+   uploads via the RHI, never GL). Mutates b (writes the tangents); b is freed
+   after. Lives in mesh_gpu.c so everything above stays pure CPU — emitters
+   and the registry are headless-testable and linkable by scene_io. */
 Mesh    mesh_from_builder(MeshBuilder *b);
 
 #endif /* MESH_H */

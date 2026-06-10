@@ -20,6 +20,8 @@ typedef struct {
     vec3    scale;
     Mesh    mesh;      /* shared reference; a zero Mesh (index_count 0) = empty */
     char   *mesh_ref;  /* asset name for geometry-by-reference; NULL = none/empty */
+    float   mesh_params[MESH_REF_MAX_PARAMS];  /* the ref's parameters (item 5: room w/d/h...) */
+    int     mesh_param_count;                  /* 0 = use the registry defaults */
     Material material; /* PBR material (item 8); texture handles shared, not owned */
 
     /* overbuilt slots — mostly empty this phase, serialized in 2.5 */
@@ -50,6 +52,7 @@ const char *scene_meta_get(Scene *s, sol_u32 handle, const char *key);   /* NULL
 void        scene_rel_add(Scene *s, sol_u32 handle, const char *type, sol_u32 target);
 void        scene_content_set(Scene *s, sol_u32 handle, const char *path);
 void        scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name);
+void        scene_mesh_params_set(Scene *s, sol_u32 handle, const float *params, int count);
 void        scene_material_set(Scene *s, sol_u32 handle, Material mat);   /* texture handles shared, not owned */
 
 /* serialization — defined in scene_io.c */

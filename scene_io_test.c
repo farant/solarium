@@ -67,6 +67,14 @@ int main(void) {
     scene_mesh_ref_set(&scene, floor_h, "grid");
     scene_mesh_ref_set(&scene, box_h,   "box");
 
+    /* parametric ref (item 5): the anchor doubles as a room shell */
+    {
+        float room_p[3];
+        room_p[0] = 7.0f; room_p[1] = 5.0f; room_p[2] = 3.0f;
+        scene_mesh_ref_set(&scene, anchor_h, "room");
+        scene_mesh_params_set(&scene, anchor_h, room_p, 3);
+    }
+
     scene_meta_set(&scene, box_h, "title",  "Test Box");
     scene_meta_set(&scene, box_h, "author", "Solarium");
     scene_rel_add(&scene, box_h, "orbits", anchor_h);
@@ -156,6 +164,63 @@ int main(void) {
                 }
             }
             printf("special-character meta values load back exactly: ok\n");
+        }
+
+        /* parametric mesh-ref (item 5): the room's (w,d,h) survive the trip */
+        {
+            sol_u32      ba_h = scene_handle_for_nid(&b, a_anchor_nid);
+            SceneObject *ba   = scene_get(&b, ba_h);
+            if (!ba || !ba->mesh_ref || strcmp(ba->mesh_ref, "room") != 0 ||
+                ba->mesh_param_count != 3 ||
+                ba->mesh_params[0] != 7.0f || ba->mesh_params[1] != 5.0f ||
+                ba->mesh_params[2] != 3.0f) {
+                printf("FAIL: parametric room ref did not round-trip\n");
+                scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            printf("parametric mesh-ref (room w/d/h) round-trips: ok\n");
+        }
+
+        /* the emitters themselves are headless now (mesh.c is pure CPU since
+           the item-5 split): sanity-check the new architectural pieces */
+        {
+            MeshBuilder mb;
+            float       wall_p[6];
+            mb_init(&mb);
+            if (!mesh_ref_build("room", (const float *)0, &mb) ||
+                mb.vertex_count != 24 || mb.index_count != 36) {
+                printf("FAIL: room shell should be 6 quads (24v/36i), got %uv/%ui\n",
+                       (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            /* a doorway flush with the floor: left panel (6 exposed faces) +
+               right panel (6) + header (4: front/back/lintel/top) = 16 quads
+               = 64 verts; a full-height opening at the left edge degenerates
+               to the right panel alone = 6 quads = 24 verts */
+            mb_init(&mb);
+            wall_p[0] = 4.0f; wall_p[1] = 3.0f;
+            wall_p[2] = 1.5f; wall_p[3] = 1.0f; wall_p[4] = 2.2f;
+            wall_p[5] = 0.15f;
+            if (!mesh_ref_build("wall", wall_p, &mb) || mb.vertex_count != 64) {
+                printf("FAIL: doorway wall should be 16 exposed faces (64v), got %u\n",
+                       (unsigned)mb.vertex_count);
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            mb_init(&mb);
+            wall_p[2] = 0.0f; wall_p[4] = 3.0f;   /* full-height opening at the left edge */
+            mesh_ref_build("wall", wall_p, &mb);
+            if (mb.vertex_count != 24) {
+                printf("FAIL: degenerate pieces must be skipped (want 24v, got %u)\n",
+                       (unsigned)mb.vertex_count);
+                mb_free(&mb); scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            mb_free(&mb);
+            printf("room + wall emitters (incl. degenerate-piece skip): ok\n");
         }
 
         /* identity + hierarchy survived: B's box (found by A's nid) must have a
