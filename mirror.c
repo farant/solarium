@@ -33,7 +33,7 @@ int room_mirror_scan(Scene *s, sol_u32 room, const char *dirpath) {
     FsListing l;
     Mesh      empty = {0};
     quat      qid;
-    int       i, added = 0, tray_n = 0;
+    int       i, changed = 0, tray_n = 0;
     sol_u32   j;
 
     if (!fs_scan_dir(dirpath, &l)) return -1;
@@ -61,8 +61,14 @@ int room_mirror_scan(Scene *s, sol_u32 room, const char *dirpath) {
         strcat(full, l.entries[i].name);
 
         for (j = 0; j < s->count; j++) {             /* match by path identity */
-            const SceneObject *o = &s->objects[j];
+            SceneObject *o = &s->objects[j];
             if (o->parent == room && o->content && strcmp(o->content, full) == 0) {
+                if (o->kind == KIND_TOMBSTONE) {     /* RESURRECTION: the file is
+                       back (or a rename was undone) — the card returns to life
+                       IN ITS PLACE, notes and all. Object permanence. */
+                    o->kind = l.entries[i].is_dir ? KIND_FOLDER : KIND_FILE;
+                    changed++;
+                }
                 found = 1;
                 break;
             }
@@ -82,9 +88,34 @@ int room_mirror_scan(Scene *s, sol_u32 room, const char *dirpath) {
             p[0] = 0.42f; p[1] = 0.55f; p[2] = 0.08f;
             scene_mesh_params_set(s, h, p, 3);
         }
-        added++;
+        changed++;
+    }
+
+    /* Direction two — membership follows disk: a card whose file VANISHED
+       becomes a TOMBSTONE. It keeps its place, its meta, your note: the
+       sync must never delete YOUR data because DISK changed. Dismissal is
+       the user's, manually. (The known identity limit, stated plainly: a
+       rename on disk reads as a tombstone here plus a new tray card above.) */
+    for (j = 0; j < s->count; j++) {
+        SceneObject *o = &s->objects[j];
+        int present = 0;
+        if (o->parent != room || !o->content) continue;
+        if (o->kind != KIND_FILE && o->kind != KIND_FOLDER) continue;
+        for (i = 0; i < l.count; i++) {
+            char full[1024];
+            if (strlen(dirpath) + strlen(l.entries[i].name) + 2 > sizeof full)
+                continue;
+            strcpy(full, dirpath);
+            strcat(full, "/");
+            strcat(full, l.entries[i].name);
+            if (strcmp(o->content, full) == 0) { present = 1; break; }
+        }
+        if (!present) {
+            o->kind = KIND_TOMBSTONE;
+            changed++;
+        }
     }
 
     fs_listing_free(&l);
-    return added;
+    return changed;
 }

@@ -395,6 +395,44 @@ int main(void) {
             }
         }
         printf("mirror scan (2 cards, idempotent rescan, tray'd FILE kind): ok\n");
+
+        /* reconciliation (6c): delete alpha on disk -> its card TOMBSTONES,
+           keeping its place and the user's note; recreate it -> RESURRECTED
+           in place. beta is untouched throughout. */
+        {
+            SceneObject *co;
+            vec3         kept_pos;
+            int          n;
+
+            scene_meta_set(&m, card, "note", "the user's precious thought");
+            co = scene_get(&m, card);
+            kept_pos = co->pos;
+
+            remove("mirror_test_dir/alpha.txt");
+            n  = room_mirror_scan(&m, room, "mirror_test_dir");
+            co = scene_get(&m, card);
+            if (n != 1 || !co || co->kind != KIND_TOMBSTONE ||
+                !scene_meta_get(&m, card, "note") ||
+                strcmp(scene_meta_get(&m, card, "note"),
+                       "the user's precious thought") != 0 ||
+                co->pos.x != kept_pos.x || co->pos.z != kept_pos.z) {
+                printf("FAIL: vanished file should tombstone in place, note intact\n");
+                scene_free(&m);
+                return 1;
+            }
+
+            f1 = fopen("mirror_test_dir/alpha.txt", "w");
+            if (f1) { fputs("a\n", f1); fclose(f1); }
+            n  = room_mirror_scan(&m, room, "mirror_test_dir");
+            co = scene_get(&m, card);
+            if (n != 1 || !co || co->kind != KIND_FILE ||
+                co->pos.x != kept_pos.x || co->pos.z != kept_pos.z) {
+                printf("FAIL: returned file should resurrect in place\n");
+                scene_free(&m);
+                return 1;
+            }
+            printf("tombstone + surviving note + resurrection in place: ok\n");
+        }
         scene_free(&m);
     }
 

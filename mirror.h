@@ -9,13 +9,18 @@
 
 #include "scene.h"
 
-/* Reconcile a mirror room against its source directory: every disk entry
-   not yet present (matched by content PATH — the v1 identity key; a rename
-   reads as remove+add) becomes an UNPLACED card in the tray rows by the
-   room's south side, kind FILE or FOLDER. Existing cards are never touched.
-   (6c adds the other direction: tombstones for vanished files.)
-   Returns the number of cards added, or -1 if the directory won't open.
-   Run scene_resolve_meshes afterwards: new cards arrive as empties. */
+/* Reconcile a mirror room against its source directory, both directions
+   (matched by content PATH — the v1 identity key; a rename reads as a
+   tombstone + a new arrival):
+   - a disk entry with no card -> an UNPLACED card in the tray (never auto-
+     placed into the arrangement);
+   - a FILE/FOLDER card whose path vanished -> a TOMBSTONE, keeping its
+     place and metadata (your note survives the file's deletion; dismissal
+     is manual);
+   - a TOMBSTONE whose path returned -> resurrected in place.
+   Placed cards are otherwise never touched. Returns the number of changes,
+   or -1 if the directory won't open. Run scene_resolve_meshes afterwards:
+   new cards arrive as empties. */
 int room_mirror_scan(Scene *s, sol_u32 room, const char *dirpath);
 
 #endif /* MIRROR_H */

@@ -533,6 +533,8 @@ typedef struct {
     RhiPipeline     brdf_lut_pipeline;
     sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
     sol_bool    l_was_down;     /* edge-detect the scene-reload key (P3 item 1) */
+    sol_bool    r_was_down;     /* edge-detect the mirror-rescan key (P3 item 6c) */
+    sol_bool    bs_was_down;    /* edge-detect tombstone dismissal (Backspace) */
     /* room graph (P3 item 7) */
     sol_u32     current_room;   /* containing room's anchor handle; 0 = outside (derived per frame) */
     float       ambient_scale;  /* eased toward the room's ambient (sealed = dim) */
@@ -977,8 +979,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 if (o && o->kind != KIND_PLAIN) {       /* a dragged card is PLACED:
                                                            the tray's claim ends here */
                     const char *u = scene_meta_get(&st->scene, st->drag_handle, "unplaced");
-                    if (u && strcmp(u, "1") == 0)
+                    if (u && strcmp(u, "1") == 0) {
                         scene_meta_set(&st->scene, st->drag_handle, "unplaced", "0");
+                        apply_kind_materials(&st->scene);   /* its tray glow goes out */
+                    }
                 }
                 if (scene_save(&st->scene, "scene.stml"))
                     printf("placed #%u at (%.2f, %.2f, %.2f) — saved\n",
@@ -1037,6 +1041,69 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         if (t_now && !st->t_was_down && st->ui_font)
             st->text_inspect = (st->text_inspect + 1) % 3;
         st->t_was_down = t_now;
+    }
+
+    /* R reconciles every mirror to its disk (item 6c, edge): new files tray
+       up unplaced, vanished files tombstone (your notes survive), returned
+       files resurrect in place. Membership changes are real -> saved. */
+    {
+        sol_bool r_now = glfwGetKey(w, GLFW_KEY_R) == GLFW_PRESS;
+        if (r_now && !st->r_was_down) {
+            sol_u32 mirrors[16];
+            sol_u32 i, mc = 0, before;
+            int     total = 0;
+            for (i = 0; i < st->scene.count && mc < 16; i++) {   /* collect first:
+                       scanning ADDS objects, which can realloc the array */
+                const SceneObject *o  = &st->scene.objects[i];
+                const char        *rt = scene_meta_get(&st->scene, o->handle, "room_type");
+                const char        *sp = scene_meta_get(&st->scene, o->handle, "source_path");
+                if (rt && strcmp(rt, "mirror") == 0 && sp && sp[0] != '\0')
+                    mirrors[mc++] = o->handle;
+            }
+            before = st->scene.count;               /* arrivals append past here */
+            for (i = 0; i < mc; i++) {
+                const char *sp = scene_meta_get(&st->scene, mirrors[i], "source_path");
+                int n = sp ? room_mirror_scan(&st->scene, mirrors[i], sp) : -1;
+                if (n > 0) total += n;
+            }
+            if (total > 0) {
+                scene_resolve_meshes(&st->scene);
+                apply_kind_materials(&st->scene);
+                scene_save(&st->scene, "scene.stml");
+                /* point at the first arrival: selection gold + the pin's name
+                   tag beat scanning fifty identical cards for the new one */
+                for (i = before; i < st->scene.count; i++) {
+                    if (st->scene.objects[i].kind == KIND_FILE ||
+                        st->scene.objects[i].kind == KIND_FOLDER) {
+                        char        lbuf[16];
+                        st->selected_handle = st->scene.objects[i].handle;
+                        printf("arrived: %s\n",
+                               object_label(&st->scene, st->selected_handle, lbuf));
+                        break;
+                    }
+                }
+            }
+            printf("rescan: %d change(s) across %u mirror(s)\n", total, (unsigned)mc);
+        }
+        st->r_was_down = r_now;
+    }
+
+    /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
+       decision): the system never throws away the marker for you. */
+    {
+        sol_bool bs_now = glfwGetKey(w, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
+        if (bs_now && !st->bs_was_down && st->selected_handle != 0) {
+            SceneObject *o = scene_get(&st->scene, st->selected_handle);
+            if (o && o->kind == KIND_TOMBSTONE) {
+                char        lbuf[16];
+                const char *label = object_label(&st->scene, st->selected_handle, lbuf);
+                printf("dismissed tombstone: %s\n", label);
+                scene_remove(&st->scene, st->selected_handle);
+                st->selected_handle = 0;
+                scene_save(&st->scene, "scene.stml");
+            }
+        }
+        st->bs_was_down = bs_now;
     }
 
     /* L reloads scene.stml from disk (P3 item 1: the persistence proof, edge).
@@ -1222,6 +1289,7 @@ static void apply_kind_materials(Scene *s) {
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         Material     m;
+        const char  *u;
         if (o->kind == KIND_PLAIN) continue;
         m = material_default();
         switch (o->kind) {
@@ -1231,6 +1299,15 @@ static void apply_kind_materials(Scene *s) {
             case KIND_NOTE:      m.base_color = vec3_make(0.95f, 0.90f, 0.55f); m.roughness = 0.90f; break;
             case KIND_TOMBSTONE: m.base_color = vec3_make(0.32f, 0.32f, 0.36f); m.roughness = 0.95f; break;
             default: break;
+        }
+        /* UNPLACED cards burn brighter — the tray isn't a place, it's a
+           STATE, and it should be visible across the room: these are the
+           cards you haven't dealt with yet */
+        u = scene_meta_get(s, o->handle, "unplaced");
+        if (u && strcmp(u, "1") == 0 && o->kind != KIND_TOMBSTONE) {
+            m.base_color.x = m.base_color.x * 0.4f + 0.60f;
+            m.base_color.y = m.base_color.y * 0.4f + 0.55f;
+            m.base_color.z = m.base_color.z * 0.4f + 0.35f;
         }
         o->material = m;
     }
