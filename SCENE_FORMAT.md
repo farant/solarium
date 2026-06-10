@@ -123,7 +123,13 @@ stores only the file's own attribute prefix, keeping re-saves byte-identical.
 Current vocabulary: `box`, `grid`, `page` (no params), `room` (w,d,h + wall/
 ceiling presence flags wn,we,ws,ww,ceil), `wall` (w,h,ox,ow,oh,t), `path`
 (len,w,t), `card` (w,h,t), `board` (w,h,t — the item-8 pinboard; cards
-attach by parenting, positions in board-local meters).
+attach by parenting, positions in board-local meters), and the item-9
+codex: `book_cover` (w,h,t,board,sq,round,bands,clasp — geometry from real
+bookbinding) + `book_block` (w,h,t,board,sq), separate refs so each part
+wears its own `<mat>` (a book is a small GROUP: an empty anchor with two
+children), plus `book_open_cover`/`book_open_block` (same 5-param prefix —
+the reader's open book, also placeable). A minted codex's parameters
+PERSIST in its parts' attrs: every book keeps its individual build.
 
 **`arrow` is a ref outside the registry** (P3 item 8): an arrow object
 (child of its board, two `connects` rels) writes `<mesh ref="arrow"/>`,
