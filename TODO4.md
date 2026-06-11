@@ -430,10 +430,13 @@ geometry; ASan clean (the pool neither grows nor leaks).
 
 **Intent.** Total silence is the most un-engine thing about solarium. The from-scratch
 version is pleasingly shaped like the project's founding story: a platform seam over
-CoreAudio (the quarantine pattern), a hand-rolled WAV parser (pure C89, headless-tested),
-and a small 3D mixer. Footsteps on stone, the page-turn whisper, wind on the islands —
-enormous atmosphere per line of code. Fully independent of every other item; schedule it
-wherever a change of texture is welcome.
+CoreAudio (the quarantine pattern), a small 3D mixer — and *(amended 2026-06-11, Fran's
+call)* a **synthesizer as the asset story**: sounds are MINTED from parameters, never
+sourced. The file records the rule, never the weather — now for ears. Footsteps on stone,
+the page-turn whisper, wind on the islands — enormous atmosphere per line of code, and
+zero binary assets in the repo. Fully independent of every other item. (The synthesizer's
+*face* — the synth book, the first in-world app — is Phase 5's opening act; see TODO5.md.
+This item builds the instrument; the next phase gives it knobs.)
 
 **Spec.**
 - **`platform_audio.c`/`.h` — the fifth quarantine.** CoreAudio's C API (AudioToolbox:
@@ -447,13 +450,25 @@ wherever a change of texture is welcome.
   gain application, constant-power stereo pan, windowed inverse-square distance
   attenuation (the *same falloff shape* as item 5's lights — one perceptual law, two
   senses), final mix-and-clip. The quarantined callback calls this pure core.
-- **WAV parsing, hand-rolled** (`wav.c` or within the audio TU's C89 side): RIFF chunk
-  walk, PCM16 + float32, mono/stereo, resample-on-load to the mixer rate if needed
-  (linear interpolation is sufficient). Headless-tested against tiny synthesized fixtures.
-  Compressed formats (Vorbis/MP3) are a reserved decision — recommend **WAV-only this
-  phase** (sounds are short; music/streaming is a later concern, and stb_vorbis would be
-  a *third* stb to sanction).
-- **Sounds are assets** through item 4's registry (path → decoded buffer, refcounted).
+- **The synthesizer** *(amended 2026-06-11: replaces CC0 asset sourcing)* — an
+  sfxr-lineage one-voice SFX synth, pure C89 (`synth.c`), headless-tested: waveform
+  (square/triangle/saw/sine/noise) + ADSR-ish envelope + frequency sweep/vibrato + duty
+  cycle + simple filter, rendered OFFLINE to a PCM buffer. The "8-bit/16-bit" feel is an
+  **aesthetic parameter, not an engine constraint**: bitcrush (amplitude quantization) and
+  sample-rate decimation are knobs on the sound; the mixer stays float throughout.
+  Sound types live in a **param-schema registry — the pattern's fourth application**
+  (meshes, assets, behaviors, sounds): named types with defaults, referenced by name,
+  overridden by prefix. Params live in a watchable text file → the item-4 watcher
+  re-renders on edit (sound design with a text editor and your ears). **Per-trigger seed
+  jitter** mints every footstep slightly different — the flicker-desync insight in audio,
+  and the thing no recorded sample can do.
+- **WAV flipped to writer-first** *(amended 2026-06-11)*: the hand-rolled WAV **writer**
+  (~RIFF header + PCM16) exports any minted sound for inspection — the debug-screenshot
+  reflex for audio. The *reader* is deferred until a real recorded asset wants in;
+  compressed formats stay out (no third stb).
+- **Sounds are assets** through item 4's registry — **params-are-identity** keys
+  (`"snd|type|effective-params"` → rendered buffer, refcounted), exactly the mesh-key
+  pattern; no paths, because there are no files.
 - **3D voices**: position from a scene object (a parented voice follows its object) or
   fixed; listener = the camera (position + forward for pan). A `sound_loop` component
   (item 6) attaches ambient loops to objects — a candle's crackle, wind at an island's
@@ -461,18 +476,22 @@ wherever a change of texture is welcome.
 - **First wirings in `main.c`** (composition, not engine): footsteps from walk-distance
   accumulation (stride length ÷ speed; silent when still — item 1 makes "moving" honest);
   the page-turn whoosh on leaf launch; the book's thump on landing; wind outdoors,
-  crossfaded by the existing containment query when you step inside.
-- **Asset sourcing is a reserved decision**: CC0 packs (freesound et al. — assets are not
-  code; the `.hdr` precedent applies) vs synthesizing placeholders. Recommend CC0.
+  crossfaded by the existing containment query when you step inside. **Wind is the
+  real-time-synthesis candidate** (a procedural filtered-noise voice running IN the mixer
+  = no loop seams, ever) — in scope if the design stays small, else a pre-rendered loop.
 
-**Acceptance.** Footsteps track actual walking and stop when you stop; pages whoosh and
-books thump; wind plays outdoors and crossfades away indoors (containment-driven); walking
-past a placed source pans and attenuates audibly and smoothly; no glitches, pops, or
-underruns in normal play; `mixtest` + WAV tests pass; ASan clean; no thread primitives
-above the seam.
+**Acceptance.** Footsteps track actual walking, stop when you stop, and **no two steps
+sound identical** (seed jitter); pages whoosh and books thump; wind plays outdoors and
+crossfades away indoors (containment-driven); walking past a placed source pans and
+attenuates audibly and smoothly; **editing a sound's params in a text file changes it
+in-engine via the watcher**; a minted sound exports as a playable .wav; the repo contains
+zero audio binaries; no glitches, pops, or underruns in normal play; `mixtest` + synth
+tests pass; ASan clean; no thread primitives above the seam.
 
-**Decisions flagged:** WAV-only vs stb_vorbis (WAV-only recommended); asset sourcing (CC0
-recommended); footstep surface-awareness scope (single stone sound recommended for v1).
+**Decisions flagged:** synth param schema (which knobs make the cut); wind as real-time
+voice vs pre-rendered loop; footstep surface-awareness scope (single stone *type* with
+seed jitter recommended for v1). RESOLVED by amendment: sounds are synthesized, not
+sourced; WAV is writer-first, reader deferred; no stb_vorbis.
 
 ---
 
@@ -585,9 +604,12 @@ Set these before delegating; an agent guessing them is the real risk.
 6. **Item 6:** the `<component>` STML form; the overlay doctrine (§1.6) confirmation;
    which channels overlays may drive in v1 (transform + light recommended).
 7. **Item 7:** additive-only particles in v1 (recommended) vs sorted alpha; pool cap.
-8. **Item 8:** WAV-only vs sanctioning stb_vorbis as a third stb (WAV-only recommended);
-   sound asset sourcing (CC0 recommended); footstep surface awareness (single stone sound
-   recommended).
+8. **Item 8:** ~~WAV-only vs stb_vorbis; sound asset sourcing (CC0 recommended)~~
+   **RESOLVED by amendment (2026-06-11): sounds are SYNTHESIZED from params (sfxr-lineage
+   synth, registry-as-schema, params-are-identity caching, watcher hot-reload); WAV
+   writer-first, reader deferred; no third stb.** Still open: the synth param schema;
+   wind real-time vs pre-rendered; footstep surface awareness (single stone type + seed
+   jitter recommended).
 9. **Item 9:** skeleton as compact asset data (recommended) vs scene objects; joint cap
    (64); clip crossfade in scope (stretch).
 10. **Item 10:** hand-written MSL twins (recommended) vs a translation step; the staged
@@ -614,12 +636,15 @@ Set these before delegating; an agent guessing them is the real risk.
   collision-free.
 - **CUBICSPLINE animation channels, morph targets, animation blending trees** — LINEAR/
   STEP and a single playing clip (+ optional crossfade) is v1.
-- **Music / streaming audio / compressed formats** — short WAV sounds only (unless
-  Part 4 #8 decides otherwise).
+- **Music / streaming audio / compressed formats** — short synthesized sounds only
+  (per the item-8 amendment). A sequencer/tracker is a door the synth leaves open;
+  if it opens, it opens in the synth book (TODO5.md), not here.
 - **Cross-platform windowing/GL-loader, second OS targets** — the Metal backend is the
   second *backend*, not a second *platform*; Windows/Linux remain future.
 - **All application work** — the gothic kit, wayfinding, book-binds-a-file, per-room
-  files, HarfBuzz complex scripts: Phase 5 and beyond, on the engine this phase builds.
+  files, HarfBuzz complex scripts, and **the app engine** (books as application hosts,
+  world-space im-GUI, the synth book as first app — see TODO5.md, seeded 2026-06-11):
+  Phase 5 and beyond, on the engine this phase builds.
 
 The cross-cutting disciplines of *this* phase — one author for the world's shape (§1.3),
 RHI-additions-as-Metal-debt (§1.4), threading confined to quarantine (§1.5), the overlay
