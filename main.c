@@ -97,6 +97,7 @@ static const char *VERTEX_SRC =        /* the full twin of the GLSL below */
     "    VOut o;\n"
     "    float4 worldPos = u.uModel * float4(v.pos, 1.0);\n"
     "    o.pos = u.uProj * (u.uView * worldPos);\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z [-w,w] -> Metal [0,w] */
     "    o.normal = u.uNormalMatrix * v.normal;\n"
     "    o.worldPos = worldPos.xyz;\n"
     "    o.uv = v.uv;\n"
@@ -105,14 +106,16 @@ static const char *VERTEX_SRC =        /* the full twin of the GLSL below */
     "    return o;\n"
     "}\n";
 
-/* STAGE (b) STAND-IN — replaced by the full PBR twin in stage (d). Albedo,
-   base color, the terrain palette and the selection tint are faithful; the
-   lighting is one fixed sun + flat ambient. Output stays LINEAR into the
-   HDR target — the real post twin tonemaps it, so presentation is already
-   final-form. */
+/* The FULL PBR twin (stage c/d replaced stage b's fixed-sun stand-in) — a
+   line-for-line translation of the GLSL below: same GGX/Smith/Fresnel
+   trio, same brdfDirect for every light, same windowed point loop, same
+   split-sum IBL, same 3x3 PCF shadow. The shadow map and depth compare
+   are GLSL-identical because the VS twins store GL's depth mapping and
+   the backend's negative viewport keeps GL's row layout. */
 static const char *FRAGMENT_SRC =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
+    "constant float PI = 3.14159265359;\n"
     "struct VOut {\n"
     "    float4 pos [[position]];\n"
     "    float3 normal;\n"
@@ -121,21 +124,111 @@ static const char *FRAGMENT_SRC =
     "    float4 tangent;\n"
     "};\n"
     "struct FU {\n"
-    "    float3 uBaseColor;\n"
-    "    float  uHighlight;\n"
-    "    float  uUseAlbedoTex;\n"
-    "    float  uTerrainBlend;\n"
-    "    float  uTerrainY0;\n"
-    "    float  uTerrainAmp;\n"
+    "    float3   uViewPos;\n"
+    "    float    uHighlight;\n"
+    "    float    uUseAlbedoTex;\n"
+    "    float    uUseMRTex;\n"
+    "    float    uUseAOTex;\n"
+    "    float    uAOStrength;\n"
+    "    float    uUseNormalTex;\n"
+    "    float    uNormalScale;\n"
+    "    float3   uBaseColor;\n"
+    "    float    uTerrainBlend;\n"
+    "    float    uTerrainY0;\n"
+    "    float    uTerrainAmp;\n"
+    "    float    uMetallic;\n"
+    "    float    uRoughness;\n"
+    "    float3   uLightPos;\n"
+    "    float3   uLightDir;\n"
+    "    float3   uLightColor;\n"
+    "    float    uLightIntensity;\n"
+    "    float    uCosInner;\n"
+    "    float    uCosOuter;\n"
+    "    float3   uEmissive;\n"
+    "    int      uPointCount;\n"
+    "    float3   uPointPos[8];\n"
+    "    float3   uPointColor[8];\n"
+    "    float    uPointRadius[8];\n"
+    "    float4x4 uLightVP;\n"
+    "    float    uUseIBL;\n"
+    "    float    uAmbientScale;\n"
     "};\n"
+    "static float distributionGGX(float NoH, float rough) {\n"
+    "    float a = rough*rough; float a2 = a*a;\n"
+    "    float d = NoH*NoH*(a2 - 1.0) + 1.0;\n"
+    "    return a2 / (PI * d * d);\n"
+    "}\n"
+    "static float geometrySchlickGGX(float NdotX, float k) {\n"
+    "    return NdotX / (NdotX*(1.0 - k) + k);\n"
+    "}\n"
+    "static float geometrySmith(float NoV, float NoL, float rough) {\n"
+    "    float k = (rough + 1.0)*(rough + 1.0) / 8.0;\n"
+    "    return geometrySchlickGGX(NoV, k) * geometrySchlickGGX(NoL, k);\n"
+    "}\n"
+    "static float3 fresnelSchlick(float HoV, float3 F0) {\n"
+    "    return F0 + (1.0 - F0) * pow(1.0 - HoV, 5.0);\n"
+    "}\n"
+    "static float3 brdfDirect(float3 N, float3 V, float3 L, float3 albedo,\n"
+    "                         float metallic, float roughness, float3 F0) {\n"
+    "    float3 H  = normalize(L + V);\n"
+    "    float NoV = max(dot(N, V), 0.0001);\n"
+    "    float NoL = max(dot(N, L), 0.0);\n"
+    "    float NoH = max(dot(N, H), 0.0);\n"
+    "    float HoV = max(dot(H, V), 0.0);\n"
+    "    float D = distributionGGX(NoH, roughness);\n"
+    "    float G = geometrySmith(NoV, NoL, roughness);\n"
+    "    float3 F = fresnelSchlick(HoV, F0);\n"
+    "    float3 specular = (D * G) * F / (4.0 * NoV * NoL + 0.0001);\n"
+    "    float3 kD = (float3(1.0) - F) * (1.0 - metallic);\n"
+    "    return (kD * albedo / PI + specular) * NoL;\n"
+    "}\n"
+    "static float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float rough) {\n"
+    "    return F0 + (max(float3(1.0 - rough), F0) - F0) * pow(1.0 - cosTheta, 5.0);\n"
+    "}\n"
+    "static float shadowFactor(float3 worldPos, float NoL, constant FU &u,\n"
+    "                          depth2d<float> shadowMap, sampler shadowSmp) {\n"
+    "    float4 lpos = u.uLightVP * float4(worldPos, 1.0);\n"
+    "    float3 proj = lpos.xyz / lpos.w;\n"
+    "    proj = proj * 0.5 + 0.5;\n"
+    "    if (proj.z > 1.0) return 0.0;\n"
+    "    float current = proj.z;\n"
+    "    float bias = max(0.0025 * (1.0 - NoL), 0.0008);\n"
+    "    float2 texel = 1.0 / float2(shadowMap.get_width(), shadowMap.get_height());\n"
+    "    float sum = 0.0;\n"
+    "    for (int x = -1; x <= 1; ++x)\n"
+    "        for (int y = -1; y <= 1; ++y) {\n"
+    "            float closest = shadowMap.sample(shadowSmp,\n"
+    "                                proj.xy + float2((float)x, (float)y) * texel);\n"
+    "            sum += (current - bias > closest) ? 1.0 : 0.0;\n"
+    "        }\n"
+    "    return sum / 9.0;\n"
+    "}\n"
     "fragment float4 fmain(VOut v [[stage_in]],\n"
     "                      constant FU &u [[buffer(0)]],\n"
-    "                      texture2d<float> albedoTex [[texture(0)]],\n"
-    "                      sampler albedoSmp [[sampler(0)]]) {\n"
+    "                      texture2d<float>   uAlbedoTex     [[texture(0)]],\n"
+    "                      texture2d<float>   uMRTex         [[texture(1)]],\n"
+    "                      texture2d<float>   uAOTex         [[texture(2)]],\n"
+    "                      texture2d<float>   uNormalTex     [[texture(3)]],\n"
+    "                      depth2d<float>     uShadowMap     [[texture(4)]],\n"
+    "                      texturecube<float> uIrradianceMap [[texture(5)]],\n"
+    "                      texturecube<float> uPrefilterMap  [[texture(6)]],\n"
+    "                      texture2d<float>   uBrdfLUT       [[texture(7)]],\n"
+    "                      sampler s0 [[sampler(0)]], sampler s1 [[sampler(1)]],\n"
+    "                      sampler s2 [[sampler(2)]], sampler s3 [[sampler(3)]],\n"
+    "                      sampler s4 [[sampler(4)]], sampler s5 [[sampler(5)]],\n"
+    "                      sampler s6 [[sampler(6)]], sampler s7 [[sampler(7)]]) {\n"
     "    float3 albedo = u.uBaseColor;\n"
-    "    if (u.uUseAlbedoTex > 0.5) albedo *= albedoTex.sample(albedoSmp, v.uv).rgb;\n"
+    "    if (u.uUseAlbedoTex > 0.5) albedo *= uAlbedoTex.sample(s0, v.uv).rgb;\n"
+    "    float metallic  = u.uMetallic;\n"
+    "    float roughness = u.uRoughness;\n"
+    "    if (u.uUseMRTex > 0.5) {\n"
+    "        float3 mr = uMRTex.sample(s1, v.uv).rgb;\n"
+    "        roughness *= mr.g;\n"
+    "        metallic  *= mr.b;\n"
+    "    }\n"
+    "    roughness = max(roughness, 0.04);\n"
     "    float3 N = normalize(v.normal);\n"
-    "    if (u.uTerrainBlend > 0.5) {\n"          /* the palette, verbatim */
+    "    if (u.uTerrainBlend > 0.5) {\n"
     "        float slope = clamp(1.0 - N.y, 0.0, 1.0);\n"
     "        float relh  = clamp((v.worldPos.y - u.uTerrainY0) / max(u.uTerrainAmp, 0.001), 0.0, 1.0);\n"
     "        float3 moss = float3(0.30, 0.42, 0.22);\n"
@@ -144,9 +237,53 @@ static const char *FRAGMENT_SRC =
     "        albedo = mix(moss, rock, smoothstep(0.15, 0.45, slope));\n"
     "        albedo = mix(albedo, crag, smoothstep(0.55, 0.95, relh));\n"
     "    }\n"
-    "    float3 L = normalize(float3(0.35, 0.85, 0.40));\n"   /* the stand-in sun */
-    "    float nl = max(dot(N, L), 0.0);\n"
-    "    float3 color = albedo * (0.30 + 0.80 * nl);\n"
+    "    if (u.uUseNormalTex > 0.5) {\n"
+    "        float3 T = normalize(v.tangent.xyz - dot(v.tangent.xyz, N) * N);\n"
+    "        float3 B = cross(N, T) * v.tangent.w;\n"
+    "        float3 n = uNormalTex.sample(s3, v.uv).rgb * 2.0 - 1.0;\n"
+    "        n.xy *= u.uNormalScale;\n"
+    "        N = normalize(float3x3(T, B, N) * n);\n"
+    "    }\n"
+    "    float3 V = normalize(u.uViewPos - v.worldPos);\n"
+    "    float NoV = max(dot(N, V), 0.0001);\n"
+    "    float3 F0 = mix(float3(0.04), albedo, metallic);\n"
+    "    float3 toLight = u.uLightPos - v.worldPos;\n"
+    "    float dist = length(toLight);\n"
+    "    float3 L = toLight / dist;\n"
+    "    float atten = 1.0 / (dist * dist);\n"
+    "    float theta = dot(-L, u.uLightDir);\n"
+    "    float cone  = smoothstep(u.uCosOuter, u.uCosInner, theta);\n"
+    "    float3 radiance = u.uLightColor * u.uLightIntensity * atten * cone;\n"
+    "    float shadow = shadowFactor(v.worldPos, max(dot(N, L), 0.0), u,\n"
+    "                                uShadowMap, s4);\n"
+    "    float3 Lo = brdfDirect(N, V, L, albedo, metallic, roughness, F0)\n"
+    "              * radiance * (1.0 - shadow);\n"
+    "    for (int pi = 0; pi < u.uPointCount; pi++) {\n"
+    "        float3 pl = u.uPointPos[pi] - v.worldPos;\n"
+    "        float d2 = dot(pl, pl);\n"
+    "        float d  = sqrt(d2);\n"
+    "        float3 Lp = pl / max(d, 0.0001);\n"
+    "        float wf = clamp(1.0 - pow(d / u.uPointRadius[pi], 4.0), 0.0, 1.0);\n"
+    "        float3 rp = u.uPointColor[pi] * (wf * wf / (d2 + 1.0));\n"
+    "        Lo += brdfDirect(N, V, Lp, albedo, metallic, roughness, F0) * rp;\n"
+    "    }\n"
+    "    float ao = 1.0;\n"
+    "    if (u.uUseAOTex > 0.5) ao = 1.0 + u.uAOStrength * (uAOTex.sample(s2, v.uv).r - 1.0);\n"
+    "    float3 ambient;\n"
+    "    if (u.uUseIBL > 0.5) {\n"
+    "        float3 kS_amb = fresnelSchlickRoughness(NoV, F0, roughness);\n"
+    "        float3 kD_amb = (1.0 - kS_amb) * (1.0 - metallic);\n"
+    "        float3 irr    = uIrradianceMap.sample(s5, N).rgb;\n"
+    "        float3 diffuseIBL = irr * albedo;\n"
+    "        float3 R = reflect(-V, N);\n"
+    "        float3 prefiltered = uPrefilterMap.sample(s6, R, level(roughness * 4.0)).rgb;\n"
+    "        float2 brdf = uBrdfLUT.sample(s7, float2(NoV, roughness)).rg;\n"
+    "        float3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y);\n"
+    "        ambient = (kD_amb * diffuseIBL + specularIBL) * ao;\n"
+    "    } else {\n"
+    "        ambient = 0.03 * albedo * ao;\n"
+    "    }\n"
+    "    float3 color = ambient * u.uAmbientScale + Lo + u.uEmissive;\n"
     "    color = mix(color, float3(1.0, 0.85, 0.30), u.uHighlight * 0.5);\n"
     "    return float4(color, 1.0);\n"
     "}\n";
@@ -441,10 +578,9 @@ static const char *PARTICLE_FRAGMENT_SRC =
 
 #ifdef SOL_RHI_METAL
 
-/* Full-fidelity twins. The v-flip in the VS is the render-target rule:
-   Metal rasterizes row 0 at the TOP, so a pass that samples what another
-   pass rendered un-flips it here (GLSL needs nothing — GL's row 0 is the
-   bottom, agreeing with its own sampler convention). */
+/* Full-fidelity twins, GLSL-identical math: the backend's negative-height
+   viewport gives every offscreen target GL's row layout, so sampling needs
+   no flips (stage c/d retired stage b's per-twin v-flip). */
 static const char *POST_VERTEX_SRC =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
@@ -452,8 +588,9 @@ static const char *POST_VERTEX_SRC =
     "vertex VOut vmain(uint vid [[vertex_id]]) {\n"
     "    VOut o;\n"
     "    float2 p = float2((float)((vid << 1) & 2), (float)(vid & 2));\n"
-    "    o.uv = float2(p.x, 1.0 - p.y);\n"        /* the render-target v-flip */
+    "    o.uv = p;\n"
     "    o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
     "    return o;\n"
     "}\n";
 
@@ -522,6 +659,60 @@ static const char *POST_FRAGMENT_SRC =
    then walk back UP with a 3x3 tent, ACCUMULATING additively into each
    level. The combine lives in the tonemap above. All fullscreen triangles
    through POST_VERTEX_SRC. --- */
+#ifdef SOL_RHI_METAL
+
+static const char *BLOOM_EXTRACT_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      texture2d<float> uSrc [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float3 c    = uSrc.sample(s0, v.uv).rgb;\n"
+    "    float  b    = max(c.r, max(c.g, c.b));\n"
+    "    float  soft = clamp(b - 1.0 + 0.5, 0.0, 1.0);\n"
+    "    soft        = soft * soft / 2.0;\n"
+    "    float  w    = max(b - 1.0, soft) / max(b, 1e-4);\n"
+    "    return float4(c * w, 1.0);\n"
+    "}\n";
+static const char *BLOOM_DOWN_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "struct FU { float3 uTexel; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      texture2d<float> uSrc [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float2 t = u.uTexel.xy;\n"
+    "    float3 c = uSrc.sample(s0, v.uv + float2(-t.x, -t.y)).rgb\n"
+    "             + uSrc.sample(s0, v.uv + float2( t.x, -t.y)).rgb\n"
+    "             + uSrc.sample(s0, v.uv + float2(-t.x,  t.y)).rgb\n"
+    "             + uSrc.sample(s0, v.uv + float2( t.x,  t.y)).rgb;\n"
+    "    return float4(c * 0.25, 1.0);\n"
+    "}\n";
+static const char *BLOOM_UP_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "struct FU { float3 uTexel; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      texture2d<float> uSrc [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float2 t = u.uTexel.xy;\n"
+    "    float3 c = uSrc.sample(s0, v.uv + float2(-t.x, -t.y)).rgb * 1.0\n"
+    "             + uSrc.sample(s0, v.uv + float2( 0.0, -t.y)).rgb * 2.0\n"
+    "             + uSrc.sample(s0, v.uv + float2( t.x, -t.y)).rgb * 1.0\n"
+    "             + uSrc.sample(s0, v.uv + float2(-t.x,  0.0)).rgb * 2.0\n"
+    "             + uSrc.sample(s0, v.uv).rgb                     * 4.0\n"
+    "             + uSrc.sample(s0, v.uv + float2( t.x,  0.0)).rgb * 2.0\n"
+    "             + uSrc.sample(s0, v.uv + float2(-t.x,  t.y)).rgb * 1.0\n"
+    "             + uSrc.sample(s0, v.uv + float2( 0.0,  t.y)).rgb * 2.0\n"
+    "             + uSrc.sample(s0, v.uv + float2( t.x,  t.y)).rgb * 1.0;\n"
+    "    return float4(c / 16.0, 1.0);\n"
+    "}\n";
+
+#else /* GLSL */
+
 static const char *BLOOM_EXTRACT_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vUV;\n"
@@ -569,6 +760,8 @@ static const char *BLOOM_UP_FRAGMENT_SRC =
     "    FragColor = vec4(c / 16.0, 1.0);\n"
     "}\n";
 
+#endif /* SOL_RHI_METAL — the bloom trio */
+
 /* --- the shadow (depth-only) pass (item 9b): render the scene from the light's
    POV, writing only depth into the shadow map. No color work; position only,
    reading just attr 0 of the 12-float vertex. --- */
@@ -586,6 +779,10 @@ static const char *SHADOW_VERTEX_SRC =
     "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
     "    VOut o;\n"
     "    o.pos = u.uLightVP * (u.uModel * float4(v.pos, 1.0));\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal: the
+                                          stored depth = GL's 0.5*ndc+0.5,
+                                          so the shadow COMPARE in the PBR
+                                          twin stays GLSL-identical */
     "    return o;\n"
     "}\n";
 
@@ -667,6 +864,26 @@ static const char *SKINNED_SHADOW_VERTEX_SRC =
 /* --- debug view (item 9b): show the shadow map full-screen as linearized
    grayscale (near=dark, far=white), so we can confirm the light's-eye depth
    render is correct before 9c samples it. Reuses the fullscreen-triangle VS. --- */
+#ifdef SOL_RHI_METAL
+
+static const char *SHADOW_DEBUG_FRAGMENT_SRC =      /* identical math: stored
+                                       depth is GL's mapping (the VS remap) */
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "struct FU { float uNear; float uFar; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      depth2d<float> uDepth [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float d   = uDepth.sample(s0, v.uv);\n"
+    "    float ndc = d * 2.0 - 1.0;\n"
+    "    float z   = (2.0 * u.uNear * u.uFar) / (u.uFar + u.uNear - ndc * (u.uFar - u.uNear));\n"
+    "    float g   = (z - u.uNear) / (u.uFar - u.uNear);\n"
+    "    return float4(float3(g), 1.0);\n"
+    "}\n";
+
+#else /* GLSL */
+
 static const char *SHADOW_DEBUG_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vUV;\n"
@@ -682,11 +899,78 @@ static const char *SHADOW_DEBUG_FRAGMENT_SRC =
     "    FragColor = vec4(vec3(g), 1.0);\n"
     "}\n";
 
+#endif /* SOL_RHI_METAL — the shadow inspector */
+
 /* --- the skybox (Phase A2): a fullscreen triangle that samples the
    equirectangular HDR by the per-pixel world-space view direction. Drawn FIRST
    into the HDR target with depth off, so it fills the background; objects then
    draw over it. Writes linear radiance — the post pass tonemaps it like the
    rest of the scene. --- */
+#ifdef SOL_RHI_METAL
+
+static const char *SKYBOX_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 ndc; };\n"
+    "vertex VOut vmain(uint vid [[vertex_id]]) {\n"
+    "    VOut o;\n"
+    "    float2 p = float2((float)((vid << 1) & 2), (float)(vid & 2));\n"
+    "    o.ndc = p * 2.0 - 1.0;\n"
+    "    o.pos = float4(o.ndc, 1.0, 1.0);\n"      /* z=far; already Metal-legal */
+    "    return o;\n"
+    "}\n";
+
+static const char *SKYBOX_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "constant float PI = 3.14159265359;\n"
+    "struct VOut { float4 pos [[position]]; float2 ndc; };\n"
+    "struct FU {\n"
+    "    float3 uCamForward;\n"
+    "    float3 uCamRight;\n"
+    "    float3 uCamUp;\n"
+    "    float  uTanHalfFovY;\n"
+    "    float  uAspect;\n"
+    "};\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      texture2d<float> uEquirect [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float3 dir = normalize(u.uCamForward\n"
+    "               + v.ndc.x * u.uTanHalfFovY * u.uAspect * u.uCamRight\n"
+    "               + v.ndc.y * u.uTanHalfFovY * u.uCamUp);\n"
+    "    float uu = atan2(dir.z, dir.x) / (2.0 * PI) + 0.5;\n"
+    "    float vv = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI;\n"
+    "    float3 c = min(uEquirect.sample(s0, float2(uu, vv)).rgb, float3(60000.0));\n"
+    "    return float4(c, 1.0);\n"
+    "}\n";
+
+/* --- the on-screen skybox once we have a cubemap (B1): identical to the equirect
+   version but samples a samplerCube by the view direction. Switching the live
+   skybox to this is the self-check — if the sky looks the same, the equirect->
+   cube conversion is correct. --- */
+static const char *SKYBOX_CUBE_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 ndc; };\n"
+    "struct FU {\n"
+    "    float3 uCamForward;\n"
+    "    float3 uCamRight;\n"
+    "    float3 uCamUp;\n"
+    "    float  uTanHalfFovY;\n"
+    "    float  uAspect;\n"
+    "    float  uLod;\n"
+    "};\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      texturecube<float> uEnvCube [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float3 dir = normalize(u.uCamForward\n"
+    "               + v.ndc.x * u.uTanHalfFovY * u.uAspect * u.uCamRight\n"
+    "               + v.ndc.y * u.uTanHalfFovY * u.uCamUp);\n"
+    "    return float4(uEnvCube.sample(s0, dir, level(u.uLod)).rgb, 1.0);\n"
+    "}\n";
+
+#else /* GLSL */
+
 static const char *SKYBOX_VERTEX_SRC =
     "#version 330 core\n"
     "out vec2 vNdc;\n"
@@ -717,10 +1001,6 @@ static const char *SKYBOX_FRAGMENT_SRC =
     "    FragColor = vec4(c, 1.0);\n"                                /* linear HDR -> hdr_rt / env cube */
     "}\n";
 
-/* --- the on-screen skybox once we have a cubemap (B1): identical to the equirect
-   version but samples a samplerCube by the view direction. Switching the live
-   skybox to this is the self-check — if the sky looks the same, the equirect->
-   cube conversion is correct. --- */
 static const char *SKYBOX_CUBE_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vNdc;\n"
@@ -739,11 +1019,49 @@ static const char *SKYBOX_CUBE_FRAGMENT_SRC =
     "    FragColor = vec4(textureLod(uEnvCube, dir, uLod).rgb, 1.0);\n"
     "}\n";
 
+#endif /* SOL_RHI_METAL — the skybox family */
+
 /* --- the diffuse irradiance convolution (B2): for each output direction N (a
    surface normal), integrate the cosine-weighted hemisphere of incoming light
    from the env cubemap. Run once per face into a tiny 32^2 cubemap. cos*sin =
    Lambert cosine * solid-angle Jacobian; the pi folds in the 1/pi BRDF so the
    lighting pass is just diffuse = irradiance * albedo. --- */
+#ifdef SOL_RHI_METAL
+static const char *IRRADIANCE_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "constant float PI = 3.14159265359;\n"
+    "struct VOut { float4 pos [[position]]; float2 ndc; };\n"
+    "struct FU {\n"
+    "    float3 uCamForward;\n"
+    "    float3 uCamRight;\n"
+    "    float3 uCamUp;\n"
+    "    float  uTanHalfFovY;\n"
+    "    float  uAspect;\n"
+    "};\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      texturecube<float> uEnvCube [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float3 N = normalize(u.uCamForward\n"
+    "             + v.ndc.x * u.uTanHalfFovY * u.uAspect * u.uCamRight\n"
+    "             + v.ndc.y * u.uTanHalfFovY * u.uCamUp);\n"
+    "    float3 up    = abs(N.y) < 0.999 ? float3(0.0,1.0,0.0) : float3(1.0,0.0,0.0);\n"
+    "    float3 right = normalize(cross(up, N));\n"
+    "    up = cross(N, right);\n"
+    "    float3 irradiance = float3(0.0);\n"
+    "    float  nrSamples  = 0.0;\n"
+    "    float  delta = 0.025;\n"
+    "    for (float phi = 0.0; phi < 2.0*PI; phi += delta)\n"
+    "        for (float theta = 0.0; theta < 0.5*PI; theta += delta) {\n"
+    "            float3 t = float3(sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta));\n"
+    "            float3 w = t.x*right + t.y*up + t.z*N;\n"
+    "            float3 radiance = uEnvCube.sample(s0, w, level(4.0)).rgb;\n"
+    "            irradiance += radiance * cos(theta) * sin(theta);\n"
+    "            nrSamples  += 1.0;\n"
+    "        }\n"
+    "    return float4(PI * irradiance / nrSamples, 1.0);\n"
+    "}\n";
+#else /* GLSL */
 static const char *IRRADIANCE_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vNdc;\n"
@@ -775,6 +1093,7 @@ static const char *IRRADIANCE_FRAGMENT_SRC =
     "        }\n"
     "    FragColor = vec4(PI * irradiance / nrSamples, 1.0);\n"
     "}\n";
+#endif /* SOL_RHI_METAL — irradiance */
 
 /* --- specular prefilter convolution (C1): for each output direction (= the
    reflection vector R, assuming V=N=R), GGX-importance-sample the env cube and
@@ -782,6 +1101,74 @@ static const char *IRRADIANCE_FRAGMENT_SRC =
    mip chain. Hammersley + GGX inverse-CDF gives samples clustered in the lobe
    (far fewer needed than uniform). The per-sample mip pick (solid-angle ratio)
    pre-blurs bright spots so the sun can't firefly a glossy reflection. --- */
+#ifdef SOL_RHI_METAL
+static const char *PREFILTER_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "constant float PI = 3.14159265359;\n"
+    "constant float ENV_SIZE = 1024.0;\n"
+    "struct VOut { float4 pos [[position]]; float2 ndc; };\n"
+    "struct FU {\n"
+    "    float3 uCamForward;\n"
+    "    float3 uCamRight;\n"
+    "    float3 uCamUp;\n"
+    "    float  uTanHalfFovY;\n"
+    "    float  uAspect;\n"
+    "    float  uRoughness;\n"
+    "};\n"
+    "static float distributionGGX(float NoH, float rough) {\n"
+    "    float a = rough*rough; float a2 = a*a;\n"
+    "    float d = NoH*NoH*(a2 - 1.0) + 1.0;\n"
+    "    return a2 / (PI * d * d);\n"
+    "}\n"
+    "static float radicalInverse(uint bits) {\n"
+    "    bits = (bits << 16u) | (bits >> 16u);\n"
+    "    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);\n"
+    "    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);\n"
+    "    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);\n"
+    "    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);\n"
+    "    return float(bits) * 2.3283064365386963e-10;\n"
+    "}\n"
+    "static float2 hammersley(uint i, uint n) { return float2(float(i)/float(n), radicalInverse(i)); }\n"
+    "static float3 importanceSampleGGX(float2 Xi, float3 N, float rough) {\n"
+    "    float a = rough*rough;\n"
+    "    float phi = 2.0*PI*Xi.x;\n"
+    "    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0)*Xi.y));\n"
+    "    float sinTheta = sqrt(1.0 - cosTheta*cosTheta);\n"
+    "    float3 H = float3(sinTheta*cos(phi), sinTheta*sin(phi), cosTheta);\n"
+    "    float3 up = abs(N.z) < 0.999 ? float3(0.0,0.0,1.0) : float3(1.0,0.0,0.0);\n"
+    "    float3 tangent = normalize(cross(up, N));\n"
+    "    float3 bitan = cross(N, tangent);\n"
+    "    return normalize(tangent*H.x + bitan*H.y + N*H.z);\n"
+    "}\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      texturecube<float> uEnvCube [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float3 N = normalize(u.uCamForward\n"
+    "             + v.ndc.x * u.uTanHalfFovY * u.uAspect * u.uCamRight\n"
+    "             + v.ndc.y * u.uTanHalfFovY * u.uCamUp);\n"
+    "    float3 R = N; float3 V = N;\n"
+    "    const uint SAMPLES = 1024u;\n"
+    "    float3 sum = float3(0.0); float wsum = 0.0;\n"
+    "    for (uint i = 0u; i < SAMPLES; i++) {\n"
+    "        float2 Xi = hammersley(i, SAMPLES);\n"
+    "        float3 H  = importanceSampleGGX(Xi, N, u.uRoughness);\n"
+    "        float3 L  = normalize(2.0 * dot(V, H) * H - V);\n"
+    "        float NoL = max(dot(N, L), 0.0);\n"
+    "        if (NoL > 0.0) {\n"
+    "            float NoH = max(dot(N, H), 0.0);\n"
+    "            float D   = distributionGGX(NoH, u.uRoughness);\n"
+    "            float pdf = D * 0.25 + 0.0001;\n"
+    "            float saTexel  = 4.0*PI / (6.0 * ENV_SIZE * ENV_SIZE);\n"
+    "            float saSample = 1.0 / (float(SAMPLES) * pdf + 0.0001);\n"
+    "            float mip = u.uRoughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel);\n"
+    "            sum  += uEnvCube.sample(s0, L, level(mip)).rgb * NoL;\n"
+    "            wsum += NoL;\n"
+    "        }\n"
+    "    }\n"
+    "    return float4(sum / wsum, 1.0);\n"
+    "}\n";
+#else /* GLSL */
 static const char *PREFILTER_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vNdc;\n"
@@ -845,12 +1232,72 @@ static const char *PREFILTER_FRAGMENT_SRC =
     "    }\n"
     "    FragColor = vec4(sum / wsum, 1.0);\n"
     "}\n";
+#endif /* SOL_RHI_METAL — prefilter */
 
 /* --- the BRDF integration LUT (C2): the second split-sum factor. For each
    (NoV, roughness) it integrates the specular geometry+Fresnel over the GGX
    lobe, factored so F0 separates -> R = scale on F0, G = bias. A 2D fullscreen
    render; environment-independent (bake once). Uses the same Hammersley + GGX
    importance sampling as C1, but the IBL geometry remap (k = rough^2 / 2). --- */
+#ifdef SOL_RHI_METAL
+static const char *BRDF_LUT_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "constant float PI = 3.14159265359;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "static float radicalInverse(uint bits) {\n"
+    "    bits = (bits << 16u) | (bits >> 16u);\n"
+    "    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);\n"
+    "    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);\n"
+    "    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);\n"
+    "    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);\n"
+    "    return float(bits) * 2.3283064365386963e-10;\n"
+    "}\n"
+    "static float2 hammersley(uint i, uint n) { return float2(float(i)/float(n), radicalInverse(i)); }\n"
+    "static float3 importanceSampleGGX(float2 Xi, float3 N, float rough) {\n"
+    "    float a = rough*rough;\n"
+    "    float phi = 2.0*PI*Xi.x;\n"
+    "    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0)*Xi.y));\n"
+    "    float sinTheta = sqrt(1.0 - cosTheta*cosTheta);\n"
+    "    float3 H = float3(sinTheta*cos(phi), sinTheta*sin(phi), cosTheta);\n"
+    "    float3 up = abs(N.z) < 0.999 ? float3(0.0,0.0,1.0) : float3(1.0,0.0,0.0);\n"
+    "    float3 tangent = normalize(cross(up, N));\n"
+    "    float3 bitan = cross(N, tangent);\n"
+    "    return normalize(tangent*H.x + bitan*H.y + N*H.z);\n"
+    "}\n"
+    "static float geometrySchlickGGX(float NdotX, float rough) {\n"
+    "    float k = (rough*rough) / 2.0;\n"
+    "    return NdotX / (NdotX*(1.0 - k) + k);\n"
+    "}\n"
+    "static float geometrySmith(float3 N, float3 V, float3 L, float rough) {\n"
+    "    return geometrySchlickGGX(max(dot(N,V),0.0), rough) * geometrySchlickGGX(max(dot(N,L),0.0), rough);\n"
+    "}\n"
+    "static float2 integrateBRDF(float NoV, float rough) {\n"
+    "    float3 V = float3(sqrt(1.0 - NoV*NoV), 0.0, NoV);\n"
+    "    float3 N = float3(0.0, 0.0, 1.0);\n"
+    "    float A = 0.0; float B = 0.0;\n"
+    "    const uint SAMPLES = 1024u;\n"
+    "    for (uint i = 0u; i < SAMPLES; i++) {\n"
+    "        float2 Xi = hammersley(i, SAMPLES);\n"
+    "        float3 H  = importanceSampleGGX(Xi, N, rough);\n"
+    "        float3 L  = normalize(2.0 * dot(V, H) * H - V);\n"
+    "        float NoL = max(L.z, 0.0);\n"
+    "        float NoH = max(H.z, 0.0);\n"
+    "        float VoH = max(dot(V, H), 0.0);\n"
+    "        if (NoL > 0.0) {\n"
+    "            float G    = geometrySmith(N, V, L, rough);\n"
+    "            float Gvis = (G * VoH) / (NoH * NoV);\n"
+    "            float Fc   = pow(1.0 - VoH, 5.0);\n"
+    "            A += (1.0 - Fc) * Gvis;\n"
+    "            B += Fc * Gvis;\n"
+    "        }\n"
+    "    }\n"
+    "    return float2(A, B) / float(SAMPLES);\n"
+    "}\n"
+    "fragment float4 fmain(VOut v [[stage_in]]) {\n"
+    "    return float4(integrateBRDF(max(v.uv.x, 0.001), v.uv.y), 0.0, 1.0);\n"
+    "}\n";
+#else /* GLSL */
 static const char *BRDF_LUT_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vUV;\n"
@@ -908,6 +1355,7 @@ static const char *BRDF_LUT_FRAGMENT_SRC =
     "void main() {\n"
     "    FragColor = vec4(integrateBRDF(max(vUV.x, 0.001), vUV.y), 0.0, 1.0);\n"  /* guard NoV=0 */
     "}\n";
+#endif /* SOL_RHI_METAL — the BRDF LUT */
 
 #define EDIT_BUF_CAP 2048   /* a note's text, while it is being typed */
 

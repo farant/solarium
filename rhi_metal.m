@@ -35,8 +35,18 @@
      uniform struct; FRAGMENT buffers: 0 = the uniform struct;
    - textures/samplers use rhi_bind_texture's slot numbers, fragment
      stage (no vertex textures yet);
-   - twins that sample RENDER TARGETS flip v (Metal's texture row 0 is
-     the TOP row); CPU-uploaded textures sample unflipped in both APIs;
+   - ORIENTATION (stage c/d, replacing stage b's per-twin v-flips): every
+     OFFSCREEN pass renders through a NEGATIVE-HEIGHT VIEWPORT, so all
+     render targets (HDR, shadow, bloom, BRDF LUT, cube faces) store
+     GL-identical row layouts and every sampling twin keeps GLSL-identical
+     math — no flips anywhere. Only the drawable renders top-down (it
+     must: row 0 IS the top of the screen). Winding is unaffected — we
+     cull nothing (GL parity).
+   - DEPTH RANGE: the app's projection matrices are GL-convention
+     (clip z in [-w,w]); Metal clips z to [0,w]. Every PROJECTED-geometry
+     VS twin remaps `pos.z = (pos.z + pos.w) * 0.5` — full near-plane and
+     depth precision parity, and stored depth = GL's 0.5*ndc+0.5 mapping,
+     so depth-compare math (the shadow test) stays GLSL-identical too.
    - the frame is bracketed begin_pass..rhi_present: one command buffer,
      one encoder per pass, one drawable, one autorelease pool. */
 
@@ -78,11 +88,20 @@ extern void  objc_autoreleasePoolPop(void *pool);
    the (tiny) sampler cache hands back the matching state object */
 enum {
     SAMP_MIPS_REPEAT = 0,   /* create_texture: trilinear, repeat */
-    SAMP_LINEAR_CLAMP,      /* render-target color: linear, clamp */
+    SAMP_LINEAR_CLAMP,      /* render-target color + unmipped cube: linear, clamp */
     SAMP_HDR,               /* equirect HDR: linear, S repeat / T clamp */
-    SAMP_DEPTH,             /* shadow map: nearest, clamp (compare at d) */
+    SAMP_DEPTH,             /* shadow map: nearest, clamp-to-WHITE-border
+                               (outside the light's frustum = depth 1 = lit,
+                               GL's border-color trick mirrored) */
+    SAMP_CLAMP_MIPS,        /* mipmapped cube (env/prefilter): trilinear, clamp */
     SAMP_KIND_COUNT
 };
+
+/* what a fragment shader DECLARES at each texture slot (from reflection) —
+   drives the fallback choice when a declared slot has no app binding
+   (Metal validates binding types; a 2D white square cannot stand in for a
+   cube or a depth map) */
+enum { TEXDECL_NONE = 0, TEXDECL_2D, TEXDECL_CUBE, TEXDECL_DEPTH };
 
 /* one reflected uniform-struct member */
 typedef struct {
@@ -110,7 +129,7 @@ typedef struct {
     MtUniform     fu[MAX_UNIFORMS];  int fu_count;  sol_u32 fu_size;
     unsigned char *vblock;         /* persistent shadow storage (calloc) */
     unsigned char *fblock;
-    sol_u32       ftex_mask;       /* fragment texture slots the FS declares */
+    unsigned char ftex_decl[16];   /* TEXDECL_* per fragment texture slot */
 } MtPipeline;
 
 typedef struct {
@@ -184,7 +203,9 @@ static dispatch_semaphore_t       g_inflight;
 static NSMutableDictionary       *g_pso_cache;     /* (pipeline,color,depth) -> PSO */
 static id<MTLDepthStencilState>   g_ds[2][2];      /* [depth_test][write_off] */
 static id<MTLSamplerState>        g_samplers[SAMP_KIND_COUNT];
-static id<MTLTexture>             g_white;         /* fallback for declared-but-unbound slots */
+static id<MTLTexture>             g_white;         /* fallbacks for declared-but- */
+static id<MTLTexture>             g_white_cube;    /* unbound slots, one per      */
+static id<MTLTexture>             g_depth_one;     /* declared texture type       */
 static id<MTLBuffer>              g_arena[FRAMES_IN_FLIGHT];
 static sol_u32                    g_arena_off;
 static int                        g_frame_slot;
@@ -207,6 +228,8 @@ static id<MTLBuffer> g_instbuf;
 static id<MTLBuffer> g_ibuf;
 static sol_u32       g_bound_tex[MAX_TEX_SLOTS]; /* texture handles by slot */
 
+static void clear_target_once(id<MTLTexture> color, id<MTLTexture> depth);
+
 /* ---- samplers ---- */
 static id<MTLSamplerState> sampler_for(int kind) {
     if (!g_samplers[kind]) {
@@ -225,8 +248,16 @@ static id<MTLSamplerState> sampler_for(int kind) {
             sd.sAddressMode = MTLSamplerAddressModeRepeat;  /* longitude wraps */
             break;                                          /* T clamps (poles) */
         case SAMP_DEPTH:
-            sd.minFilter = MTLSamplerMinMagFilterNearest;
-            sd.magFilter = MTLSamplerMinMagFilterNearest;
+            sd.minFilter    = MTLSamplerMinMagFilterNearest;
+            sd.magFilter    = MTLSamplerMinMagFilterNearest;
+            sd.sAddressMode = MTLSamplerAddressModeClampToBorderColor;
+            sd.tAddressMode = MTLSamplerAddressModeClampToBorderColor;
+            sd.borderColor  = MTLSamplerBorderColorOpaqueWhite;  /* outside the
+                                 light's frustum reads depth 1.0 = lit (GL's
+                                 border trick, mirrored) */
+            break;
+        case SAMP_CLAMP_MIPS:
+            sd.mipFilter = MTLSamplerMipFilterLinear;
             break;
         default: break;                 /* SAMP_LINEAR_CLAMP is the base desc */
         }
@@ -267,16 +298,34 @@ sol_bool rhi_init(struct GLFWwindow *window) {
     for (i = 0; i < FRAMES_IN_FLIGHT; i++)
         g_arena[i] = [g_device newBufferWithLength:ARENA_BYTES
                                            options:MTLResourceStorageModeShared];
-    {   /* the white fallback: a declared-but-unbound texture slot samples
-           opaque white (a stale GL unit would have sampled garbage; we can
-           do better than parity here because Metal VALIDATES bindings) */
+    {   /* the fallbacks: a declared-but-unbound texture slot samples opaque
+           white (a stale GL unit would have sampled garbage; we can do
+           better than parity here because Metal VALIDATES bindings). One
+           per declared TYPE — a 2D square cannot stand in for a cube or a
+           depth map. */
         static const unsigned char px[4] = { 255, 255, 255, 255 };
         MTLTextureDescriptor *td = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                          width:1 height:1 mipmapped:NO];
+        int s;
         g_white = [g_device newTextureWithDescriptor:td];
         [g_white replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
                    mipmapLevel:0 withBytes:px bytesPerRow:4];
+        td = [MTLTextureDescriptor
+            textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                            size:1 mipmapped:NO];
+        g_white_cube = [g_device newTextureWithDescriptor:td];
+        for (s = 0; s < 6; s++)
+            [g_white_cube replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                            mipmapLevel:0 slice:(NSUInteger)s
+                              withBytes:px bytesPerRow:4 bytesPerImage:4];
+        td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                         width:1 height:1 mipmapped:NO];
+        td.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        g_depth_one = [g_device newTextureWithDescriptor:td];
+        clear_target_once(nil, g_depth_one);     /* reads as "far" = lit */
     }
     printf("MTL DEVICE : %s\n", g_device.name.UTF8String);
     return SOL_TRUE;
@@ -303,7 +352,7 @@ void rhi_shutdown(void) {
     g_ds[0][0] = nil; g_ds[0][1] = nil; g_ds[1][0] = nil; g_ds[1][1] = nil;
     for (k = 0; k < SAMP_KIND_COUNT; k++) g_samplers[k] = nil;
     for (k = 0; k < FRAMES_IN_FLIGHT; k++) g_arena[k] = nil;
-    g_white = nil;
+    g_white = nil; g_white_cube = nil; g_depth_one = nil;
     g_window_depth = nil;
     g_vbuf = nil; g_instbuf = nil; g_ibuf = nil;
     g_encoder = nil; g_cmdbuf = nil; g_drawable = nil;
@@ -395,10 +444,16 @@ static id<MTLDepthStencilState> ds_for(sol_bool test, sol_bool write_off) {
 /* harvest one stage's reflected bindings into a pipeline's tables */
 static void reflect_stage(NSArray<id<MTLBinding>> *bindings, int uniform_index,
                           MtUniform *tab, int *count, sol_u32 *size,
-                          unsigned char **block, sol_u32 *tex_mask) {
+                          unsigned char **block, unsigned char *tex_decl) {
     for (id<MTLBinding> b in bindings) {
-        if (b.type == MTLBindingTypeTexture && tex_mask) {
-            if (b.index < MAX_TEX_SLOTS) *tex_mask |= 1u << b.index;
+        if (b.type == MTLBindingTypeTexture && tex_decl) {
+            if (b.index < MAX_TEX_SLOTS) {
+                id<MTLTextureBinding> tb = (id<MTLTextureBinding>)b;
+                tex_decl[b.index] =
+                      tb.depthTexture                              ? TEXDECL_DEPTH
+                    : (tb.textureType == MTLTextureTypeCube)       ? TEXDECL_CUBE
+                    :                                                TEXDECL_2D;
+            }
             continue;
         }
         if (b.type != MTLBindingTypeBuffer || (int)b.index != uniform_index)
@@ -506,7 +561,7 @@ static id<MTLRenderPipelineState> pso_for(sol_u32 pipe_id,
         reflect_stage(refl.vertexBindings, 2,
                       p->vu, &p->vu_count, &p->vu_size, &p->vblock, NULL);
         reflect_stage(refl.fragmentBindings, 0,
-                      p->fu, &p->fu_count, &p->fu_size, &p->fblock, &p->ftex_mask);
+                      p->fu, &p->fu_count, &p->fu_size, &p->fblock, p->ftex_decl);
         p->reflected = SOL_TRUE;
     }
     g_pso_cache[key] = pso;
@@ -649,22 +704,75 @@ RhiTexture rhi_create_texture_hdr(const float *pixels, int width, int height) {
     return h;
 }
 
-/* cubemaps: stage (d) — the IBL bakes */
+/* cubemaps (stage d): the IBL bakes' canvas. Metal is CLEANER than GL
+   here — no shared FBO dance; a pass descriptor just names slice + level. */
+static void frame_begin(void);
+
 RhiTexture rhi_create_cubemap(int size, sol_bool mipmapped) {
     RhiTexture h;
-    (void)size; (void)mipmapped;
+    MTLTextureDescriptor *td;
+    id<MTLTexture> tex;
     h.id = 0;
+    if (!g_device || size <= 0) return h;
+    td = [MTLTextureDescriptor
+        textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                        size:(NSUInteger)size
+                                   mipmapped:(mipmapped ? YES : NO)];
+    td.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModePrivate;
+    tex = [g_device newTextureWithDescriptor:td];
+    if (!tex) return h;
+    h.id = register_texture(tex, mipmapped ? SAMP_CLAMP_MIPS : SAMP_LINEAR_CLAMP,
+                            SOL_FALSE, RHI_TEX_RGBA16F);
     return h;
 }
 
 void rhi_begin_cubemap_face(RhiTexture cube, int face, int mip, int size) {
-    /* a dead pass: close any encoder so the bake's draws no-op */
-    (void)cube; (void)face; (void)mip; (void)size;
+    MTLRenderPassDescriptor *pd;
     if (g_encoder) { [g_encoder endEncoding]; g_encoder = nil; }
     g_pass_alive = SOL_FALSE;
+    if (!cube.id || !g_queue) return;            /* the id-0 contract */
+    frame_begin();
+    if (!g_cmdbuf) return;
+    pd = [MTLRenderPassDescriptor renderPassDescriptor];
+    pd.colorAttachments[0].texture     = g_textures[cube.id - 1];
+    pd.colorAttachments[0].slice       = (NSUInteger)face;
+    pd.colorAttachments[0].level       = (NSUInteger)mip;
+    pd.colorAttachments[0].loadAction  = MTLLoadActionClear;  /* GL's glClear */
+    pd.colorAttachments[0].clearColor  = MTLClearColorMake(0, 0, 0, 1);
+    pd.colorAttachments[0].storeAction = MTLStoreActionStore;
+    g_encoder = [g_cmdbuf renderCommandEncoderWithDescriptor:pd];
+    if (!g_encoder) return;
+    {   /* the negative-height viewport: faces store GL row layouts, so the
+           app's GL-compensating face bases work unchanged */
+        MTLViewport vp;
+        vp.originX = 0.0;             vp.originY = (double)size;
+        vp.width   = (double)size;    vp.height  = -(double)size;
+        vp.znear   = 0.0;             vp.zfar    = 1.0;
+        [g_encoder setViewport:vp];
+    }
+    g_pass_color_fmt = MTLPixelFormatRGBA16Float;
+    g_pass_depth_fmt = MTLPixelFormatInvalid;    /* no depth, like GL's cube FBO */
+    g_pass_alive = SOL_TRUE;
 }
 
-void rhi_cubemap_generate_mips(RhiTexture cube) { (void)cube; }
+void rhi_cubemap_generate_mips(RhiTexture cube) {
+    id<MTLTexture> tex;
+    if (!cube.id) return;
+    tex = g_textures[cube.id - 1];
+    if (!tex || tex.mipmapLevelCount <= 1) return;
+    if (g_encoder) { [g_encoder endEncoding]; g_encoder = nil; g_pass_alive = SOL_FALSE; }
+    if (g_frame_began && g_cmdbuf) {
+        /* ride the FRAME's command buffer: encode order = execution order,
+           so the mips compute AFTER the face renders that feed them (a
+           one-shot here would commit FIRST and average undefined texels) */
+        id<MTLBlitCommandEncoder> blit = [g_cmdbuf blitCommandEncoder];
+        [blit generateMipmapsForTexture:tex];
+        [blit endEncoding];
+    } else {
+        generate_mips(tex);
+    }
+}
 
 void rhi_bind_texture(RhiTexture texture, int slot) {
     if (slot < 0 || slot >= MAX_TEX_SLOTS) return;
@@ -858,6 +966,17 @@ void rhi_begin_pass(RhiRenderTarget target, int clear_flags,
         pd.depthAttachment.clearDepth  = 1.0;
         pd.depthAttachment.storeAction = MTLStoreActionStore;
         g_pass_depth_fmt = MTLPixelFormatDepth32Float;
+        g_encoder = [g_cmdbuf renderCommandEncoderWithDescriptor:pd];
+        if (g_encoder) {       /* offscreen renders through the NEGATIVE-
+                                  height viewport: GL row layout, see top */
+            MTLViewport vp;
+            vp.originX = 0.0;                  vp.originY = (double)rt->height;
+            vp.width   = (double)rt->width;    vp.height  = -(double)rt->height;
+            vp.znear   = 0.0;                  vp.zfar    = 1.0;
+            [g_encoder setViewport:vp];
+        }
+        g_pass_alive = (g_encoder != nil);
+        return;
     } else {
         ensure_drawable();
         if (!g_drawable) return;
@@ -1049,15 +1168,20 @@ static sol_bool draw_ready(void) {
         [g_encoder setFragmentBuffer:g_arena[g_frame_slot] offset:off atIndex:0];
     }
     for (slot = 0; slot < MAX_TEX_SLOTS; slot++) {
-        id<MTLTexture> tex;
-        int kind;
-        if (!(p->ftex_mask & (1u << slot))) continue;   /* only declared slots */
+        id<MTLTexture> tex = nil;
+        int kind = SAMP_LINEAR_CLAMP;
+        int decl = p->ftex_decl[slot];
+        if (decl == TEXDECL_NONE) continue;          /* only declared slots */
         if (g_bound_tex[slot] && g_textures[g_bound_tex[slot] - 1]) {
             tex  = g_textures[g_bound_tex[slot] - 1];
             kind = g_tex_info[g_bound_tex[slot] - 1].kind;
-        } else {
-            tex  = g_white;                  /* declared but unbound: white */
-            kind = SAMP_LINEAR_CLAMP;
+        }
+        if (!tex) {                /* declared but unbound: the TYPED fallback
+                                      (Metal validates; a 2D white square
+                                      cannot stand in for a cube or depth) */
+            tex  = (decl == TEXDECL_CUBE)  ? g_white_cube
+                 : (decl == TEXDECL_DEPTH) ? g_depth_one : g_white;
+            kind = (decl == TEXDECL_DEPTH) ? SAMP_DEPTH : SAMP_LINEAR_CLAMP;
         }
         [g_encoder setFragmentTexture:tex atIndex:(NSUInteger)slot];
         [g_encoder setFragmentSamplerState:sampler_for(kind) atIndex:(NSUInteger)slot];
