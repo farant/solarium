@@ -20,6 +20,7 @@
 #include "text.h"                /* text_shape seam + ui_text (P3 item 3b) */
 #include "wtext.h"               /* world-space SDF text — note cards (P3 item 8) */
 #include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
+#include "collide.h"             /* the world's lateral push-back (P4 item 1) */
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -567,6 +568,11 @@ typedef struct {
     sol_bool    r_was_down;     /* edge-detect the mirror-rescan key (P3 item 6c) */
     sol_bool    bs_was_down;    /* edge-detect tombstone dismissal (Backspace) */
     sol_bool    g_was_down;     /* edge-detect gather-to-workspace (P3 item 6d) */
+    /* collision (P4 item 1): derived data like the arrows — rebuilt on load
+       and on drag release (walls and paths are draggable props) */
+    ColliderSet colliders;
+    sol_bool    ghost;          /* 'X': debug no-clip — building wants to pass through walls */
+    sol_bool    x_was_down;
     /* room graph (P3 item 7) */
     sol_u32     current_room;   /* containing room's anchor handle; 0 = outside (derived per frame) */
     float       ambient_scale;  /* eased toward the room's ambient (sealed = dim) */
@@ -1264,7 +1270,9 @@ static float ground_under(AppState *st, vec3 p, sol_u32 *out_plot) {
                             local.x, local.z);
         gy = mat4_mul_point(scene_world_matrix(s, o),
                             vec3_make(local.x, h, local.z)).y;
-        if (gy <= p.y + 0.6f && gy > best) {
+        if (gy <= p.y + COLLIDE_STEP_UP && gy > best) {   /* the treaty constant:
+                                       what ground may claim, walls must not
+                                       resist — one number, two authorities */
             best      = gy;
             best_plot = o->handle;
         }
@@ -1697,7 +1705,7 @@ static void reader_draw_page_bent(AppState *st, mat4 vp, mat4 hinge_m,
 
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool f_now, tab_now, m_now, i_now, p_now, l_now, dragging, fp;
+    sol_bool f_now, tab_now, m_now, i_now, p_now, l_now, x_now, dragging, fp;
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
@@ -1968,6 +1976,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                            o ? (double)o->pos.x : 0.0,
                            o ? (double)o->pos.y : 0.0,
                            o ? (double)o->pos.z : 0.0);
+                collide_rebuild(&st->colliders, &st->scene);  /* walls and
+                                       paths are draggable props — the
+                                       architecture may just have moved */
             } else if (!fp) {
                 double ddx = mx - st->press_x;
                 double ddy = my - st->press_y;
@@ -1989,6 +2000,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     if (f_now && !st->f_was_down && st->camera.mode != CAMERA_ORBIT)
         st->camera.mode = (st->camera.mode == CAMERA_WALK) ? CAMERA_FLY : CAMERA_WALK;
     st->f_was_down = f_now;
+
+    /* X toggles ghost — debug no-clip (P4 item 1; fly collides by decision,
+       so building and inspection need an explicit way through walls) */
+    x_now = glfwGetKey(w, GLFW_KEY_X) == GLFW_PRESS;
+    if (x_now && !st->x_was_down) {
+        st->ghost = !st->ghost;
+        printf("ghost %s\n", st->ghost ? "ON — collision off"
+                                       : "off — the world pushes back");
+    }
+    st->x_was_down = x_now;
 
     /* M toggles the shadow-map inspector (item 9b, edge) */
     m_now = glfwGetKey(w, GLFW_KEY_M) == GLFW_PRESS;
@@ -2638,6 +2659,7 @@ static sol_bool load_palace(AppState *st) {
     scene_reimport_glbs(st);
     scene_resolve_meshes(&st->scene);
     arrows_rebuild(st);              /* edges re-derive from the loaded cards */
+    collide_rebuild(&st->colliders, &st->scene);  /* and so do the walls */
     apply_kind_materials(&st->scene);
     bind_runtime_handles(st);
     {
@@ -3015,6 +3037,7 @@ static int init_scene(AppState *state) {
                (unsigned)state->scene.count);
     } else {
         populate_default_scene(state);
+        collide_rebuild(&state->colliders, &state->scene);
     }
 
     /* spawn standing at the south edge of the scene, facing -Z at eye height
@@ -3545,7 +3568,8 @@ static void render(AppState *state) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
-            sprintf(line, "cam %s  exposure %.2f", mode, (double)state->exposure);
+            sprintf(line, "cam %s%s  exposure %.2f", mode,
+                    state->ghost ? " GHOST" : "", (double)state->exposure);
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 1.0f, 1.0f, 1.0f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
             {
@@ -3950,7 +3974,33 @@ int main(void) {
         read_input(window, &in, dt, &state);          /* poll GLFW -> CameraInput */
         state.camera.ground_y = ground_under(&state, state.camera.pos,
                                              &state.current_terrain);
-        camera_update(&state.camera, &in, (float)dt);
+        {
+            /* collision (P4 item 1): camera_update PROPOSES, the world
+               DISPOSES. The desired move is read back as a delta so
+               camera.c stays pure kinematics; the capsule hangs from the
+               eye (feet = eye - eye height; the crown sits just above the
+               eye). Lateral resolves against the derived walls; vertical
+               stays the ground seam's except fly's clamp at undersides
+               and tops. Orbit is an inspection camera and ghost is the
+               debug out — both skip. */
+            vec3 before = state.camera.pos;
+            camera_update(&state.camera, &in, (float)dt);
+            if (!state.ghost && state.camera.mode != CAMERA_ORBIT) {
+                vec3 move = vec3_sub(state.camera.pos, before);
+                vec3 feet = before;
+                vec3 lat  = move;
+                feet.y -= CAMERA_EYE_HEIGHT;
+                lat.y   = 0.0f;
+                feet = collide_slide(&state.colliders, feet, lat,
+                                     COLLIDE_RADIUS, COLLIDE_HEIGHT);
+                if (state.camera.mode == CAMERA_FLY)
+                    move.y = collide_clamp_y(&state.colliders, feet, move.y,
+                                             COLLIDE_RADIUS, COLLIDE_HEIGHT);
+                feet.y += move.y;
+                state.camera.pos   = feet;
+                state.camera.pos.y += CAMERA_EYE_HEIGHT;
+            }
+        }
         update(&state, dt);                           /* animate the scene */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */
         render(&state);
@@ -3963,6 +4013,7 @@ int main(void) {
     wtext_shutdown();
     ui_shutdown();
     scene_free(&state.scene);
+    collide_set_free(&state.colliders);
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
     if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);
     rhi_shutdown();
