@@ -88,6 +88,15 @@ RhiShader   rhi_create_shader(const char *vertex_src, const char *fragment_src);
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc);
 RhiTexture  rhi_create_texture(const void *pixels, int width, int height, RhiTextureFormat fmt);  /* RGBA8 source */
 
+/* Re-specify an existing 2D texture's contents IN PLACE — same handle, new
+   pixels (size may change). The hot-reload primitive (P4 item 4): a handle
+   is a NAME, so every material holding it sees the new image with zero
+   rebinding. fmt must match the creation format (the decode behavior is
+   the texture's identity, not a parameter). Metal: replaceRegion — fully
+   expressible. */
+void        rhi_update_texture(RhiTexture texture, const void *pixels,
+                               int width, int height, RhiTextureFormat fmt);
+
 /* An HDR texture from linear float (RGBA) source -> RHI_TEX_RGBA16F. For
    equirectangular environment maps: wraps in S (longitude), clamps in T
    (poles), LINEAR, no mipmaps. The source stays linear radiance (never sRGB). */

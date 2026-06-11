@@ -17,9 +17,10 @@
 #include <stddef.h>
 #include "sol_base.h"
 
-/* payloads are stored BY COPY (a Mesh, an RhiTexture + sidecar) — no
-   pointers into the store survive a realloc, because none are handed out */
-#define ASSET_PAYLOAD_MAX 64
+/* payloads are stored BY COPY (a Mesh, an RhiTexture, a whole GlbPart —
+   mesh + material together, ~84 bytes) — no pointers into the store survive
+   a realloc, because none are handed out */
+#define ASSET_PAYLOAD_MAX 128
 
 typedef void (*AssetDestroyFn)(void *payload, void *user);
 typedef void (*AssetVisitFn)(const char *key, void *payload, void *user);

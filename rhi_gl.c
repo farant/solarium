@@ -292,6 +292,26 @@ RhiTexture rhi_create_texture(const void *pixels, int width, int height, RhiText
     return h;
 }
 
+void rhi_update_texture(RhiTexture texture, const void *pixels,
+                        int width, int height, RhiTextureFormat fmt) {
+    GLint internal = (fmt == RHI_TEX_SRGB8) ? GL_SRGB8_ALPHA8
+                   : (fmt == RHI_TEX_R8)    ? GL_R8 : GL_RGBA8;
+    const GlTexture *t = &g_textures[texture.id - 1];
+    if (t->target != GL_TEXTURE_2D) return;        /* cubemaps don't hot-reload */
+    glBindTexture(GL_TEXTURE_2D, t->tex);
+    if (fmt == RHI_TEX_R8) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, (GLsizei)width, (GLsizei)height, 0,
+                     GL_RED, GL_UNSIGNED_BYTE, pixels);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, (GLsizei)width, (GLsizei)height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    }
+    glGenerateMipmap(GL_TEXTURE_2D);   /* filters/wrap/swizzle persist on the object */
+    gl_check("rhi_update_texture");
+}
+
 RhiTexture rhi_create_texture_hdr(const float *pixels, int width, int height) {
     GLuint     tex;
     sol_u32    idx;

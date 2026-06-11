@@ -24,6 +24,12 @@
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
 #include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
 
+/* glb models come through the registry (P4 item 4 piece 3) — defined with
+   the stores below; forward-declared because the import layer sits above
+   them in this file */
+static sol_bool glb_acquire_model(const char *path, GlbModel *out);
+static void     glb_part_key(const char *path, int index, char *buf);
+
 /* one island's grass (P4 item 3): a static instance buffer + the island it
    grows on — drawn only when the island itself survives the frustum */
 typedef struct {
@@ -762,16 +768,23 @@ static Aabb union_bounds(const GlbModel *model) {
    never serialized (6e) — the file stores the anchor + its glb ref, and
    parts regenerate from the .glb on every load, exactly as procedural
    meshes regenerate from their registry refs. */
-static void glb_attach_parts(AppState *state, sol_u32 anchor, const GlbModel *model) {
+static void glb_attach_parts(AppState *state, sol_u32 anchor, const GlbModel *model,
+                             const char *path) {
     Aabb    b      = union_bounds(model);
     vec3    center = vec3_scale(vec3_add(b.min, b.max), 0.5f);
     sol_u32 m;
     for (m = 0; m < model->count; m++) {
+        char    akey[320];
         sol_u32 h = scene_add(&state->scene, anchor, model->parts[m].mesh,
                               vec3_make(-center.x, -center.y, -center.z),
                               quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
         scene_material_set(&state->scene, h, model->parts[m].material);
         scene_meta_set(&state->scene, h, "derived", "1");
+        /* the BORROW TICKET (P4 item 4): a part has no mesh_ref to re-derive
+           a key from, so it carries its registry key in runtime meta —
+           derived objects never serialize, so the format never sees it */
+        glb_part_key(path, (int)m, akey);
+        scene_meta_set(&state->scene, h, "akey", akey);
     }
 }
 
@@ -786,7 +799,7 @@ static sol_u32 add_glb_to_scene(AppState *state, const char *path, float x, floa
     sol_u32  anchor;
     Mesh     empty = {0};
 
-    if (!glb_load(path, &model)) { fprintf(stderr, "glb load failed: %s\n", path); return 0; }
+    if (!glb_acquire_model(path, &model)) { fprintf(stderr, "glb load failed: %s\n", path); return 0; }
 
     b      = union_bounds(&model);
     center = vec3_scale(vec3_add(b.min, b.max), 0.5f);
@@ -805,7 +818,7 @@ static sol_u32 add_glb_to_scene(AppState *state, const char *path, float x, floa
     anchor = scene_add(&state->scene, 0, empty,
                        vec3_make(x, scale * (center.y - b.min.y), z),
                        quat_identity(), vec3_make(scale, scale, scale));
-    glb_attach_parts(state, anchor, &model);
+    glb_attach_parts(state, anchor, &model, path);
     scene_meta_set(&state->scene, anchor, "name", path);   /* the pin's tag (item 6) */
     scene_meta_set(&state->scene, anchor, "glb", path);    /* geometry by reference (6e) */
     glb_free(&model);
@@ -835,12 +848,12 @@ static void scene_reimport_glbs(AppState *state) {
     for (i = 0; i < n; i++) {
         const char *path = scene_meta_get(&state->scene, anchors[i], "glb");
         GlbModel    model;
-        if (!path || !glb_load(path, &model)) {
+        if (!path || !glb_acquire_model(path, &model)) {
             fprintf(stderr, "glb re-import failed: %s — anchor kept, body missing\n",
                     path ? path : "(no path)");
             continue;                       /* the placed anchor outlives its asset */
         }
-        glb_attach_parts(state, anchors[i], &model);
+        glb_attach_parts(state, anchors[i], &model, path);
         glb_free(&model);
     }
 }
@@ -1492,6 +1505,136 @@ static void mesh_asset_destroy(void *payload, void *user) {
     mesh_destroy((Mesh *)payload);   /* GPU buffers + retained CpuGeom together */
 }
 
+/* The texture store (P4 item 4 piece 3): key = "t|<path>|s/l" — the same
+   file as COLOR (sRGB-decoded by the sampler) and as DATA (raw) are two
+   different GPU objects, so colorspace is part of identity. Policy is
+   deliberately relaxed vs meshes: textures get registry IDENTITY (dedup +
+   the watcher's reload hook) but SESSION lifetime — strict release waits
+   for a consumer that actually churns textures; meshes churn at every L. */
+static AssetStore g_tex_assets;
+
+static void tex_asset_destroy(void *payload, void *user) {
+    (void)user;
+    rhi_destroy_texture(*(RhiTexture *)payload);
+}
+
+static void tex_asset_key(const char *path, sol_bool srgb, char *buf) {
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    sprintf(buf, "t|%s|%c", path, srgb ? 's' : 'l');
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+}
+
+/* ---- glb models through the registry (P4 item 4 piece 3) ----
+   Parts are keyed "g|<path>|<i>" with whole GlbPart payloads — mesh AND
+   material, so a memo hit reconstructs the model without the file: the
+   material's texture handles ride inside the payload. The MEMO solves the
+   bootstrap problem (you can't acquire part 2 of a file you haven't parsed
+   — its part count lives inside it): parse once per session, remember the
+   count, borrow by index forever after. Two anchors of one sword now share
+   one set of buffers — the cross-anchor dedup imports never had. */
+static AssetStore g_glbpart_assets;
+
+static void glb_part_destroy(void *payload, void *user) {
+    (void)user;
+    mesh_destroy(&((GlbPart *)payload)->mesh);  /* textures are session-owned */
+}
+
+#define GLB_MEMO_MAX 32
+typedef struct { char path[200]; int parts; } GlbMemo;
+static GlbMemo g_glb_memo[GLB_MEMO_MAX];
+static int     g_glb_memo_count;
+
+static void glb_part_key(const char *path, int index, char *buf) {
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    sprintf(buf, "g|%s|%d", path, index);
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+}
+
+/* register a model's embedded textures ("t|<path>#<n>|g", discovery order)
+   so the watcher can find them; session lifetime like every texture */
+static void glb_register_textures(const char *path, const GlbModel *model) {
+    sol_u32 seen[64];
+    int     nseen = 0, named = 0;
+    sol_u32 m;
+    for (m = 0; m < model->count; m++) {
+        RhiTexture slots[4];
+        int        si, k;
+        slots[0] = model->parts[m].material.albedo_tex;
+        slots[1] = model->parts[m].material.mr_tex;
+        slots[2] = model->parts[m].material.ao_tex;
+        slots[3] = model->parts[m].material.normal_tex;
+        for (si = 0; si < 4; si++) {
+            char key[320];
+            if (slots[si].id == 0) continue;
+            for (k = 0; k < nseen; k++)
+                if (seen[k] == slots[si].id) break;
+            if (k < nseen || nseen >= 64) continue;
+            seen[nseen++] = slots[si].id;
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+            sprintf(key, "t|%s#%d|g", path, named);
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+            named++;
+            asset_store_add(&g_tex_assets, key, &slots[si], sizeof slots[si]);
+        }
+    }
+}
+
+/* The acquire-or-parse handshake for a whole model. On a memo hit, every
+   part is borrowed from the store and the file never opens; on first sight
+   the file parses once and everything registers. Either way the caller owns
+   only the parts ARRAY (glb_free), never the GPU resources. */
+static sol_bool glb_acquire_model(const char *path, GlbModel *out) {
+    char key[320];
+    int  i, memo = -1;
+    for (i = 0; i < g_glb_memo_count; i++) {
+        if (strcmp(g_glb_memo[i].path, path) == 0) { memo = i; break; }
+    }
+    if (memo >= 0) {
+        int n = g_glb_memo[memo].parts;
+        out->parts = (GlbPart *)malloc((size_t)n * sizeof(GlbPart));
+        out->count = (sol_u32)n;
+        if (out->parts == NULL) return SOL_FALSE;
+        for (i = 0; i < n; i++) {
+            glb_part_key(path, i, key);
+            if (!asset_acquire(&g_glbpart_assets, key,
+                               &out->parts[i], sizeof(GlbPart))) {
+                fprintf(stderr, "glb registry: '%s' part %d missing — memo stale?\n",
+                        path, i);
+                free(out->parts);
+                return SOL_FALSE;
+            }
+        }
+        return SOL_TRUE;
+    }
+    if (!glb_load(path, out)) return SOL_FALSE;
+    for (i = 0; i < (int)out->count; i++) {
+        glb_part_key(path, i, key);
+        asset_store_add(&g_glbpart_assets, key, &out->parts[i], sizeof(GlbPart));
+    }
+    glb_register_textures(path, out);
+    if (g_glb_memo_count < GLB_MEMO_MAX && strlen(path) < sizeof g_glb_memo[0].path) {
+        strcpy(g_glb_memo[g_glb_memo_count].path, path);
+        g_glb_memo[g_glb_memo_count].parts = (int)out->count;
+        g_glb_memo_count++;
+    }
+    return SOL_TRUE;
+}
+
 /* The registry key for an object's geometry: the ref + its EFFECTIVE
    parameters — the file's prefix merged with the schema defaults, so an old
    3-param room and its explicit full-param twin read as THE SAME SHAPE
@@ -1535,13 +1678,18 @@ static void scene_release_meshes(Scene *s) {
     sol_u32 i;
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
-        char key[160];
+        char        key[160];
+        const char *akey;
         if (o->mesh.index_count == 0) continue;
-        if (mesh_asset_key(o, key)) {
+        akey = scene_meta_get(s, o->handle, "akey");
+        if (akey) {                                /* a glb part: read its ticket */
+            asset_release(&g_glbpart_assets, akey);
+            memset(&o->mesh, 0, sizeof o->mesh);
+        } else if (mesh_asset_key(o, key)) {
             asset_release(&g_mesh_assets, key);
             memset(&o->mesh, 0, sizeof o->mesh);   /* borrowed: just forget it */
         } else {
-            mesh_destroy(&o->mesh);                /* owned: destroy it */
+            mesh_destroy(&o->mesh);                /* owned (arrows): destroy it */
         }
     }
 }
@@ -2690,10 +2838,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 static RhiTexture load_texture(const char *path) {
     Image      img;
     RhiTexture tex;
+    char       key[320];
     tex.id = 0;
+    tex_asset_key(path, SOL_TRUE, key);            /* color images: sRGB */
+    if (asset_acquire(&g_tex_assets, key, &tex, sizeof tex))
+        return tex;                                /* already resident: share it */
     if (image_load(path, &img)) {
         tex = rhi_create_texture(img.pixels, img.w, img.h, RHI_TEX_SRGB8);
         image_free(&img);
+        if (tex.id)
+            asset_store_add(&g_tex_assets, key, &tex, sizeof tex);
     } else {
         fprintf(stderr, "image load failed: %s\n", path);
     }
@@ -4051,9 +4205,13 @@ static void render(AppState *state) {
 
             /* the registry's instruments (P4 item 4): entries alive and refs
                held — the L-reload acceptance is these NOT moving */
-            sprintf(line, "assets %d (%d refs)",
-                    asset_live_count(&g_mesh_assets),
-                    asset_ref_total(&g_mesh_assets));
+            sprintf(line, "assets %dm %dt (%d refs)",
+                    asset_live_count(&g_mesh_assets)
+                        + asset_live_count(&g_glbpart_assets),
+                    asset_live_count(&g_tex_assets),
+                    asset_ref_total(&g_mesh_assets)
+                        + asset_ref_total(&g_glbpart_assets)
+                        + asset_ref_total(&g_tex_assets));
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
@@ -4296,7 +4454,9 @@ int main(void) {
     AppState state = {0};
     double last;
 
-    asset_store_init(&g_mesh_assets, mesh_asset_destroy, NULL);
+    asset_store_init(&g_mesh_assets,    mesh_asset_destroy, NULL);
+    asset_store_init(&g_tex_assets,     tex_asset_destroy,  NULL);
+    asset_store_init(&g_glbpart_assets, glb_part_destroy,   NULL);
 
     if (!glfwInit()) {
         fprintf(stderr, "glfwInit failed\n");
@@ -4489,6 +4649,8 @@ int main(void) {
     free(state.bvh_boxes);
     free(state.vis);
     asset_store_free(&g_mesh_assets);   /* sweeps the living, before rhi dies */
+    asset_store_free(&g_glbpart_assets);
+    asset_store_free(&g_tex_assets);    /* textures LAST: parts may name them */
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
     if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);
     rhi_shutdown();
