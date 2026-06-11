@@ -130,6 +130,10 @@ wears its own `<mat>` (a book is a small GROUP: an empty anchor with two
 children), plus `book_open_cover`/`book_open_block` (same 5-param prefix —
 the reader's open book, also placeable). A minted codex's parameters
 PERSIST in its parts' attrs: every book keeps its individual build.
+`terrain` (item 10): a floating plot — w,d,sub,amp,seed; heights are
+seeded fBm masked to a zero rim, so the SEED is the island's identity
+(same seed, same hills, forever). Terrain anchors carry
+`room_type=terrain` (land: containment-named, never draggable).
 
 **`arrow` is a ref outside the registry** (P3 item 8): an arrow object
 (child of its board, two `connects` rels) writes `<mesh ref="arrow"/>`,
@@ -149,8 +153,9 @@ imports.
 
 **Meta vocabulary in use** (all optional, all plain string->string):
 - `name` — display label (the selection pin; the prop-binding key)
-- `room_type` (`room` | `mirror` | `workspace`) + `source_path` — room
-  anchors (§1.10); a mirror reconciles membership against its directory
+- `room_type` (`room` | `mirror` | `workspace` | `terrain`) + `source_path`
+  — room anchors (§1.10); a mirror reconciles membership against its
+  directory; `terrain` marks a floating plot as land (item 10)
 - `ambient` — the room's interior light scale (overrides the seal-derived
   default)
 - `unplaced` (`1`/`0`) — tray state: set on arrival, cleared by the first drag
