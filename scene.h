@@ -9,6 +9,18 @@
 typedef struct { char *key; char *value; }     MetaEntry;
 typedef struct { char *type; sol_u32 target; } Relation;
 
+/* A behavior attachment (P4 item 6): a registered type name + the file's
+   own param PREFIX (defaults fill the rest at update time, the mesh-params
+   rule). `state` is runtime scratch — lazily allocated by the component
+   walk, freed with the object, NEVER serialized. */
+enum { COMPONENT_MAX_PARAMS = 8 };
+typedef struct {
+    char  *type;
+    float  params[COMPONENT_MAX_PARAMS];
+    int    param_count;
+    void  *state;
+} Component;
+
 /* What an object MEANS (P3 item 6) — the first semantic typing. PLAIN =
    props/geometry (everything before item 6). FILE and FOLDER live in mirror
    rooms, governed by reconciliation; an ALIAS is a user-placed REFERENCE to
@@ -44,6 +56,18 @@ typedef struct {
     MetaEntry *meta;       sol_u32 meta_count;  sol_u32 meta_cap;   /* string->string */
     Relation  *relations;  sol_u32 rel_count;   sol_u32 rel_cap;    /* typed edges     */
     char      *content;    /* attached doc/note path; NULL = none */
+
+    /* behavior attachments (P4 item 6) */
+    Component *components; sol_u32 comp_count;  sol_u32 comp_cap;
+
+    /* TRANSIENT overlays (TODO4 §1.6): reset and rewritten by the component
+       walk every frame, composed into the world walks below — NEVER
+       serialized. The file records the BASE the user placed, not a frame
+       of the dance. overlay_glow multiplies light intensity + emissive at
+       their points of use. */
+    vec3  overlay_pos;
+    quat  overlay_rot;
+    float overlay_glow;
 } SceneObject;
 
 typedef struct {
@@ -82,6 +106,8 @@ void        scene_rel_add(Scene *s, sol_u32 handle, const char *type, sol_u32 ta
 void        scene_content_set(Scene *s, sol_u32 handle, const char *path);
 void        scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name);
 void        scene_mesh_params_set(Scene *s, sol_u32 handle, const float *params, int count);
+void        scene_component_add(Scene *s, sol_u32 handle, const char *type,
+                                const float *params, int count);  /* P4 item 6 */
 void        scene_kind_set(Scene *s, sol_u32 handle, ObjectKind kind);
 void        scene_material_set(Scene *s, sol_u32 handle, Material mat);   /* texture handles shared, not owned */
 

@@ -30,6 +30,11 @@ static void scene_object_free(SceneObject *o) {
     free(o->meta);
     for (i = 0; i < o->rel_count; i++) { free(o->relations[i].type); }
     free(o->relations);
+    for (i = 0; i < o->comp_count; i++) {           /* P4 item 6: type + opaque state */
+        free(o->components[i].type);
+        free(o->components[i].state);
+    }
+    free(o->components);
     free(o->content);
     free(o->nid);
     free(o->mesh_ref);
@@ -66,6 +71,10 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     o->meta = NULL; o->meta_count = 0; o->meta_cap = 0;
     o->relations = NULL; o->rel_count = 0; o->rel_cap = 0;
     o->content = NULL;
+    o->components = NULL; o->comp_count = 0; o->comp_cap = 0;   /* P4 item 6 */
+    o->overlay_pos  = vec3_make(0.0f, 0.0f, 0.0f);  /* overlays start as identity */
+    o->overlay_rot  = quat_identity();
+    o->overlay_glow = 1.0f;
     return o->handle;
 }
 
@@ -111,17 +120,36 @@ sol_u32 scene_handle_for_nid(Scene *s, const char *nid) {
     return 0;
 }
 
+/* The EFFECTIVE local transform (P4 item 6, §1.6): the persisted BASE
+   composed with the transient overlay — the ONE place they meet. The
+   forward walk, the inverse walk, and the rotation walk all come through
+   here, so rendering, picking, dragging, and collision see the same
+   animated pose while the file sees only the base. The overlay rotation
+   multiplies on the RIGHT: it turns the object about its own placed axes. */
+static void effective_trs(const SceneObject *o, vec3 *p, quat *r) {
+    p->x = o->pos.x + o->overlay_pos.x;
+    p->y = o->pos.y + o->overlay_pos.y;
+    p->z = o->pos.z + o->overlay_pos.z;
+    *r = quat_mul(o->rot, o->overlay_rot);
+}
+
 /* World matrix by walking up the parent chain: parent.world * ... * local.
    Iterative (no recursion), depth-capped against cycles, NULL-guarded against a
    dangling parent. Shared by render and the item-4 picker. */
 mat4 scene_world_matrix(Scene *s, const SceneObject *o) {
-    mat4    world = mat4_from_trs(o->pos, o->rot, o->scale);
-    sol_u32 p     = o->parent;
+    mat4    world;
+    vec3    ep;
+    quat    er;
+    sol_u32 p;
     int     depth = 0;
+    effective_trs(o, &ep, &er);
+    world = mat4_from_trs(ep, er, o->scale);
+    p     = o->parent;
     while (p != 0 && depth < 64) {
         SceneObject *par = scene_get(s, p);
         if (!par) break;                                   /* dangling parent -> stop */
-        world = mat4_mul(mat4_from_trs(par->pos, par->rot, par->scale), world);
+        effective_trs(par, &ep, &er);
+        world = mat4_mul(mat4_from_trs(ep, er, par->scale), world);
         p     = par->parent;                               /* climb */
         depth++;                                           /* cycle guard */
     }
@@ -148,7 +176,14 @@ vec3 scene_world_to_local(Scene *s, sol_u32 parent, vec3 p) {
     }
     while (n > 0) {                                        /* root first, `parent` last */
         SceneObject *o = scene_get(s, chain[--n]);
-        if (o) p = trs_point_to_local(p, o->pos, o->rot, o->scale);
+        if (o) {
+            vec3 ep;
+            quat er;
+            effective_trs(o, &ep, &er);                    /* the inverse sees the
+                                                              same pose the forward
+                                                              walk renders (§1.6) */
+            p = trs_point_to_local(p, ep, er, o->scale);
+        }
     }
     return p;
 }
@@ -162,15 +197,18 @@ vec3 scene_world_to_local(Scene *s, sol_u32 parent, vec3 p) {
 quat scene_world_rotation(Scene *s, sol_u32 handle) {
     SceneObject *o = scene_get(s, handle);
     quat    r;
+    vec3    ep;
     sol_u32 p;
     int     depth = 0;
     if (!o) return quat_identity();
-    r = o->rot;
+    effective_trs(o, &ep, &r);
     p = o->parent;
     while (p != 0 && depth < 64) {
         SceneObject *par = scene_get(s, p);
+        quat pr;
         if (!par) break;
-        r = quat_mul(par->rot, r);
+        effective_trs(par, &ep, &pr);
+        r = quat_mul(pr, r);
         p = par->parent;
         depth++;
     }
@@ -327,6 +365,30 @@ void scene_mesh_params_set(Scene *s, sol_u32 handle, const float *params, int co
     if (count > MESH_REF_MAX_PARAMS) count = MESH_REF_MAX_PARAMS;
     for (i = 0; i < count; i++) o->mesh_params[i] = params[i];
     o->mesh_param_count = count;
+}
+
+/* Attach a behavior (P4 item 6): the type string is COPIED (the object
+   owns it, the meta pattern); params are the file's prefix — the component
+   walk merges defaults at update time. State starts empty (lazily
+   allocated by the walk, freed with the object). */
+void scene_component_add(Scene *s, sol_u32 handle, const char *type,
+                         const float *params, int count) {
+    SceneObject *o = scene_get(s, handle);
+    Component   *c;
+    int          i;
+    if (!o || !type) return;
+    if (count < 0) count = 0;
+    if (count > COMPONENT_MAX_PARAMS) count = COMPONENT_MAX_PARAMS;
+    if (o->comp_count == o->comp_cap) {
+        o->comp_cap   = o->comp_cap ? o->comp_cap * 2 : 2;
+        o->components = realloc(o->components,
+                                (size_t)o->comp_cap * sizeof(Component));
+    }
+    c = &o->components[o->comp_count++];
+    c->type        = sol_strdup(type);
+    c->param_count = count;
+    for (i = 0; i < count; i++) c->params[i] = params[i];
+    c->state = NULL;
 }
 
 void scene_material_set(Scene *s, sol_u32 handle, Material mat) {

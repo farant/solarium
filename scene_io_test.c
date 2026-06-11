@@ -11,10 +11,13 @@
 #include "mirror.h"      /* room_mirror_scan (item 6) — headless against a temp dir */
 #include "nid.h"         /* NID_LEN — for stack buffers holding a copied nid */
 #include "platform_fs.h" /* fs_read_file (item 9) */
+#include "component.h"   /* components_update + the overlay doctrine (P4 item 6) */
+#include "sol_math.h"    /* mat4_mul_point — checking overlays through the walks */
 
 #include <stdio.h>
 #include <stdlib.h>      /* free — fs_read_file hands back heap buffers */
 #include <string.h>
+#include <math.h>        /* fabsf */
 #include <sys/stat.h>   /* mkdir — this test file is C11/POSIX, not c89check'd */
 
 static vec3 v3(float x, float y, float z) {
@@ -734,6 +737,103 @@ int main(void) {
     }
 
     scene_free(&scene);
+    /* ---- the component model (P4 item 6 piece 1): overlays compose into
+       every walk; the BASE never moves (the §1.6 doctrine, headless) ---- */
+    {
+        Scene        cs;
+        Mesh         m0;
+        sol_u32      h, h2, h3;
+        SceneObject *o;
+        vec3         wp, back, probe;
+        float        sp[4], bp[2];
+
+        memset(&m0, 0, sizeof m0);
+        scene_init(&cs);
+        h = scene_add(&cs, 0, m0, v3(2.0f, 1.0f, 0.0f), q_identity(),
+                      v3(1.0f, 1.0f, 1.0f));
+        sp[0] = 0.0f; sp[1] = 1.0f; sp[2] = 0.0f;
+        sp[3] = 1.57079633f;                     /* 90 deg/sec about +Y */
+        scene_component_add(&cs, h, "spin", sp, 4);
+
+        components_update(&cs, 1.0f, 0.016f);    /* t=1s -> a quarter turn */
+        o = scene_get(&cs, h);
+
+        /* THE DOCTRINE: the persisted base is bit-untouched */
+        if (o->rot.x != 0.0f || o->rot.y != 0.0f || o->rot.z != 0.0f ||
+            o->rot.w != 1.0f || o->pos.x != 2.0f) {
+            printf("FAIL: a component wrote into the persisted base\n");
+            return 1;
+        }
+
+        /* the world walk sees the overlay: local +X, after 90deg about Y,
+           lands at base + (0,0,-1) */
+        wp = mat4_mul_point(scene_world_matrix(&cs, o), v3(1.0f, 0.0f, 0.0f));
+        printf("spin overlay: world(+X) = (%.3f, %.3f, %.3f)\n", wp.x, wp.y, wp.z);
+        if (fabsf(wp.x - 2.0f) > 0.001f || fabsf(wp.z - (-1.0f)) > 0.001f) {
+            printf("FAIL: the overlay must rotate the world walk\n");
+            return 1;
+        }
+
+        /* the INVERSE walk sees the same pose: forward then back = identity */
+        probe = mat4_mul_point(scene_world_matrix(&cs, o), v3(0.3f, 0.2f, 0.1f));
+        back  = scene_world_to_local(&cs, h, probe);
+        if (fabsf(back.x - 0.3f) > 0.001f || fabsf(back.y - 0.2f) > 0.001f ||
+            fabsf(back.z - 0.1f) > 0.001f) {
+            printf("FAIL: the inverse walk disagrees with the forward (overlay)\n");
+            return 1;
+        }
+
+        /* reset semantics: at t=0 the overlay is identity again */
+        components_update(&cs, 0.0f, 0.016f);
+        wp = mat4_mul_point(scene_world_matrix(&cs, o), v3(1.0f, 0.0f, 0.0f));
+        if (fabsf(wp.x - 3.0f) > 0.001f || fabsf(wp.z) > 0.001f) {
+            printf("FAIL: overlays must reset each frame\n");
+            return 1;
+        }
+
+        /* an unknown type is skipped intact; the known one still applies */
+        scene_component_add(&cs, h, "wibble", NULL, 0);
+        components_update(&cs, 1.0f, 0.016f);
+        wp = mat4_mul_point(scene_world_matrix(&cs, o), v3(1.0f, 0.0f, 0.0f));
+        if (fabsf(wp.z - (-1.0f)) > 0.001f) {
+            printf("FAIL: unknown component must not disturb the known\n");
+            return 1;
+        }
+
+        /* zero params take the schema defaults (axis Y, speed 0.8) */
+        h2 = scene_add(&cs, 0, m0, v3(0, 0, 0), q_identity(), v3(1, 1, 1));
+        scene_component_add(&cs, h2, "spin", NULL, 0);
+        components_update(&cs, 1.0f, 0.016f);
+        wp = mat4_mul_point(scene_world_matrix(&cs, scene_get(&cs, h2)),
+                            v3(1.0f, 0.0f, 0.0f));
+        if (fabsf(wp.x - 1.0f) < 0.01f && fabsf(wp.z) < 0.01f) {
+            printf("FAIL: default params must spin (0.8 rad at t=1)\n");
+            return 1;
+        }
+
+        /* bob lifts the position overlay: amp 0.5 at sin(pi/2) = +0.5 */
+        h3 = scene_add(&cs, 0, m0, v3(0, 1, 0), q_identity(), v3(1, 1, 1));
+        bp[0] = 0.5f; bp[1] = 1.57079633f;
+        scene_component_add(&cs, h3, "bob", bp, 2);
+        components_update(&cs, 1.0f, 0.016f);
+        wp = mat4_mul_point(scene_world_matrix(&cs, scene_get(&cs, h3)),
+                            v3(0, 0, 0));
+        if (fabsf(wp.y - 1.5f) > 0.001f) {
+            printf("FAIL: bob must lift by amp at the sine peak (y=%.3f)\n", wp.y);
+            return 1;
+        }
+
+        /* the schema is queryable (the io layer's door, piece 2) */
+        if (component_schema("spin", (const char *const **)0, (const float **)0) != 4 ||
+            component_schema("nope", (const char *const **)0, (const float **)0) != -1) {
+            printf("FAIL: component_schema counts\n");
+            return 1;
+        }
+
+        printf("components: doctrine/overlay/inverse/reset/unknown/defaults/bob: ok\n");
+        scene_free(&cs);
+    }
+
     printf("scene_io_test: OK\n");
     return 0;
 }

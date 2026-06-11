@@ -23,6 +23,7 @@
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
 #include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
+#include "component.h"           /* behavior as data — the overlay doctrine (P4 item 6) */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -5087,6 +5088,9 @@ int main(void) {
         }
         y1 = glfwGetTime();
         update(&state, dt);                           /* animate the scene */
+        components_update(&state.scene, (float)now, (float)dt);  /* overlays
+                                                         rewrite BEFORE the tree
+                                                         and render read poses */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */
         if (now - g_watch_last >= 0.5) {              /* the watcher (P4 item 4):
                                                          a handful of stats twice
