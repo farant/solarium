@@ -583,6 +583,8 @@ typedef struct {
     sol_u32 *bvh_ids;
     Aabb    *bvh_boxes;
     int      bvh_count, bvh_cap;
+    unsigned char *vis;          /* per-pass visibility, handle-indexed (piece 4) */
+    sol_u32        vis_cap;
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
@@ -3350,6 +3352,34 @@ static void yardstick_ms(float *acc, double seconds) {
     *acc += ((float)(seconds * 1000.0) - *acc) * 0.08f;
 }
 
+/* mark one candidate visible — the BVH walk already tested its box exactly */
+static void cull_mark(sol_u32 id, void *ctx) {
+    ((unsigned char *)ctx)[id] = 1;
+}
+
+/* Visibility for one view volume (P4 item 2 piece 4): a handle-indexed byte
+   map filled by the frustum walk (handles are monotonic and small — the map
+   is a few KB, memset per pass). Refilled per pass: the shadow pass culls
+   by the LIGHT's frustum (what can't be seen by the light casts nothing
+   into its map), the HDR pass by the camera's — same machinery, two
+   volumes. Returns NULL on OOM, and the loops then draw everything:
+   culling must only ever be an optimization. */
+static unsigned char *vis_fill(AppState *st, mat4 vp) {
+    sol_u32 need = st->scene.next_handle;
+    if (need > st->vis_cap) {
+        unsigned char *nv = (unsigned char *)realloc(st->vis, (size_t)need);
+        if (nv == NULL) return NULL;
+        st->vis     = nv;
+        st->vis_cap = need;
+    }
+    memset(st->vis, 0, (size_t)need);
+    {
+        Frustum f = frustum_from_vp(vp);
+        bvh_frustum_query(&st->bvh, &f, cull_mark, st->vis);
+    }
+    return st->vis;
+}
+
 static void render(AppState *state) {
     float   aspect;
     float   us;        /* UI scale: sizes track the framebuffer (see pass 3) */
@@ -3358,6 +3388,7 @@ static void render(AppState *state) {
     sol_u32 i;
     sol_u32 sel_root;
     double  rt0, rt1, rt2;
+    unsigned char *vis;
 
     ensure_render_target(state, state->fb_width, state->fb_height);
     rt0 = glfwGetTime();
@@ -3369,6 +3400,7 @@ static void render(AppState *state) {
     /* ---- pass 0: depth from the light's POV -> the shadow map (item 9b) ---- */
     {
         mat4 lvp = light_view_proj(state);
+        unsigned char *lvis = vis_fill(state, lvp);   /* the LIGHT's view volume */
         rhi_begin_pass(state->shadow_rt, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);  /* clears depth to 1.0 */
         rhi_set_pipeline(state->shadow_pipeline);
         rhi_set_uniform_mat4("uLightVP", lvp.m);
@@ -3376,6 +3408,8 @@ static void render(AppState *state) {
             const SceneObject *o = &state->scene.objects[i];
             mat4 model;
             if (o->mesh.index_count == 0) continue;   /* empties cast nothing */
+            if (lvis && !lvis[o->handle]) continue;   /* outside the light's cone:
+                                                         cannot cast into the map */
             model = scene_world_matrix(&state->scene, o);
             rhi_set_uniform_mat4("uModel", model.m);
             rhi_bind_vertex_buffer(o->mesh.vbuffer);
@@ -3396,6 +3430,7 @@ static void render(AppState *state) {
     eye  = state->camera.pos;                       /* camera drives the view now */
     view = camera_view(&state->camera);
     proj = camera_proj(&state->camera, aspect);
+    vis  = vis_fill(state, mat4_mul(proj, view));   /* the CAMERA's view volume */
 
     /* skybox first (Phase A2): fills the background by sampling the equirect HDR
        per-pixel via the world view ray. Depth off -> writes color, not depth, so
@@ -3432,6 +3467,9 @@ static void render(AppState *state) {
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         state->draws_total++;                     /* the yardstick: would draw */
+        if (vis && !vis[o->handle]) continue;     /* outside the camera frustum
+                                                     (piece 4): the HUD's left
+                                                     number drops right here */
         if (state->reader_source != 0 &&
             group_root(&state->scene, o->handle) == state->reader_source)
             continue;                             /* its book is aloft (item 9) */
@@ -3573,6 +3611,10 @@ static void render(AppState *state) {
             const char *nm;
             if (o->kind == KIND_PLAIN) continue;            /* cards only */
             if (!o->mesh_ref || strcmp(o->mesh_ref, "card") != 0) continue;
+            if (vis && !vis[o->handle]) continue;           /* culled card: its ink
+                                                               would be offscreen too,
+                                                               and SHAPING text per
+                                                               frame is the real cost */
             cw = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "w");
             ch = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "h");
             ct = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "t");
@@ -4136,6 +4178,9 @@ int main(void) {
         y1 = glfwGetTime();
         update(&state, dt);                           /* animate the scene */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */
+        bvh_refresh(&state);                          /* boxes current AFTER the
+                                                         animations move things —
+                                                         culling reads them next */
         yardstick_ms(&state.t_update, glfwGetTime() - y1);
         render(&state);
 
@@ -4154,6 +4199,7 @@ int main(void) {
     bvh_free(&state.bvh);
     free(state.bvh_ids);
     free(state.bvh_boxes);
+    free(state.vis);
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
     if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);
     rhi_shutdown();

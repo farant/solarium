@@ -90,6 +90,11 @@ static float eq_leaf_scene(sol_u32 handle, float best, void *ctx) {
     return best;
 }
 
+/* frustum-equivalence marker: set the id's slot in a byte map */
+static void cull_mark_test(sol_u32 id, void *ctx) {
+    ((unsigned char *)ctx)[id] = 1;
+}
+
 /* build a BVH over a scene's world AABBs, the way main.c's refresh does */
 static void scene_bvh_build(Bvh *b, Scene *s, Aabb *boxes, sol_u32 *ids) {
     int     n = 0;
@@ -655,6 +660,78 @@ int main(void) {
         mb_free(&bb);
         bvh_free(&bvh);
         scene_free(&sc);
+    }
+
+    /* ---- frustum extraction + the positive-vertex test (P4 i2 p4) ---- */
+    {
+        mat4 vp = mat4_mul(mat4_perspective(sol_radians(60.0f), 1.0f, 0.1f, 100.0f),
+                           mat4_look_at(vec3_make(0.0f, 0.0f, 0.0f),
+                                        vec3_make(0.0f, 0.0f, -1.0f),
+                                        vec3_make(0.0f, 1.0f, 0.0f)));
+        Frustum f = frustum_from_vp(vp);
+        Aabb    a;
+        a.min = vec3_make(-0.5f, -0.5f, -5.5f);     /* dead ahead */
+        a.max = vec3_make( 0.5f,  0.5f, -4.5f);
+        if (!frustum_intersects_aabb(&f, a)) { printf("FAIL: ahead box must pass\n"); return 1; }
+        a.min = vec3_make(-0.5f, -0.5f, 4.5f);      /* behind the camera */
+        a.max = vec3_make( 0.5f,  0.5f, 5.5f);
+        if (frustum_intersects_aabb(&f, a)) { printf("FAIL: behind box must cull\n"); return 1; }
+        a.min = vec3_make(-50.5f, -0.5f, -5.5f);    /* far off to the left */
+        a.max = vec3_make(-49.5f,  0.5f, -4.5f);
+        if (frustum_intersects_aabb(&f, a)) { printf("FAIL: far-left box must cull\n"); return 1; }
+        a.min = vec3_make(-0.5f, -0.5f, -200.5f);   /* beyond the far plane */
+        a.max = vec3_make( 0.5f,  0.5f, -199.5f);
+        if (frustum_intersects_aabb(&f, a)) { printf("FAIL: past-far box must cull\n"); return 1; }
+        a.min = vec3_make(-1000.0f, -1000.0f, -1000.0f);   /* engulfs the camera */
+        a.max = vec3_make( 1000.0f,  1000.0f,  1000.0f);
+        if (!frustum_intersects_aabb(&f, a)) { printf("FAIL: engulfing box must pass\n"); return 1; }
+        printf("frustum ahead/behind/left/far/engulf: ok\n");
+    }
+
+    /* ---- frustum query == brute force: 100 boxes, 20 random frustums —
+       the visited SET must match the per-box test exactly (the walk's leaf
+       items are tested individually, so no conservatism leaks through) ---- */
+    {
+        enum { NB = 100, NF = 20 };
+        static Aabb          boxes[NB];
+        static sol_u32       ids[NB];
+        static unsigned char bset[NB + 1], qset[NB + 1];
+        Bvh bvh;
+        int i, k;
+        for (i = 0; i < NB; i++) {
+            float cx = frange(-20.0f, 20.0f), cy = frange(-20.0f, 20.0f),
+                  cz = frange(-20.0f, 20.0f);
+            float hx = frange(0.1f, 2.0f), hy = frange(0.1f, 2.0f),
+                  hz = frange(0.1f, 2.0f);
+            boxes[i].min = vec3_make(cx - hx, cy - hy, cz - hz);
+            boxes[i].max = vec3_make(cx + hx, cy + hy, cz + hz);
+            ids[i] = (sol_u32)(i + 1);
+        }
+        bvh_init(&bvh);
+        bvh_build(&bvh, boxes, ids, NB);
+        for (k = 0; k < NF; k++) {
+            vec3 eye = vec3_make(frange(-30.0f, 30.0f), frange(-10.0f, 10.0f),
+                                 frange(-30.0f, 30.0f));
+            vec3 tgt = vec3_make(eye.x + frange(-1.0f, 1.0f),
+                                 eye.y + frange(-0.5f, 0.5f),
+                                 eye.z + frange(1.0f, 2.0f));
+            mat4 vp  = mat4_mul(
+                mat4_perspective(sol_radians(frange(40.0f, 90.0f)),
+                                 frange(0.7f, 2.0f), 0.1f, 60.0f),
+                mat4_look_at(eye, tgt, vec3_make(0.0f, 1.0f, 0.0f)));
+            Frustum f = frustum_from_vp(vp);
+            memset(bset, 0, sizeof bset);
+            memset(qset, 0, sizeof qset);
+            for (i = 0; i < NB; i++)
+                if (frustum_intersects_aabb(&f, boxes[i])) bset[i + 1] = 1;
+            bvh_frustum_query(&bvh, &f, cull_mark_test, qset);
+            if (memcmp(bset, qset, sizeof bset) != 0) {
+                printf("FAIL: frustum query diverged from brute force (frustum %d)\n", k);
+                return 1;
+            }
+        }
+        bvh_free(&bvh);
+        printf("bvh frustum query == brute force: %d volumes: ok\n", NF);
     }
 
     printf("pick_test: OK\n");

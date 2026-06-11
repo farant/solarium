@@ -215,3 +215,25 @@ float bvh_ray_query(const Bvh *b, Ray ray, float best_t, BvhRayFn fn, void *ctx)
     if (!ray_vs_aabb(ray, b->nodes[0].box, &t) || t >= best_t) return best_t;
     return ray_walk(b, 0, ray, best_t, fn, ctx);
 }
+
+static void frustum_walk(const Bvh *b, int ni, const Frustum *f,
+                         BvhVisitFn fn, void *ctx) {
+    const BvhNode *nd = &b->nodes[ni];
+    if (!frustum_intersects_aabb(f, nd->box)) return;   /* subtree gone */
+    if (nd->count > 0) {
+        int i;
+        for (i = 0; i < nd->count; i++) {
+            int oi = b->order[nd->start + i];
+            if (frustum_intersects_aabb(f, b->boxes[oi]))   /* exact per item */
+                fn(b->ids[oi], ctx);
+        }
+        return;
+    }
+    frustum_walk(b, nd->left,  f, fn, ctx);
+    frustum_walk(b, nd->right, f, fn, ctx);
+}
+
+void bvh_frustum_query(const Bvh *b, const Frustum *f, BvhVisitFn fn, void *ctx) {
+    if (b->count == 0 || b->node_count == 0) return;
+    frustum_walk(b, 0, f, fn, ctx);
+}

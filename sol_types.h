@@ -21,4 +21,7 @@ typedef struct { float x, y, z, w; } quat;   /* unit quaternion = a rotation */
 typedef struct { vec3 origin, dir; } Ray;    /* dir kept unit in practice */
 typedef struct { vec3 min, max;    } Aabb;   /* axis-aligned bounding box */
 
+typedef struct { vec3 n; float d; } Plane;   /* n.x + d >= 0 is the INSIDE half-space */
+typedef struct { Plane p[6]; } Frustum;      /* a view volume: six inward planes (P4 item 2) */
+
 #endif /* SOL_TYPES_H */

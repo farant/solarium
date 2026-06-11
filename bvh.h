@@ -56,4 +56,13 @@ void bvh_refit(Bvh *b, const Aabb *boxes, int count);
 typedef float (*BvhRayFn)(sol_u32 id, float best_t, void *ctx);
 float bvh_ray_query(const Bvh *b, Ray ray, float best_t, BvhRayFn fn, void *ctx);
 
+/* Frustum query (piece 4): calls fn for every id whose box intersects the
+   frustum. A node fully outside one plane kills its subtree; leaf items are
+   tested INDIVIDUALLY before the callback, so the visited set is exactly
+   the per-box brute-force set (the equivalence test relies on this, and
+   callers need no second test). Conservatism lives in the plane test
+   itself, never here. */
+typedef void (*BvhVisitFn)(sol_u32 id, void *ctx);
+void bvh_frustum_query(const Bvh *b, const Frustum *f, BvhVisitFn fn, void *ctx);
+
 #endif /* BVH_H */

@@ -313,6 +313,62 @@ sol_bool ray_vs_triangle(Ray ray, vec3 v0, vec3 v1, vec3 v2, float *t_out) {
     return SOL_TRUE;
 }
 
+/* Gribb-Hartmann frustum extraction (P4 item 2 piece 4). Clip space is six
+   inequalities (-w <= x <= w, same for y and z); expand each back through
+   the view-projection matrix and it IS a world-space half-space whose
+   coefficients are a sum or difference of two ROWS of the matrix. Six
+   planes for the cost of twelve additions. Normals point INWARD (positive
+   side = inside the volume); each plane is normalized so n.p + d is a true
+   signed distance. Works for ANY vp — the camera's and the spot light's. */
+Frustum frustum_from_vp(mat4 m) {
+    Frustum f;
+    float   r0[4], r1[4], r2[4], r3[4];
+    float   pl[6][4];
+    int     c, i;
+
+    for (c = 0; c < 4; c++) {            /* row r, column c lives at m[c*4+r] */
+        r0[c] = m.m[c * 4 + 0];
+        r1[c] = m.m[c * 4 + 1];
+        r2[c] = m.m[c * 4 + 2];
+        r3[c] = m.m[c * 4 + 3];
+    }
+    for (c = 0; c < 4; c++) {
+        pl[0][c] = r3[c] + r0[c];        /* left:   -w <= x */
+        pl[1][c] = r3[c] - r0[c];        /* right:   x <= w */
+        pl[2][c] = r3[c] + r1[c];        /* bottom: -w <= y */
+        pl[3][c] = r3[c] - r1[c];        /* top:     y <= w */
+        pl[4][c] = r3[c] + r2[c];        /* near:   -w <= z */
+        pl[5][c] = r3[c] - r2[c];        /* far:     z <= w */
+    }
+    for (i = 0; i < 6; i++) {
+        float len = sqrtf(pl[i][0] * pl[i][0] + pl[i][1] * pl[i][1]
+                        + pl[i][2] * pl[i][2]);
+        float inv = (len > 1e-12f) ? 1.0f / len : 0.0f;
+        f.p[i].n.x = pl[i][0] * inv;
+        f.p[i].n.y = pl[i][1] * inv;
+        f.p[i].n.z = pl[i][2] * inv;
+        f.p[i].d   = pl[i][3] * inv;
+    }
+    return f;
+}
+
+/* AABB vs frustum by the POSITIVE-VERTEX trick: per plane, only the corner
+   most aligned with the normal needs testing — if THAT corner is outside,
+   all eight are. One dot product per plane. Conservative by design: a box
+   outside the volume but clipped by no single plane survives (drawn for
+   nothing, never the reverse — culling must never eat a visible object). */
+sol_bool frustum_intersects_aabb(const Frustum *f, Aabb box) {
+    int i;
+    for (i = 0; i < 6; i++) {
+        vec3 pv;
+        pv.x = (f->p[i].n.x >= 0.0f) ? box.max.x : box.min.x;
+        pv.y = (f->p[i].n.y >= 0.0f) ? box.max.y : box.min.y;
+        pv.z = (f->p[i].n.z >= 0.0f) ? box.max.z : box.min.z;
+        if (vec3_dot(f->p[i].n, pv) + f->p[i].d < 0.0f) return SOL_FALSE;
+    }
+    return SOL_TRUE;
+}
+
 /* Project a world point through a view-projection matrix to NDC: the full
    4-component multiply (w out), then the PERSPECTIVE DIVIDE — the one place
    w earns its keep (distant points have larger w, so they shrink toward the
