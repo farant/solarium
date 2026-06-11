@@ -220,6 +220,27 @@ static const char *FRAGMENT_SRC =
 /* --- the fullscreen tonemap/encode pass (item 7b): samples the HDR buffer and
    writes the display image to the window. The vertex shader synthesizes one
    screen-covering triangle from gl_VertexID, so it needs no vertex buffer. --- */
+/* --- instanced shader (P4 item 3): stream 0 = the shape, stream 1 = where/
+   how-big/what-tint each copy is. No per-instance uniforms anywhere — the
+   population is DATA. (Smoke-test version; the meadow refines it in p2.) */
+static const char *INST_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 1) in vec4 aInst;\n"       /* xyz = world pos, w = scale */
+    "layout (location = 2) in vec4 aTint;\n"
+    "uniform mat4 uView;\n"
+    "uniform mat4 uProj;\n"
+    "out vec4 vTint;\n"
+    "void main() {\n"
+    "    vTint = aTint;\n"
+    "    gl_Position = uProj * uView * vec4(aPos * aInst.w + aInst.xyz, 1.0);\n"
+    "}\n";
+static const char *INST_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec4 vTint;\n"
+    "out vec4 FragColor;\n"
+    "void main() { FragColor = vec4(vTint.rgb, 1.0); }\n";
+
 static const char *POST_VERTEX_SRC =
     "#version 330 core\n"
     "out vec2 vUV;\n"
@@ -585,6 +606,10 @@ typedef struct {
     int      bvh_count, bvh_cap;
     unsigned char *vis;          /* per-pass visibility, handle-indexed (piece 4) */
     sol_u32        vis_cap;
+    /* instancing smoke test (P4 item 3 piece 1): the helix — one draw, 400
+       quads; replaced by the island meadow in piece 2 */
+    RhiPipeline inst_pipeline;
+    RhiBuffer   inst_vbuf, inst_ibuf, inst_data;
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
@@ -3122,6 +3147,54 @@ static int init_scene(AppState *state) {
         state->brdf_lut_pipeline = rhi_create_pipeline(&brdf_desc);
     }
 
+    /* instancing smoke test (P4 item 3 piece 1): one unit quad + 400
+       per-instance records (pos+scale, tint) in a helix — proves the
+       step-rate path end to end: two streams in one pipeline, divisor 1
+       on stream 1, one instanced draw. Piece 2 replaces it with the
+       island meadow. */
+    {
+        static const float QUAD[12] = {
+            -0.5f, -0.5f, 0.0f,    0.5f, -0.5f, 0.0f,
+             0.5f,  0.5f, 0.0f,   -0.5f,  0.5f, 0.0f
+        };
+        static const sol_u32 QIDX[6] = { 0, 1, 2, 0, 2, 3 };
+        static float inst[400 * 8];
+        int          k;
+        RhiShader       ish;
+        RhiPipelineDesc idesc = {0};
+        for (k = 0; k < 400; k++) {
+            float t   = (float)k / 400.0f;
+            float ang = t * 25.13274f;             /* four full turns */
+            inst[k*8+0] = 1.2f * cosf(ang);
+            inst[k*8+1] = 0.4f + t * 2.4f;
+            inst[k*8+2] = 1.2f * sinf(ang);
+            inst[k*8+3] = 0.07f;                   /* 7cm quads */
+            inst[k*8+4] = 0.2f + 0.8f * t;         /* tint walks the helix */
+            inst[k*8+5] = 0.3f + 0.6f * (1.0f - t);
+            inst[k*8+6] = 0.55f;
+            inst[k*8+7] = 1.0f;
+        }
+        ish = rhi_create_shader(INST_VERTEX_SRC, INST_FRAGMENT_SRC);
+        if (ish.id) {
+            idesc.shader = ish;
+            idesc.attr_count = 3;
+            idesc.attrs[0].location = 0;  idesc.attrs[0].format = RHI_FORMAT_FLOAT3;
+            idesc.attrs[0].offset   = 0;  idesc.attrs[0].per_instance = 0;
+            idesc.attrs[1].location = 1;  idesc.attrs[1].format = RHI_FORMAT_FLOAT4;
+            idesc.attrs[1].offset   = 0;  idesc.attrs[1].per_instance = 1;
+            idesc.attrs[2].location = 2;  idesc.attrs[2].format = RHI_FORMAT_FLOAT4;
+            idesc.attrs[2].offset   = 16; idesc.attrs[2].per_instance = 1;
+            idesc.stride          = 3 * sizeof(float);
+            idesc.instance_stride = 8 * sizeof(float);
+            idesc.depth_test      = SOL_TRUE;
+            idesc.blend           = SOL_FALSE;
+            state->inst_pipeline = rhi_create_pipeline(&idesc);
+            state->inst_vbuf = rhi_create_buffer(RHI_BUFFER_VERTEX, QUAD, sizeof QUAD);
+            state->inst_ibuf = rhi_create_buffer(RHI_BUFFER_INDEX,  QIDX, sizeof QIDX);
+            state->inst_data = rhi_create_buffer(RHI_BUFFER_VERTEX, inst, sizeof inst);
+        }
+    }
+
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
@@ -3488,6 +3561,18 @@ static void render(AppState *state) {
         state->draws_done++;                      /* == total until culling (P4 i2 p4) */
     }
     state->terrain_blend = SOL_FALSE;              /* the reader rig is not land */
+
+    /* the instancing smoke test (P4 item 3 piece 1): 400 quads, ONE draw —
+       watch the HUD: draws holds steady while the helix floats in the hall */
+    if (state->inst_pipeline.id) {
+        rhi_set_pipeline(state->inst_pipeline);
+        rhi_set_uniform_mat4("uView", view.m);
+        rhi_set_uniform_mat4("uProj", proj.m);
+        rhi_bind_vertex_buffer(state->inst_vbuf);
+        rhi_bind_index_buffer(state->inst_ibuf);
+        rhi_bind_instance_buffer(state->inst_data);
+        rhi_draw_indexed_instanced(0, 6, 400);
+    }
 
     /* the reader's open book (item 9): view-state geometry, drawn at the
        animated pose — never part of the scene graph */

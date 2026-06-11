@@ -32,6 +32,7 @@ typedef struct {
     RhiVertexAttr attrs[RHI_MAX_ATTRS];
     int           attr_count;
     GLsizei       stride;
+    GLsizei       instance_stride;  /* stream 1 (P4 item 3); 0 = no instance stream */
     sol_bool      depth_test;
     sol_bool      blend;        /* straight-alpha "over" */
 } GlPipeline;
@@ -241,7 +242,8 @@ RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
     p->program    = g_shaders[desc->shader.id - 1];
     p->attr_count = desc->attr_count;
     for (i = 0; i < desc->attr_count; i++) p->attrs[i] = desc->attrs[i];
-    p->stride     = (GLsizei)desc->stride;
+    p->stride          = (GLsizei)desc->stride;
+    p->instance_stride = (GLsizei)desc->instance_stride;
     p->depth_test = desc->depth_test;
     p->blend      = desc->blend;
 
@@ -586,13 +588,38 @@ void rhi_bind_vertex_buffer(RhiBuffer buffer) {
 
     /* GL 4.1: the VAO bundles format + buffer, so (re)specify the pipeline's
        layout against the just-bound buffer. This is the VAO fiction the
-       interface papers over — set_pipeline + bind_buffer being separate. */
+       interface papers over — set_pipeline + bind_buffer being separate.
+       Only STREAM-0 (per-vertex) attrs read this buffer; the instance
+       stream's attrs are specified by rhi_bind_instance_buffer. */
     for (i = 0; i < p->attr_count; i++) {
         const RhiVertexAttr *a = &p->attrs[i];
+        if (a->per_instance) continue;
         glVertexAttribPointer(a->location, format_components(a->format),
                               GL_FLOAT, GL_FALSE, p->stride, (const void *)a->offset);
+        glVertexAttribDivisor((GLuint)a->location, 0);   /* per-vertex rhythm */
         glEnableVertexAttribArray(a->location);
     }
+}
+
+void rhi_bind_instance_buffer(RhiBuffer buffer) {
+    const GlPipeline *p = g_current;
+    int i;
+
+    glBindBuffer(GL_ARRAY_BUFFER, g_buffers[buffer.id - 1]);
+
+    /* stream 1 (P4 item 3): the same fetcher, a slower rhythm — divisor 1
+       advances these attrs once per INSTANCE (Metal: stepFunction
+       perInstance on the layout this stride describes) */
+    for (i = 0; i < p->attr_count; i++) {
+        const RhiVertexAttr *a = &p->attrs[i];
+        if (!a->per_instance) continue;
+        glVertexAttribPointer(a->location, format_components(a->format),
+                              GL_FLOAT, GL_FALSE, p->instance_stride,
+                              (const void *)a->offset);
+        glVertexAttribDivisor((GLuint)a->location, 1);
+        glEnableVertexAttribArray(a->location);
+    }
+    gl_check("rhi_bind_instance_buffer");
 }
 
 void rhi_bind_index_buffer(RhiBuffer buffer) {
@@ -633,6 +660,14 @@ void rhi_draw_indexed(int first_index, int index_count) {
     const void *offset = (const void *)(first_index * sizeof(sol_u32));
     glDrawElements(GL_TRIANGLES, index_count, GL_UNSIGNED_INT, offset);
     gl_check("rhi_draw_indexed");
+}
+
+void rhi_draw_indexed_instanced(int first_index, int index_count,
+                                int instance_count) {
+    const void *offset = (const void *)(first_index * sizeof(sol_u32));
+    glDrawElementsInstanced(GL_TRIANGLES, index_count, GL_UNSIGNED_INT,
+                            offset, instance_count);
+    gl_check("rhi_draw_indexed_instanced");
 }
 
 void rhi_present(void) {

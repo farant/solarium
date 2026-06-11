@@ -31,10 +31,17 @@ typedef enum { RHI_FORMAT_FLOAT2, RHI_FORMAT_FLOAT3, RHI_FORMAT_FLOAT4 } RhiVert
 typedef enum { RHI_TEX_SRGB8, RHI_TEX_RGBA8, RHI_TEX_RGBA16F, RHI_TEX_R8 } RhiTextureFormat;
 
 /* ---- vertex layout + pipeline description ---- */
+/* An attribute is a STREAM the vertex fetcher walks; per_instance picks its
+   rhythm (P4 item 3): 0 = advance per vertex from the vertex buffer, 1 =
+   advance per INSTANCE from the instance buffer. This is Metal's
+   layout/stepFunction model verbatim (per §1.4 every RHI addition must be
+   Metal-expressible); GL expresses it as glVertexAttribDivisor. All descs
+   are declared = {0}, so old pipelines read "per-vertex" by construction. */
 typedef struct {
     int             location;   /* shader input slot (layout location) */
-    RhiVertexFormat format;     /* float2 / float3 */
-    size_t          offset;     /* byte offset within one vertex */
+    RhiVertexFormat format;     /* float2 / float3 / float4 */
+    size_t          offset;     /* byte offset within one element of ITS buffer */
+    int             per_instance; /* 0 = vertex stream, 1 = instance stream */
 } RhiVertexAttr;
 
 enum { RHI_MAX_ATTRS = 8 };
@@ -43,7 +50,8 @@ typedef struct {
     RhiShader     shader;
     RhiVertexAttr attrs[RHI_MAX_ATTRS];
     int           attr_count;
-    size_t        stride;        /* bytes per vertex */
+    size_t        stride;          /* bytes per vertex (stream 0) */
+    size_t        instance_stride; /* bytes per instance (stream 1); 0 = none */
     sol_bool      depth_test;    /* render state, bundled into the pipeline */
     sol_bool      blend;         /* straight-alpha "over": src*a + dst*(1-a).
                                     Set EXPLICITLY at every desc site (a stack
@@ -115,6 +123,9 @@ void rhi_begin_pass(RhiRenderTarget target, int clear_flags, float r, float g, f
 void rhi_end_pass(void);
 void rhi_set_pipeline(RhiPipeline pipeline);               /* binds shader + layout + state */
 void rhi_bind_vertex_buffer(RhiBuffer buffer);
+void rhi_bind_instance_buffer(RhiBuffer buffer);  /* stream 1: the pipeline's
+                                    per-instance attrs read from this buffer,
+                                    advancing once per instance (P4 item 3) */
 void rhi_bind_index_buffer(RhiBuffer buffer);
 void rhi_bind_texture(RhiTexture texture, int slot);            /* to texture unit `slot` */
 void rhi_set_uniform_mat4(const char *name, const float *m);     /* on the bound pipeline */
@@ -124,6 +135,8 @@ void rhi_set_uniform_float(const char *name, float v);
 void rhi_set_uniform_int(const char *name, int v);               /* e.g. a sampler's texture unit */
 void rhi_draw(int first_vertex, int vertex_count);
 void rhi_draw_indexed(int first_index, int index_count);
+void rhi_draw_indexed_instanced(int first_index, int index_count,
+                                int instance_count);  /* one work order, N copies */
 
 /* The render target's color attachment as a bindable texture, so a later pass
    can sample what was just rendered (the fullscreen tonemap pass samples this). */
