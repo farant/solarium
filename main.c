@@ -58,6 +58,101 @@ typedef struct {
 #define BRDF_LUT_SIZE   512    /* BRDF integration LUT (NoV x roughness) */
 
 /* --- shaders: GLSL source handed to the backend (still app-authored) --- */
+/* Shader sources are DATA the app hands down through the unchanged
+   rhi_create_shader — the language is selected at compile time with the
+   backend (item 10's approved decision: twins live HERE, beside their GLSL,
+   so the pair stays in sync under one comment). -DSOL_RHI_METAL picks MSL.
+
+   MSL conventions (rhi_metal.m's contract): entry points vmain/fmain;
+   vertex stream = buffer(0), instance stream = buffer(1), the vertex
+   uniform struct = buffer(2), the fragment uniform struct = buffer(0) of
+   the FRAGMENT namespace; textures/samplers use the same slot numbers
+   rhi_bind_texture uses. Twins that sample RENDER TARGETS flip v (Metal's
+   texture row 0 is the TOP); CPU-uploaded textures need no flip. */
+#ifdef SOL_RHI_METAL
+
+static const char *VERTEX_SRC =        /* the full twin of the GLSL below */
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn {\n"
+    "    float3 pos     [[attribute(0)]];\n"
+    "    float3 normal  [[attribute(1)]];\n"
+    "    float2 uv      [[attribute(2)]];\n"
+    "    float4 tangent [[attribute(3)]];\n"
+    "};\n"
+    "struct VU {\n"
+    "    float4x4 uModel;\n"
+    "    float4x4 uView;\n"
+    "    float4x4 uProj;\n"
+    "    float3x3 uNormalMatrix;\n"
+    "};\n"
+    "struct VOut {\n"
+    "    float4 pos [[position]];\n"
+    "    float3 normal;\n"
+    "    float3 worldPos;\n"
+    "    float2 uv;\n"
+    "    float4 tangent;\n"
+    "};\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float4 worldPos = u.uModel * float4(v.pos, 1.0);\n"
+    "    o.pos = u.uProj * (u.uView * worldPos);\n"
+    "    o.normal = u.uNormalMatrix * v.normal;\n"
+    "    o.worldPos = worldPos.xyz;\n"
+    "    o.uv = v.uv;\n"
+    "    float3x3 lin = float3x3(u.uModel[0].xyz, u.uModel[1].xyz, u.uModel[2].xyz);\n"
+    "    o.tangent = float4(lin * v.tangent.xyz, v.tangent.w);\n"
+    "    return o;\n"
+    "}\n";
+
+/* STAGE (b) STAND-IN — replaced by the full PBR twin in stage (d). Albedo,
+   base color, the terrain palette and the selection tint are faithful; the
+   lighting is one fixed sun + flat ambient. Output stays LINEAR into the
+   HDR target — the real post twin tonemaps it, so presentation is already
+   final-form. */
+static const char *FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut {\n"
+    "    float4 pos [[position]];\n"
+    "    float3 normal;\n"
+    "    float3 worldPos;\n"
+    "    float2 uv;\n"
+    "    float4 tangent;\n"
+    "};\n"
+    "struct FU {\n"
+    "    float3 uBaseColor;\n"
+    "    float  uHighlight;\n"
+    "    float  uUseAlbedoTex;\n"
+    "    float  uTerrainBlend;\n"
+    "    float  uTerrainY0;\n"
+    "    float  uTerrainAmp;\n"
+    "};\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      constant FU &u [[buffer(0)]],\n"
+    "                      texture2d<float> albedoTex [[texture(0)]],\n"
+    "                      sampler albedoSmp [[sampler(0)]]) {\n"
+    "    float3 albedo = u.uBaseColor;\n"
+    "    if (u.uUseAlbedoTex > 0.5) albedo *= albedoTex.sample(albedoSmp, v.uv).rgb;\n"
+    "    float3 N = normalize(v.normal);\n"
+    "    if (u.uTerrainBlend > 0.5) {\n"          /* the palette, verbatim */
+    "        float slope = clamp(1.0 - N.y, 0.0, 1.0);\n"
+    "        float relh  = clamp((v.worldPos.y - u.uTerrainY0) / max(u.uTerrainAmp, 0.001), 0.0, 1.0);\n"
+    "        float3 moss = float3(0.30, 0.42, 0.22);\n"
+    "        float3 rock = float3(0.46, 0.44, 0.40);\n"
+    "        float3 crag = float3(0.64, 0.62, 0.56);\n"
+    "        albedo = mix(moss, rock, smoothstep(0.15, 0.45, slope));\n"
+    "        albedo = mix(albedo, crag, smoothstep(0.55, 0.95, relh));\n"
+    "    }\n"
+    "    float3 L = normalize(float3(0.35, 0.85, 0.40));\n"   /* the stand-in sun */
+    "    float nl = max(dot(N, L), 0.0);\n"
+    "    float3 color = albedo * (0.30 + 0.80 * nl);\n"
+    "    color = mix(color, float3(1.0, 0.85, 0.30), u.uHighlight * 0.5);\n"
+    "    return float4(color, 1.0);\n"
+    "}\n";
+
+#else /* GLSL */
+
 static const char *VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
@@ -265,6 +360,8 @@ static const char *FRAGMENT_SRC =
     "    FragColor = vec4(color, 1.0);\n"                     /* LINEAR -> the HDR buffer; 7c tonemaps + encodes */
     "}\n";
 
+#endif /* SOL_RHI_METAL — the core pair */
+
 /* --- the fullscreen tonemap/encode pass (item 7b): samples the HDR buffer and
    writes the display image to the window. The vertex shader synthesizes one
    screen-covering triangle from gl_VertexID, so it needs no vertex buffer. --- */
@@ -342,6 +439,48 @@ static const char *PARTICLE_FRAGMENT_SRC =
     "    FragColor = vec4(vColor.rgb * (vColor.a * f), 1.0);\n"
     "}\n";
 
+#ifdef SOL_RHI_METAL
+
+/* Full-fidelity twins. The v-flip in the VS is the render-target rule:
+   Metal rasterizes row 0 at the TOP, so a pass that samples what another
+   pass rendered un-flips it here (GLSL needs nothing — GL's row 0 is the
+   bottom, agreeing with its own sampler convention). */
+static const char *POST_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "vertex VOut vmain(uint vid [[vertex_id]]) {\n"
+    "    VOut o;\n"
+    "    float2 p = float2((float)((vid << 1) & 2), (float)(vid & 2));\n"
+    "    o.uv = float2(p.x, 1.0 - p.y);\n"        /* the render-target v-flip */
+    "    o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "    return o;\n"
+    "}\n";
+
+static const char *POST_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "struct FU { float uBloomStrength; float uExposure; };\n"
+    "static float3 aces(float3 x) {\n"            /* Narkowicz ACES filmic fit */
+    "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
+    "}\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      constant FU &u [[buffer(0)]],\n"
+    "                      texture2d<float> uHdr   [[texture(0)]],\n"
+    "                      texture2d<float> uBloom [[texture(1)]],\n"
+    "                      sampler s0 [[sampler(0)]],\n"
+    "                      sampler s1 [[sampler(1)]]) {\n"
+    "    float3 hdr    = uHdr.sample(s0, v.uv).rgb\n"
+    "                  + uBloom.sample(s1, v.uv).rgb * u.uBloomStrength;\n"
+    "    hdr          *= u.uExposure;\n"
+    "    float3 mapped = aces(hdr);\n"
+    "    float3 ldr    = pow(mapped, float3(1.0 / 2.2));\n"
+    "    return float4(ldr, 1.0);\n"
+    "}\n";
+
+#else /* GLSL */
+
 static const char *POST_VERTEX_SRC =
     "#version 330 core\n"
     "out vec2 vUV;\n"
@@ -373,6 +512,8 @@ static const char *POST_FRAGMENT_SRC =
     "    vec3 ldr    = pow(mapped, vec3(1.0 / 2.2));\n"        /* linear -> sRGB for display */
     "    FragColor   = vec4(ldr, 1.0);\n"
     "}\n";
+
+#endif /* SOL_RHI_METAL — the post pair */
 
 /* --- the bloom chain (P4 item 5 piece 3): how a screen says "brighter than
    white". Extract what exceeds the threshold (with a SOFT KNEE — a hard
@@ -431,6 +572,30 @@ static const char *BLOOM_UP_FRAGMENT_SRC =
 /* --- the shadow (depth-only) pass (item 9b): render the scene from the light's
    POV, writing only depth into the shadow map. No color work; position only,
    reading just attr 0 of the 12-float vertex. --- */
+#ifdef SOL_RHI_METAL
+
+/* Full-fidelity twins: depth-only, the fragment returns void (no color
+   attachment on a depth target — the PSO is built with an Invalid color
+   format, which is exactly what a void fragment requires). */
+static const char *SHADOW_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn { float3 pos [[attribute(0)]]; };\n"
+    "struct VU { float4x4 uModel; float4x4 uLightVP; };\n"
+    "struct VOut { float4 pos [[position]]; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    o.pos = u.uLightVP * (u.uModel * float4(v.pos, 1.0));\n"
+    "    return o;\n"
+    "}\n";
+
+static const char *SHADOW_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "fragment void fmain() {}\n";                  /* depth written automatically */
+
+#else /* GLSL */
+
 static const char *SHADOW_VERTEX_SRC =
     "#version 330 core\n"
     "layout(location = 0) in vec3 aPos;\n"
@@ -443,6 +608,8 @@ static const char *SHADOW_VERTEX_SRC =
 static const char *SHADOW_FRAGMENT_SRC =
     "#version 330 core\n"
     "void main() {}\n";                                      /* depth written automatically */
+
+#endif /* SOL_RHI_METAL — the shadow pair */
 
 /* --- the skinned twins (P4 item 9): the standard VS plus the MATRIX
    PALETTE. Each vertex blends up to four palette entries (linear blend
@@ -4315,7 +4482,12 @@ static int init_scene(AppState *state) {
     RhiPipelineDesc desc = {0};  /* {0} all descs: a future field defaults off, not garbage */
 
     shader = rhi_create_shader(VERTEX_SRC, FRAGMENT_SRC);
-    if (!shader.id) return 0;
+    /* item 10: a failed shader DEGRADES instead of failing the launch — the
+       seam's id-0 contract (enforced in BOTH backends: a zero shader yields
+       a zero pipeline, a zero pipeline swallows its draws) lets the staged
+       Metal port boot with partial twins. The compile failure still reports
+       loudly on stderr in either backend; nothing is silent. The pattern
+       holds for every shader below — only RESOURCE failures stay fatal. */
 
     /* one pipeline, shared by all objects (same 8-float layout) */
     desc.shader = shader;
@@ -4385,7 +4557,6 @@ static int init_scene(AppState *state) {
         RhiShader       post_shader;
         RhiPipelineDesc post_desc = {0};
         post_shader = rhi_create_shader(POST_VERTEX_SRC, POST_FRAGMENT_SRC);
-        if (!post_shader.id) return 0;
         post_desc.shader     = post_shader;
         post_desc.attr_count = 0;
         post_desc.stride     = 0;
@@ -4404,7 +4575,6 @@ static int init_scene(AppState *state) {
         if (!state->shadow_rt.id) return 0;
 
         sh_shader = rhi_create_shader(SHADOW_VERTEX_SRC, SHADOW_FRAGMENT_SRC);
-        if (!sh_shader.id) return 0;
         sh_desc.shader     = sh_shader;
         sh_desc.attrs[0].location = 0; sh_desc.attrs[0].format = RHI_FORMAT_FLOAT3; sh_desc.attrs[0].offset = 0;
         sh_desc.attr_count = 1;                 /* position only */
@@ -4414,7 +4584,6 @@ static int init_scene(AppState *state) {
         state->shadow_pipeline = rhi_create_pipeline(&sh_desc);
 
         dbg_shader = rhi_create_shader(POST_VERTEX_SRC, SHADOW_DEBUG_FRAGMENT_SRC);
-        if (!dbg_shader.id) return 0;
         dbg_desc.shader     = dbg_shader;
         dbg_desc.attr_count = 0;
         dbg_desc.stride     = 0;
@@ -4428,7 +4597,6 @@ static int init_scene(AppState *state) {
         RhiShader       sky_shader;
         RhiPipelineDesc sky_desc = {0};
         sky_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_FRAGMENT_SRC);
-        if (!sky_shader.id) return 0;
         sky_desc.shader     = sky_shader;
         sky_desc.attr_count = 0;
         sky_desc.stride     = 0;
@@ -4442,7 +4610,6 @@ static int init_scene(AppState *state) {
         RhiShader       cube_shader;
         RhiPipelineDesc cube_desc = {0};
         cube_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, SKYBOX_CUBE_FRAGMENT_SRC);
-        if (!cube_shader.id) return 0;
         cube_desc.shader     = cube_shader;
         cube_desc.attr_count = 0;
         cube_desc.stride     = 0;
@@ -4456,7 +4623,6 @@ static int init_scene(AppState *state) {
         RhiShader       irr_shader;
         RhiPipelineDesc irr_desc = {0};
         irr_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, IRRADIANCE_FRAGMENT_SRC);
-        if (!irr_shader.id) return 0;
         irr_desc.shader     = irr_shader;
         irr_desc.attr_count = 0;
         irr_desc.stride     = 0;
@@ -4470,7 +4636,6 @@ static int init_scene(AppState *state) {
         RhiShader       pre_shader;
         RhiPipelineDesc pre_desc = {0};
         pre_shader = rhi_create_shader(SKYBOX_VERTEX_SRC, PREFILTER_FRAGMENT_SRC);
-        if (!pre_shader.id) return 0;
         pre_desc.shader     = pre_shader;
         pre_desc.attr_count = 0;
         pre_desc.stride     = 0;
@@ -4484,7 +4649,6 @@ static int init_scene(AppState *state) {
         RhiShader       brdf_shader;
         RhiPipelineDesc brdf_desc = {0};
         brdf_shader = rhi_create_shader(POST_VERTEX_SRC, BRDF_LUT_FRAGMENT_SRC);
-        if (!brdf_shader.id) return 0;
         brdf_desc.shader     = brdf_shader;
         brdf_desc.attr_count = 0;
         brdf_desc.stride     = 0;

@@ -190,7 +190,7 @@ fi
 if [ "$MODE" = "metal" ]; then
     clang -fobjc-arc -g -O0 -Wall -Wextra \
         -c rhi_metal.m $(pkg-config --cflags glfw3) -o rhi_metal.o
-    clang -std=c11 -g -O0 -Wall -Wextra \
+    clang -std=c11 -g -O0 -Wall -Wextra -DSOL_RHI_METAL \
         main.c rhi_metal.o mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework Metal -framework QuartzCore -framework Cocoa -framework IOKit -framework AudioToolbox \

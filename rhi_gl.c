@@ -200,6 +200,7 @@ RhiBuffer rhi_create_buffer(RhiBufferType type, const void *data, size_t size) {
 }
 
 void rhi_update_buffer(RhiBuffer buffer, const void *data, size_t size) {
+    if (!buffer.id) return;                        /* the id-0 contract (item 10) */
     glBindBuffer(GL_COPY_WRITE_BUFFER, g_buffers[buffer.id - 1]);   /* neutral: no VAO state */
     /* full re-specification, not glBufferSubData: the driver can orphan the
        old storage instead of stalling while the GPU still reads it (the
@@ -236,6 +237,11 @@ RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
     sol_u32 idx;
     int i;
 
+    if (desc->shader.id == 0) { h.id = 0; return h; }   /* the id-0 contract
+                                       (item 10): a failed shader propagates a
+                                       zero pipeline; the staged Metal port
+                                       boots with partial twins and the GL
+                                       build degrades the same way */
     idx = slot_alloc(&g_pipeline_count, g_pipeline_free, &g_pipeline_free_count, MAX_PIPELINES);
     if (idx == SLOT_NONE) { h.id = 0; return h; }   /* no GL created yet */
     p = &g_pipelines[idx];
@@ -368,6 +374,7 @@ RhiTexture rhi_create_cubemap(int size, sol_bool mipmapped) {
 }
 
 void rhi_begin_cubemap_face(RhiTexture cube, int face, int mip, int size) {
+    if (!cube.id) return;                          /* the id-0 contract */
     if (!g_cube_fbo) glGenFramebuffers(1, &g_cube_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, g_cube_fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -592,7 +599,10 @@ void rhi_end_pass(void) {
 }
 
 void rhi_set_pipeline(RhiPipeline pipeline) {
-    const GlPipeline *p = &g_pipelines[pipeline.id - 1];
+    const GlPipeline *p;
+    if (!pipeline.id) { g_current = NULL; return; }   /* id-0: draws + uniforms
+                                                         no-op until a real bind */
+    p = &g_pipelines[pipeline.id - 1];
     g_current = p;
 
     glUseProgram(p->program);
@@ -614,7 +624,7 @@ void rhi_set_pipeline(RhiPipeline pipeline) {
 void rhi_bind_vertex_buffer(RhiBuffer buffer) {
     const GlPipeline *p = g_current;
     int i;
-
+    if (!p || !buffer.id) return;                  /* the id-0 contract */
     glBindBuffer(GL_ARRAY_BUFFER, g_buffers[buffer.id - 1]);
 
     /* GL 4.1: the VAO bundles format + buffer, so (re)specify the pipeline's
@@ -635,7 +645,7 @@ void rhi_bind_vertex_buffer(RhiBuffer buffer) {
 void rhi_bind_instance_buffer(RhiBuffer buffer) {
     const GlPipeline *p = g_current;
     int i;
-
+    if (!p || !buffer.id) return;                  /* the id-0 contract */
     glBindBuffer(GL_ARRAY_BUFFER, g_buffers[buffer.id - 1]);
 
     /* stream 1 (P4 item 3): the same fetcher, a slower rhythm — divisor 1
@@ -654,46 +664,63 @@ void rhi_bind_instance_buffer(RhiBuffer buffer) {
 }
 
 void rhi_bind_index_buffer(RhiBuffer buffer) {
+    if (!buffer.id) return;                        /* the id-0 contract */
     /* element-buffer binding is VAO state; the pipeline's VAO is current */
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_buffers[buffer.id - 1]);
 }
 
+/* All uniform setters + draws no-op without a bound pipeline — the id-0
+   contract's other half: rhi_set_pipeline(0) cleared g_current. */
 void rhi_set_uniform_mat4(const char *name, const float *m) {
-    GLint loc = glGetUniformLocation(g_current->program, name);
+    GLint loc;
+    if (!g_current) return;
+    loc = glGetUniformLocation(g_current->program, name);
     glUniformMatrix4fv(loc, 1, GL_FALSE, m);
 }
 
 void rhi_set_uniform_mat4_array(const char *name, const float *m, int count) {
-    GLint loc = glGetUniformLocation(g_current->program, name);
+    GLint loc;
+    if (!g_current) return;
+    loc = glGetUniformLocation(g_current->program, name);
     glUniformMatrix4fv(loc, (GLsizei)count, GL_FALSE, m);
 }
 
 void rhi_set_uniform_mat3(const char *name, const float *m) {
-    GLint loc = glGetUniformLocation(g_current->program, name);
+    GLint loc;
+    if (!g_current) return;
+    loc = glGetUniformLocation(g_current->program, name);
     glUniformMatrix3fv(loc, 1, GL_FALSE, m);   /* column-major, no transpose */
 }
 
 void rhi_set_uniform_vec3(const char *name, float x, float y, float z) {
-    GLint loc = glGetUniformLocation(g_current->program, name);
+    GLint loc;
+    if (!g_current) return;
+    loc = glGetUniformLocation(g_current->program, name);
     glUniform3f(loc, x, y, z);
 }
 
 void rhi_set_uniform_float(const char *name, float v) {
-    GLint loc = glGetUniformLocation(g_current->program, name);
+    GLint loc;
+    if (!g_current) return;
+    loc = glGetUniformLocation(g_current->program, name);
     glUniform1f(loc, v);
 }
 
 void rhi_set_uniform_int(const char *name, int v) {
-    GLint loc = glGetUniformLocation(g_current->program, name);
+    GLint loc;
+    if (!g_current) return;
+    loc = glGetUniformLocation(g_current->program, name);
     glUniform1i(loc, v);
 }
 
 void rhi_draw(int first_vertex, int vertex_count) {
+    if (!g_current) return;
     glDrawArrays(GL_TRIANGLES, first_vertex, vertex_count);
 }
 
 void rhi_draw_indexed(int first_index, int index_count) {
     const void *offset = (const void *)(first_index * sizeof(sol_u32));
+    if (!g_current) return;
     glDrawElements(GL_TRIANGLES, index_count, GL_UNSIGNED_INT, offset);
     gl_check("rhi_draw_indexed");
 }
@@ -701,6 +728,7 @@ void rhi_draw_indexed(int first_index, int index_count) {
 void rhi_draw_indexed_instanced(int first_index, int index_count,
                                 int instance_count) {
     const void *offset = (const void *)(first_index * sizeof(sol_u32));
+    if (!g_current) return;
     glDrawElementsInstanced(GL_TRIANGLES, index_count, GL_UNSIGNED_INT,
                             offset, instance_count);
     gl_check("rhi_draw_indexed_instanced");
@@ -712,7 +740,9 @@ void rhi_present(void) {
 
 /* ---- resource teardown (free-list keeps create/destroy loops bounded) ---- */
 void rhi_destroy_buffer(RhiBuffer buffer) {
-    sol_u32 idx = buffer.id - 1;
+    sol_u32 idx;
+    if (!buffer.id) return;
+    idx = buffer.id - 1;
     glDeleteBuffers(1, &g_buffers[idx]);
     g_buffers[idx] = 0;
     slot_free(idx, g_buffer_free, &g_buffer_free_count);
@@ -720,7 +750,9 @@ void rhi_destroy_buffer(RhiBuffer buffer) {
 }
 
 void rhi_destroy_shader(RhiShader shader) {
-    sol_u32 idx = shader.id - 1;
+    sol_u32 idx;
+    if (!shader.id) return;
+    idx = shader.id - 1;
     glDeleteProgram(g_shaders[idx]);
     g_shaders[idx] = 0;
     slot_free(idx, g_shader_free, &g_shader_free_count);
@@ -728,7 +760,9 @@ void rhi_destroy_shader(RhiShader shader) {
 }
 
 void rhi_destroy_pipeline(RhiPipeline pipeline) {
-    sol_u32 idx = pipeline.id - 1;
+    sol_u32 idx;
+    if (!pipeline.id) return;
+    idx = pipeline.id - 1;
     glDeleteVertexArrays(1, &g_pipelines[idx].vao);
     g_pipelines[idx].vao = 0;
     g_pipelines[idx].program = 0;   /* not owned here — the shader owns the program */

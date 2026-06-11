@@ -38,6 +38,58 @@ static struct {
     sol_bool    ready;
 } g_ui;
 
+#ifdef SOL_RHI_METAL
+
+/* Full-fidelity MSL twins (item 10 stage b). The pixel->clip remap is
+   IDENTICAL: UI's top-left origin agrees with Metal's top-left raster
+   origin the same way it agreed with GL's bottom-left through the y flip
+   in the math. The atlas is a CPU-uploaded texture — no v-flip (that rule
+   is for render targets only). */
+static const char *UI_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn {\n"
+    "    float2 pos [[attribute(0)]];\n"
+    "    float2 uv  [[attribute(1)]];\n"
+    "    float4 col [[attribute(2)]];\n"
+    "};\n"
+    "struct VU { float uScreenW; float uScreenH; };\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; float4 col; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float x = v.pos.x / u.uScreenW * 2.0 - 1.0;\n"
+    "    float y = 1.0 - v.pos.y / u.uScreenH * 2.0;\n"
+    "    o.pos = float4(x, y, 0.0, 1.0);\n"
+    "    o.uv  = v.uv;\n"
+    "    o.col = v.col;\n"
+    "    return o;\n"
+    "}\n";
+
+static const char *UI_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; float4 col; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      texture2d<float> uTex [[texture(0)]],\n"
+    "                      sampler smp [[sampler(0)]]) {\n"
+    "    return v.col * uTex.sample(smp, v.uv);\n"
+    "}\n";
+
+static const char *UI_TEXT_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; float4 col; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      texture2d<float> uTex [[texture(0)]],\n"
+    "                      sampler smp [[sampler(0)]]) {\n"
+    "    float d = uTex.sample(smp, v.uv).r;\n"
+    "    float w = fwidth(d) * 0.5 + 0.0001;\n"
+    "    float edge = smoothstep(0.5 - w, 0.5 + w, d);\n"
+    "    return float4(v.col.rgb, v.col.a * edge);\n"
+    "}\n";
+
+#else /* GLSL */
+
 /* pixels in, NDC out: the orthographic projection collapsed to one remap.
    Top-left origin / y-down (UI convention) to GL's centered y-up. */
 static const char *UI_VERTEX_SRC =
@@ -84,6 +136,8 @@ static const char *UI_TEXT_FRAGMENT_SRC =
     "    float edge = smoothstep(0.5 - w, 0.5 + w, d);\n"
     "    FragColor = vec4(vColor.rgb, vColor.a * edge);\n"
     "}\n";
+
+#endif /* SOL_RHI_METAL — the UI trio */
 
 sol_bool ui_init(void) {
     RhiPipelineDesc desc = {0};
