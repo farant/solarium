@@ -28,6 +28,7 @@
 #include "synth.h"               /* sounds minted from params (P4 item 8) */
 #include "mixer.h"               /* the pure mixing core the callback shares */
 #include "platform_audio.h"      /* the fifth quarantine: CoreAudio + the ring */
+#include "stml.h"                /* sounds.stml: the ear's hot-reloadable knobs */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -1359,6 +1360,311 @@ static void play_oneshot(const float *buf, int frames, float gain, float pan) {
     audio_push(&c);              /* full ring = a dropped blip, never a stall */
 }
 
+/* ---- the sound bank (piece 3): every buffer the palace plays, minted at
+   startup from presets merged with the optional sounds.stml overrides,
+   re-minted by the watcher when that file changes — sound design is a
+   text editor and your ears. Buffers are static and session-lived, which
+   is what satisfies the mixer's lifetime contract by construction; a
+   re-mint rewrites the same arrays in place (a momentarily-playing voice
+   reads a blend of old and new samples for one buffer length — the
+   audible cost of a live reload, accepted). */
+#define SND_STEP_VARIANTS 6
+#define SND_LOOP_MAX      (SYNTH_RATE * 4)
+
+static float g_snd_step[SND_STEP_VARIANTS][SYNTH_RATE / 2];
+static int   g_snd_step_frames[SND_STEP_VARIANTS];
+static float g_snd_whoosh[SYNTH_RATE];
+static int   g_snd_whoosh_frames = 0;
+static float g_snd_thump[SYNTH_RATE];
+static int   g_snd_thump_frames = 0;
+static float g_snd_wind[SND_LOOP_MAX];
+static int   g_snd_wind_frames = 0;
+static float g_snd_crackle[SND_LOOP_MAX];
+static int   g_snd_crackle_frames = 0;
+
+/* sounds.stml: <sounds><sound type="step" lpcut="900"/></sounds> — knobs
+   by NAME from the synth schema, any subset over the preset (the mesh-ref
+   pattern, not the component prefix rule: these params have names). */
+#define SND_OVERRIDE_MAX 12
+static char  g_snd_over_type[SND_OVERRIDE_MAX][16];
+static float g_snd_over_params[SND_OVERRIDE_MAX][SYNTH_PARAMS];
+static int   g_snd_over_count = 0;
+
+static const float *snd_params(const char *type) {
+    int i;
+    for (i = 0; i < g_snd_over_count; i++) {
+        if (strcmp(g_snd_over_type[i], type) == 0)
+            return g_snd_over_params[i];
+    }
+    return synth_preset(type);
+}
+
+static void load_sound_overrides(void) {
+    char     *src;
+    StmlNode *root, *top;
+    sol_u32   i;
+    g_snd_over_count = 0;
+    src = fs_read_file("sounds.stml", 64L * 1024L, (long *)0, (int *)0);
+    if (src == NULL) return;                       /* no file = pure presets */
+    root = stml_parse(src);
+    free(src);
+    if (root == NULL) {
+        fprintf(stderr, "sounds.stml: parse error — using presets\n");
+        return;
+    }
+    top = stml_child(root, "sounds");
+    for (i = 0; top && i < top->child_count; i++) {
+        StmlNode    *n  = top->children[i];
+        const char  *ty = stml_attr(n, "type");
+        const float *base;
+        int          k;
+        if (n->tag == NULL || strcmp(n->tag, "sound") != 0 || ty == NULL)
+            continue;
+        base = synth_preset(ty);
+        if (base == NULL) {
+            fprintf(stderr, "sounds.stml: unknown sound type '%s'\n", ty);
+            continue;
+        }
+        if (g_snd_over_count >= SND_OVERRIDE_MAX ||
+            strlen(ty) >= sizeof g_snd_over_type[0]) continue;
+        strcpy(g_snd_over_type[g_snd_over_count], ty);
+        for (k = 0; k < SYNTH_PARAMS; k++) {
+            const char *v = stml_attr(n, synth_param_names()[k]);
+            g_snd_over_params[g_snd_over_count][k] =
+                v ? (float)atof(v) : base[k];
+        }
+        g_snd_over_count++;
+    }
+    stml_free(root);
+}
+
+static void sound_bank_mint(void) {
+    float lp[SYNTH_PARAMS];
+    int   i;
+    g_snd_blip_frames = synth_render(snd_params("blip"), 7u,
+                                     g_snd_blip, SYNTH_RATE);
+    for (i = 0; i < SND_STEP_VARIANTS; i++) {       /* jitter pre-minted as
+                                                       variants: no two steps
+                                                       alike, picked per stride */
+        g_snd_step_frames[i] = synth_render(snd_params("step"),
+                                            101u + (sol_u32)i,
+                                            g_snd_step[i], SYNTH_RATE / 2);
+    }
+    g_snd_whoosh_frames = synth_render(snd_params("whoosh"), 7u,
+                                       g_snd_whoosh, SYNTH_RATE);
+    g_snd_thump_frames  = synth_render(snd_params("thump"), 7u,
+                                       g_snd_thump, SYNTH_RATE);
+    /* the loops render LOOP-SHAPED (no attack/decay — fades belong to the
+       mixer's gain) and tail-into-head blended: seamless by construction,
+       offline — the "no loop seams" goal without synthesis in the callback */
+    memcpy(lp, snd_params("wind"), sizeof lp);
+    lp[1] = 0.0f; lp[2] = 3.0f; lp[4] = 0.0f;
+    g_snd_wind_frames = synth_render_loop(lp, 7u, g_snd_wind,
+                                          SND_LOOP_MAX, SYNTH_RATE / 4);
+    memcpy(lp, snd_params("crackle"), sizeof lp);
+    lp[1] = 0.0f; lp[4] = 0.0f;
+    g_snd_crackle_frames = synth_render_loop(lp, 7u, g_snd_crackle,
+                                             SND_LOOP_MAX, SYNTH_RATE / 4);
+}
+
+/* ---- the living voices: wind on slot 0, lantern crackles on 1..7. All
+   allocation logic is PRODUCER-side; the consumer only obeys. */
+#define VOICE_LANTERN_BASE 1
+#define VOICE_LANTERN_MAX  7
+
+static sol_u32 g_lantern_handle[VOICE_LANTERN_MAX];
+static sol_u32 g_lantern_gen[VOICE_LANTERN_MAX];
+static float   g_wind_cur = 0.0f, g_wind_sent = -1.0f;
+static sol_u32 g_wind_gen = 0u;
+static int     g_loop_voices = 0;                /* the HUD's number */
+static float   g_step_acc = 0.0f;
+static vec3    g_step_prev;
+static int     g_step_prev_ok = 0;
+static sol_u32 g_step_rng = 12345u;
+
+/* (re)arm the loops — at startup and after a sounds.stml re-mint changed
+   buffer lengths; lantern slots are dropped and re-claimed next frame */
+static void audio_loops_restart(void) {
+    MixCmd c;
+    int    i;
+    memset(&c, 0, sizeof c);
+    c.kind   = MIX_CMD_START;
+    c.slot   = 0;
+    c.gen    = ++g_wind_gen;
+    c.buf    = g_snd_wind;
+    c.frames = g_snd_wind_frames;
+    c.gain   = g_wind_cur;
+    c.loop   = 1;
+    audio_push(&c);
+    g_wind_sent = g_wind_cur;
+    for (i = 0; i < VOICE_LANTERN_MAX; i++) {
+        if (g_lantern_handle[i] != 0u) {
+            memset(&c, 0, sizeof c);
+            c.kind = MIX_CMD_STOP;
+            c.slot = VOICE_LANTERN_BASE + i;
+            c.gen  = g_lantern_gen[i];
+            audio_push(&c);
+            g_lantern_handle[i] = 0u;
+        }
+    }
+}
+
+static void update_audio(AppState *st, float dt) {
+    MixCmd c;
+    vec3   fwd, right;
+    float  target, ease;
+    int    i;
+
+    /* wind breathes with containment: outdoors full, indoors a memory —
+       the same derived query that dims the ambient dims the air */
+    target = (st->current_room == 0) ? 0.20f : 0.02f;
+    ease   = 1.0f - expf(-dt * 2.5f);
+    g_wind_cur += (target - g_wind_cur) * ease;
+    if (fabsf(g_wind_cur - g_wind_sent) > 0.003f) {
+        memset(&c, 0, sizeof c);
+        c.kind = MIX_CMD_SET;
+        c.slot = 0;
+        c.gen  = g_wind_gen;
+        c.gain = g_wind_cur;
+        if (audio_push(&c)) g_wind_sent = g_wind_cur;
+    }
+
+    /* the camera's right, for panning the world (flattened: tilting your
+       head shouldn't swing the stereo field) */
+    fwd = camera_forward(&st->camera);
+    fwd.y = 0.0f;
+    if (vec3_dot(fwd, fwd) < 1e-6f) fwd = vec3_make(0.0f, 0.0f, -1.0f);
+    fwd   = vec3_normalize(fwd);
+    right = vec3_make(-fwd.z, 0.0f, fwd.x);
+
+    /* lantern crackles: the nearest few flames each hold a voice. The gain
+       rides the SAME flicker the light and the bloom ride (one flame, three
+       senses) and the SAME windowed inverse-square the light uses (one
+       perceptual law, two senses — item 5's falloff, heard). */
+    {
+        sol_u32 want[VOICE_LANTERN_MAX];
+        float   wd2[VOICE_LANTERN_MAX];
+        int     wn = 0;
+        sol_u32 k;
+        for (k = 0; k < st->scene.count; k++) {
+            SceneObject *o  = &st->scene.objects[k];
+            const char  *lt = scene_meta_get(&st->scene, o->handle, "light");
+            mat4 wm; vec3 p, dv; float d2;
+            if (!lt || strcmp(lt, "point") != 0) continue;
+            wm = scene_world_matrix(&st->scene, o);
+            p  = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
+            dv = vec3_sub(p, st->camera.pos);
+            d2 = vec3_dot(dv, dv);
+            if (wn < VOICE_LANTERN_MAX) {
+                want[wn] = o->handle; wd2[wn] = d2; wn++;
+            } else {
+                int worst = 0, j;
+                for (j = 1; j < wn; j++) if (wd2[j] > wd2[worst]) worst = j;
+                if (d2 < wd2[worst]) { want[worst] = o->handle; wd2[worst] = d2; }
+            }
+        }
+        for (i = 0; i < VOICE_LANTERN_MAX; i++) {   /* release the unwanted */
+            int j, keep = 0;
+            if (g_lantern_handle[i] == 0u) continue;
+            for (j = 0; j < wn; j++)
+                if (want[j] == g_lantern_handle[i]) keep = 1;
+            if (scene_get(&st->scene, g_lantern_handle[i]) == NULL) keep = 0;
+            if (!keep) {
+                memset(&c, 0, sizeof c);
+                c.kind = MIX_CMD_STOP;
+                c.slot = VOICE_LANTERN_BASE + i;
+                c.gen  = g_lantern_gen[i];
+                audio_push(&c);
+                g_lantern_handle[i] = 0u;
+            }
+        }
+        for (i = 0; i < wn; i++) {                  /* claim for the new */
+            int j, held = -1, slot = -1;
+            for (j = 0; j < VOICE_LANTERN_MAX; j++) {
+                if (g_lantern_handle[j] == want[i]) held = j;
+                if (g_lantern_handle[j] == 0u && slot < 0) slot = j;
+            }
+            if (held < 0 && slot >= 0) {
+                memset(&c, 0, sizeof c);
+                c.kind   = MIX_CMD_START;
+                c.slot   = VOICE_LANTERN_BASE + slot;
+                c.gen    = ++g_voice_gen;
+                c.buf    = g_snd_crackle;
+                c.frames = g_snd_crackle_frames;
+                c.gain   = 0.0f;
+                c.loop   = 1;
+                if (audio_push(&c)) {
+                    g_lantern_handle[slot] = want[i];
+                    g_lantern_gen[slot]    = c.gen;
+                }
+            }
+        }
+        g_loop_voices = 1;                          /* the wind */
+        for (i = 0; i < VOICE_LANTERN_MAX; i++) {   /* drive gain + pan */
+            SceneObject *o;
+            mat4  wm;
+            vec3  p, dv;
+            float d, r, w, att, gain, pan;
+            const char *s;
+            if (g_lantern_handle[i] == 0u) continue;
+            o = scene_get(&st->scene, g_lantern_handle[i]);
+            if (o == NULL) continue;
+            g_loop_voices++;
+            wm = scene_world_matrix(&st->scene, o);
+            p  = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
+            dv = vec3_sub(p, st->camera.pos);
+            d  = sqrtf(vec3_dot(dv, dv));
+            r  = 9.0f;
+            s  = scene_meta_get(&st->scene, o->handle, "light_radius");
+            if (s) r = (float)atof(s);
+            w = 1.0f - (d / r) * (d / r) * (d / r) * (d / r);
+            if (w < 0.0f) w = 0.0f;
+            att  = (w * w) / (d * d + 1.0f);
+            gain = 0.9f * att * o->overlay_glow;
+            if (gain > 0.5f) gain = 0.5f;
+            pan = 0.0f;
+            if (d > 0.001f)
+                pan = vec3_dot(vec3_scale(dv, 1.0f / d), right);
+            if (pan < -1.0f) pan = -1.0f;
+            if (pan >  1.0f) pan =  1.0f;
+            memset(&c, 0, sizeof c);
+            c.kind = MIX_CMD_SET;
+            c.slot = VOICE_LANTERN_BASE + i;
+            c.gen  = g_lantern_gen[i];
+            c.gain = gain;
+            c.pan  = pan;
+            audio_push(&c);
+        }
+    }
+
+    /* footsteps from actual ground travel: stride-accumulated, variants
+       pre-minted with jittered seeds, silent the moment you stop (item 1
+       made "moving" honest; this is that honesty, audible) */
+    {
+        vec3 pos = st->camera.pos;
+        if (g_step_prev_ok && st->camera.mode == CAMERA_WALK) {
+            float dx = pos.x - g_step_prev.x;
+            float dz = pos.z - g_step_prev.z;
+            float dl = sqrtf(dx * dx + dz * dz);
+            if (dl < 1.0f) {                        /* a teleport, not a stride */
+                g_step_acc += dl;
+                if (g_step_acc >= 1.7f) {
+                    int v = (int)(particles_rand01(&g_step_rng)
+                                  * (float)SND_STEP_VARIANTS);
+                    if (v >= SND_STEP_VARIANTS) v = SND_STEP_VARIANTS - 1;
+                    play_oneshot(g_snd_step[v], g_snd_step_frames[v],
+                                 0.30f, 0.0f);
+                    g_step_acc -= 1.7f;
+                }
+            }
+        } else {
+            g_step_acc = 0.0f;
+        }
+        g_step_prev    = pos;
+        g_step_prev_ok = 1;
+    }
+}
+
 /* Cast a pick ray through a screen point (NDC) and select the nearest object,
    reporting its stable handle + nid. In orbit, a hit re-targets the pivot. */
 static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
@@ -1727,7 +2033,7 @@ static void tex_asset_key(const char *path, sol_bool srgb, char *buf) {
    glb re-imports its anchors through the registry; the .hdr re-runs the
    IBL bakes. FAIL-OPEN: a torn mid-save read keeps the old contents and
    retries next poll (the mtime is recorded only after a good reload). */
-typedef enum { WATCH_TEX_SRGB = 0, WATCH_GLB, WATCH_HDR } WatchKind;
+typedef enum { WATCH_TEX_SRGB = 0, WATCH_GLB, WATCH_HDR, WATCH_SND } WatchKind;
 typedef struct {
     char       path[200];
     long       mtime;
@@ -2217,6 +2523,7 @@ static void reader_update(AppState *st, float dt) {
         if (st->reader_state == READER_RISING) {
             st->reader_state = READER_OPEN;
         } else {                                   /* landed: the rig dies */
+            play_oneshot(g_snd_thump, g_snd_thump_frames, 0.45f, 0.0f);
             st->reader_state   = READER_IDLE;
             st->reader_source  = 0;
             st->reader_turning = 0;
@@ -2446,12 +2753,14 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 st->reader_turn_old = st->reader_spread;
                 st->reader_spread++;            /* commit; the leaf covers it */
                 st->reader_turning  = 1;
+                play_oneshot(g_snd_whoosh, g_snd_whoosh_frames, 0.30f, 0.0f);
                 st->reader_turn_t   = 0.0f;
             }
             if (lnow && !st->arrow_l_was && st->reader_spread > 0) {
                 st->reader_turn_old = st->reader_spread;
                 st->reader_spread--;
                 st->reader_turning  = -1;
+                play_oneshot(g_snd_whoosh, g_snd_whoosh_frames, 0.30f, 0.0f);
                 st->reader_turn_t   = 0.0f;
             }
         }
@@ -3396,6 +3705,13 @@ static void watch_poll(AppState *st) {
         } else if (w->kind == WATCH_GLB) {
             glb_reload(st, w->path);
             w->mtime = m;
+        } else if (w->kind == WATCH_SND) {
+            load_sound_overrides();           /* edit a knob, hear it: the
+                                                 paper-picture moment for ears */
+            sound_bank_mint();
+            audio_loops_restart();
+            w->mtime = m;
+            printf("sounds re-minted: %s\n", w->path);
         } else {
             hdr_reload(st, w->path);
             w->mtime = m;
@@ -4902,13 +5218,14 @@ static void render(AppState *state) {
 
             /* the registry's instruments (P4 item 4): entries alive and refs
                held — the L-reload acceptance is these NOT moving */
-            sprintf(line, "assets %dm %dt (%d refs)",
+            sprintf(line, "assets %dm %dt (%d refs) snd %d",
                     asset_live_count(&g_mesh_assets)
                         + asset_live_count(&g_glbpart_assets),
                     asset_live_count(&g_tex_assets),
                     asset_ref_total(&g_mesh_assets)
                         + asset_ref_total(&g_glbpart_assets)
-                        + asset_ref_total(&g_tex_assets));
+                        + asset_ref_total(&g_tex_assets),
+                    g_loop_voices);    /* loops alive: wind + crackling flames */
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
@@ -5276,12 +5593,19 @@ int main(void) {
         fprintf(stderr, "wtext_init failed — card text disabled\n");
 
     /* audio (P4 item 8): the callback starts now; failure degrades to a
-       silent palace, never a dead one. The first minted sound: selection's
-       blip, rendered once from its preset. */
+       silent palace, never a dead one. The bank mints every buffer from
+       presets + sounds.stml overrides; the wind starts breathing; the
+       watcher makes the knobs live. */
     if (!audio_init())
         fprintf(stderr, "audio: no output device — the palace stays silent\n");
-    g_snd_blip_frames = synth_render(synth_preset("blip"), 7u,
-                                     g_snd_blip, SYNTH_RATE);
+    load_sound_overrides();
+    sound_bank_mint();
+    audio_loops_restart();
+    {
+        RhiTexture none;
+        none.id = 0;
+        watch_add("sounds.stml", WATCH_SND, none);
+    }
 
     last = glfwGetTime();
 
@@ -5337,6 +5661,9 @@ int main(void) {
                                                          emitters above deposited
                                                          newborns; one Euler step
                                                          ages everything (item 7) */
+        update_audio(&state, (float)dt);              /* wind by containment,
+                                                         lantern crackles in 3D,
+                                                         footsteps (item 8) */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */
         if (now - g_watch_last >= 0.5) {              /* the watcher (P4 item 4):
                                                          a handful of stats twice

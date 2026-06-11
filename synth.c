@@ -36,7 +36,10 @@ static const SynthPreset PRESETS[] = {
     { "whoosh", { 4.0f, 0.10f, 0.05f,  0.0f, 0.28f,  180.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.5f, 0.0f, 800.0f,  250.0f, 0.0f, 0.0f, 0.30f, 0.3f } },
     { "thump",  { 3.0f, 0.002f,0.04f,  0.6f, 0.28f,  110.0f,-3.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.5f, 0.0f, 300.0f,  0.0f,   0.0f, 0.0f, 0.60f, 0.25f } },
     { "wind",   { 4.0f, 0.40f, 1.60f,  0.0f, 0.50f,  60.0f,  0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.5f, 0.0f, 450.0f,  0.0f,   0.0f, 0.0f, 0.25f, 0.0f } },
-    { "laser",  { 0.0f, 0.0f,  0.04f,  0.3f, 0.18f, 1400.0f,-9.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.18f,0.3f, 0.0f,    0.0f,   0.0f, 0.0f, 0.35f, 0.2f } }
+    { "laser",  { 0.0f, 0.0f,  0.04f,  0.3f, 0.18f, 1400.0f,-9.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.18f,0.3f, 0.0f,    0.0f,   0.0f, 0.0f, 0.35f, 0.2f } },
+    /* loop-shaped (attack/decay 0): a flame's sputter — slow sample-held
+       noise so the crunch is CHUNKS, band-passed to the fire register */
+    { "crackle",{ 4.0f, 0.0f,  3.0f,   0.0f, 0.0f,   18.0f,  0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.5f, 0.0f, 2000.0f, 400.0f, 0.0f, 0.0f, 0.50f, 0.0f } }
 };
 #define PRESET_COUNT ((int)(sizeof PRESETS / sizeof PRESETS[0]))
 
@@ -170,4 +173,17 @@ int synth_render(const float *p, sol_u32 seed, float *out, int max_frames) {
         out[i] = clampf(x * p[18], -1.0f, 1.0f);
     }
     return total;
+}
+
+int synth_render_loop(const float *params, sol_u32 seed, float *out,
+                      int max_frames, int blend_frames) {
+    int n = synth_render(params, seed, out, max_frames);
+    int len, i;
+    if (blend_frames >= n) return n;             /* too short to blend: as-is */
+    len = n - blend_frames;
+    for (i = 0; i < blend_frames; i++) {
+        float w = (float)i / (float)blend_frames;
+        out[i] = out[i] * w + out[len + i] * (1.0f - w);
+    }
+    return len;
 }

@@ -65,4 +65,13 @@ const char  *synth_preset_name(int i);
    (duration = attack + sustain + decay, truncated to max_frames). */
 int synth_render(const float *params, sol_u32 seed, float *out, int max_frames);
 
+/* render a SEAMLESS LOOP: synth_render, then crossfade the tail into the
+   head and trim it — sample[0] continues sample[len-1] by construction.
+   This is how "no loop seams" is achieved OFFLINE (wind, crackle) without
+   putting synthesis inside the real-time callback. Returns the loopable
+   length (frames - blend_frames). Use loop-shaped params (attack 0,
+   decay 0) — fades belong to the mixer's gain, not the loop body. */
+int synth_render_loop(const float *params, sol_u32 seed, float *out,
+                      int max_frames, int blend_frames);
+
 #endif /* SYNTH_H */

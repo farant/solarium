@@ -183,6 +183,25 @@ int main(void) {
         printf("crush levels + decim holds: ok\n");
     }
 
+    /* a loop is seamless by construction: the first sample continues the
+       last (a raw render of the same sine would jump at the wrap) */
+    {
+        float step;
+        base_params(p);
+        p[5] = 220.0f;
+        n = synth_render_loop(p, 1u, buf, SYNTH_RATE * 3, SYNTH_RATE / 4);
+        if (n != SYNTH_RATE - SYNTH_RATE / 4) {
+            printf("FAIL: loop length must be frames - blend\n"); return 1;
+        }
+        step = fabsf(buf[1] - buf[0]) + 1e-4f;     /* one sample's worth */
+        if (fabsf(buf[0] - buf[n - 1]) > step * 2.0f) {
+            printf("FAIL: loop seam jumps (%.5f vs step %.5f)\n",
+                   (double)fabsf(buf[0] - buf[n - 1]), (double)step);
+            return 1;
+        }
+        printf("loop blend seam continuity: ok\n");
+    }
+
     /* every preset renders sane: nonzero, audible, clamped, no NaN */
     for (i = 0; i < synth_preset_count(); i++) {
         const char  *nm = synth_preset_name(i);

@@ -1,0 +1,25 @@
+<!-- sounds.stml — the palace's voice, as knobs (P4 item 8).
+
+     Each <sound type="..."> overrides knobs on that preset; absent knobs
+     keep their preset values. Save the file and the watcher re-mints
+     every sound within half a second — sound design is this file, your
+     editor, and your ears.
+
+     Types: blip step whoosh thump wind laser crackle
+     Knobs: wave (0 square / 1 saw / 2 triangle / 3 sine / 4 noise)
+            attack sustain punch decay      (seconds; punch 0..1)
+            freq slide dslide               (Hz; octaves/s; octaves/s^2)
+            vibd vibs                       (semitones; Hz)
+            arpm arpt                       (freq multiplier; seconds)
+            duty dutys                      (0..1; per second)
+            lpcut hpcut                     (Hz; 0 = off)
+            crush decim                     (bits; sample hold; 0 = off)
+            gain jitter                     (linear; 0..1)
+
+     The examples below restate two preset values verbatim — edit them
+     and listen. Delete an element to return that sound to its preset. -->
+
+<sounds>
+  <sound type="step" gain="0.33" />
+  <sound type="wind" lpcut="450" />
+</sounds>
