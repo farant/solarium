@@ -2974,6 +2974,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             scene_meta_set(&st->scene, h, "light_color", "1.0 0.72 0.42");
             scene_meta_set(&st->scene, h, "light_intensity", "14");
             scene_meta_set(&st->scene, h, "light_radius", "9");
+            scene_component_add(&st->scene, h, "flicker", (const float *)0, 0);
             {
                 SceneObject *lo = scene_get(&st->scene, h);
                 if (lo) {
@@ -4167,6 +4168,10 @@ static int collect_point_lights(AppState *st, vec3 *pos, vec3 *col, float *rad) 
         if (s) inten = (float)atof(s);
         s = scene_meta_get(&st->scene, o->handle, "light_radius");
         if (s) radius = (float)atof(s);
+        inten *= o->overlay_glow;              /* flicker lives here (P4 i6 p3):
+                                                  the glow channel multiplies in
+                                                  at the consumer, the meta never
+                                                  changes */
         cpos[n] = p;
         ccol[n] = vec3_make(r * inten, g * inten, b * inten);
         crad[n] = radius;
@@ -4348,7 +4353,15 @@ static void render(AppState *state) {
             state->terrain_amp = mesh_ref_param("terrain", o->mesh_params,
                                                 o->mesh_param_count, "amp");
         }
-        draw_mesh(state, o->mesh, model, view, proj, eye, hl, o->material);
+        {
+            Material dm = o->material;
+            dm.emissive.x *= o->overlay_glow;     /* the heart and the pool of
+                                                     light breathe TOGETHER —
+                                                     same channel, two consumers */
+            dm.emissive.y *= o->overlay_glow;
+            dm.emissive.z *= o->overlay_glow;
+            draw_mesh(state, o->mesh, model, view, proj, eye, hl, dm);
+        }
         state->draws_done++;                      /* == total until culling (P4 i2 p4) */
     }
     state->terrain_blend = SOL_FALSE;              /* the reader rig is not land */

@@ -842,6 +842,41 @@ int main(void) {
             return 1;
         }
 
+        /* flicker drives the GLOW channel (piece 3): animated, DESYNCED per
+           object (state-seeded phase), and the persisted material never
+           hears about it */
+        {
+            sol_u32 f1, f2;
+            float   fp[2], g1;
+            fp[0] = 1.0f;            /* full depth: unmissable in the assert */
+            fp[1] = 9.0f;
+            f1 = scene_add(&cs, 0, m0, v3(0, 0, 0), q_identity(), v3(1, 1, 1));
+            f2 = scene_add(&cs, 0, m0, v3(0, 0, 0), q_identity(), v3(1, 1, 1));
+            scene_component_add(&cs, f1, "flicker", fp, 2);
+            scene_component_add(&cs, f2, "flicker", fp, 2);
+            components_update(&cs, 2.0f, 0.016f);
+            if (scene_get(&cs, f1)->overlay_glow == 1.0f) {
+                printf("FAIL: flicker must move the glow channel\n");
+                return 1;
+            }
+            if (scene_get(&cs, f1)->overlay_glow ==
+                scene_get(&cs, f2)->overlay_glow) {
+                printf("FAIL: two flames must not breathe in step\n");
+                return 1;
+            }
+            if (scene_get(&cs, f1)->material.emissive.x != 0.0f) {
+                printf("FAIL: the glow channel leaked into the material\n");
+                return 1;
+            }
+            g1 = scene_get(&cs, f1)->overlay_glow;
+            components_update(&cs, 2.5f, 0.016f);
+            if (scene_get(&cs, f1)->overlay_glow == g1) {
+                printf("FAIL: the flame must keep moving\n");
+                return 1;
+            }
+            printf("flicker: glow animates, desyncs, never persists: ok\n");
+        }
+
         /* the schema is queryable (the io layer's door, piece 2) */
         if (component_schema("spin", (const char *const **)0, (const float **)0) != 4 ||
             component_schema("nope", (const char *const **)0, (const float **)0) != -1) {

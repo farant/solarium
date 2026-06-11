@@ -187,8 +187,8 @@ imports.
   reconstructed, never serialized. **`<mat>`** — scalar factors only.
 - **`<component type="..." .../>`** (P4 item 6) — a behavior attachment,
   repeatable: the type names an entry in the component registry (the
-  registry-as-schema pattern's third application — `spin`, `bob`, more to
-  come), and the named attrs are the file's own param PREFIX against that
+  registry-as-schema pattern's third application — `spin`, `bob`, `flicker`,
+  more to come), and the named attrs are the file's own param PREFIX against that
   schema (absent params take defaults, like mesh refs). Behaviors compute
   TRANSIENT overlays on top of the persisted transform — the file records
   the BASE the user placed and which dances are attached, never a frame of

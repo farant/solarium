@@ -36,6 +36,29 @@ static void comp_bob(Scene *s, SceneObject *o, const float *p,
     o->overlay_pos.y += p[0] * sinf(p[1] * t);
 }
 
+/* flicker: a flame's life on the GLOW channel — three incommensurate sines
+   make organic non-repeating wobble; depth scales the swing around 1. The
+   FIRST customer of per-instance state: a phase seeded from the handle, so
+   two flames in one room never breathe in step. The persisted material and
+   light metas never hear about any of this (§1.6 — the glow multiplies in
+   at the consumers: the light collector and the emissive draw). */
+typedef struct { float phase; } FlickerState;
+
+static void comp_flicker(Scene *s, SceneObject *o, const float *p,
+                         void *st, float t, float dt) {
+    FlickerState *fs = (FlickerState *)st;
+    float n, tt;
+    (void)s; (void)dt;
+    if (fs == NULL) return;                    /* alloc failed: a steady flame */
+    if (fs->phase == 0.0f)                     /* seed once per attachment */
+        fs->phase = (float)(o->handle % 97u) * 0.37f + 0.01f;
+    tt = t + fs->phase;
+    n  = sinf(p[1] * tt)                 * 0.5f
+       + sinf(p[1] * 2.7f  * tt + 1.3f) * 0.3f
+       + sinf(p[1] * 0.83f * tt + 4.1f) * 0.2f;
+    o->overlay_glow *= 1.0f + p[0] * n * 0.5f;
+}
+
 /* THE single source of truth for what each component type means — the
    third registry (P3's mesh emitters, P4i4's assets, now behavior). New
    behaviors are one entry + one function. */
@@ -43,7 +66,9 @@ static const ComponentDef C_REGISTRY[] = {
     { "spin", 4, { "ax", "ay", "az", "speed" },
                  { 0.0f, 1.0f, 0.0f, 0.8f }, 0, comp_spin },
     { "bob",  2, { "amp", "speed" },
-                 { 0.15f, 1.0f }, 0, comp_bob }
+                 { 0.15f, 1.0f }, 0, comp_bob },
+    { "flicker", 2, { "depth", "speed" },
+                 { 0.30f, 9.0f }, sizeof(FlickerState), comp_flicker }
 };
 #define C_COUNT ((int)(sizeof C_REGISTRY / sizeof C_REGISTRY[0]))
 
