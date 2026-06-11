@@ -13,7 +13,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c json.c glb.c
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c json.c glb.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     exit 0
 fi
@@ -87,6 +87,18 @@ if [ "$MODE" = "coltest" ]; then
         collide.c scene.c material.c mesh.c nid.c sol_math.c collide_test.c \
         -o collide_test
     echo "built ./collide_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
+# Build + run the headless asset-registry test under the sanitizers. Pure
+# bookkeeping (keys, refcounts, injected destructors) — links libc only.
+if [ "$MODE" = "assettest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        asset.c asset_test.c \
+        -o asset_test
+    echo "built ./asset_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
 

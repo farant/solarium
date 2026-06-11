@@ -8,6 +8,7 @@
 /pick_test
 /json_test
 /collide_test
+/asset_test
 /scene.stml
 /scene_io_test.stml
 /scene_io_test_2.stml
