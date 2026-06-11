@@ -25,6 +25,9 @@
 #include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
 #include "component.h"           /* behavior as data — the overlay doctrine (P4 item 6) */
 #include "particles.h"           /* the pool: runtime-only ephemera (P4 item 7) */
+#include "synth.h"               /* sounds minted from params (P4 item 8) */
+#include "mixer.h"               /* the pure mixing core the callback shares */
+#include "platform_audio.h"      /* the fifth quarantine: CoreAudio + the ring */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -1328,6 +1331,34 @@ static sol_u32 selection_root(Scene *s, sol_u32 handle) {
     return group_root(s, handle);
 }
 
+/* ---- the palace's voice (P4 item 8 piece 2): minted buffers + the
+   producer side of the voice protocol. Slots 0..7 are RESERVED for the
+   long-lived loops piece 3 brings (wind); one-shots round-robin the rest
+   and may steal a still-playing slot — for short SFX, the oldest sound
+   losing its tail beats silence. The generation stamp makes any command
+   aimed at a stolen voice a no-op instead of a misfire. */
+#define VOICE_ONESHOT_BASE 8
+
+static float   g_snd_blip[SYNTH_RATE];
+static int     g_snd_blip_frames = 0;
+static sol_u32 g_voice_gen = 0u;
+static int     g_voice_rr  = 0;
+
+static void play_oneshot(const float *buf, int frames, float gain, float pan) {
+    MixCmd c;
+    if (buf == (const float *)0 || frames <= 0) return;
+    c.kind   = MIX_CMD_START;
+    c.slot   = VOICE_ONESHOT_BASE
+             + (g_voice_rr++ % (MIX_VOICES - VOICE_ONESHOT_BASE));
+    c.gen    = ++g_voice_gen;
+    c.buf    = buf;
+    c.frames = frames;
+    c.gain   = gain;
+    c.pan    = pan;
+    c.loop   = 0;
+    audio_push(&c);              /* full ring = a dropped blip, never a stall */
+}
+
 /* Cast a pick ray through a screen point (NDC) and select the nearest object,
    reporting its stable handle + nid. In orbit, a hit re-targets the pivot. */
 static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
@@ -1338,6 +1369,9 @@ static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
     st->selected_handle = hit;
     if (hit) {
         SceneObject *o = scene_get(&st->scene, hit);
+        play_oneshot(g_snd_blip, g_snd_blip_frames, 0.22f, 0.0f);  /* piece 2's
+                                                       audible proof: selection
+                                                       speaks */
         printf("picked: handle %u, nid %s, t=%.2f\n",
                (unsigned)hit, (o && o->nid) ? o->nid : "?", t);
         if (hit == st->page_handle) {                   /* click the page -> read it */
@@ -5241,6 +5275,14 @@ int main(void) {
     if (!wtext_init())                    /* world text (item 8): same atlas, MVP ride */
         fprintf(stderr, "wtext_init failed — card text disabled\n");
 
+    /* audio (P4 item 8): the callback starts now; failure degrades to a
+       silent palace, never a dead one. The first minted sound: selection's
+       blip, rendered once from its preset. */
+    if (!audio_init())
+        fprintf(stderr, "audio: no output device — the palace stays silent\n");
+    g_snd_blip_frames = synth_render(synth_preset("blip"), 7u,
+                                     g_snd_blip, SYNTH_RATE);
+
     last = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
@@ -5317,6 +5359,8 @@ int main(void) {
     font_destroy(state.mono_font);
     font_destroy(state.ui_font);
     wtext_shutdown();
+    audio_shutdown();                   /* stop the other thread FIRST: no
+                                           render in flight while buffers die */
     ui_shutdown();
     scene_free(&state.scene);
     collide_set_free(&state.colliders);

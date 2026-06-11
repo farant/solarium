@@ -11,6 +11,7 @@
 /asset_test
 /particles_test
 /synth_test
+/mixer_test
 *.wav
 /scene.stml
 /scene_io_test.stml
