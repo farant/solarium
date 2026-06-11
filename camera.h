@@ -30,6 +30,9 @@ typedef struct {
     float      move_speed;   /* units per second                   */
     vec3       target;       /* orbit pivot                        */
     float      distance;     /* orbit radius                       */
+    float      ground_y;     /* the floor under the camera (item 10: terrain
+                                feeds this per frame); walk settles toward
+                                ground_y + CAMERA_EYE_HEIGHT */
 } Camera;
 
 /* Per-frame input, filled by the platform layer (main.c polls GLFW). look_dx/dy

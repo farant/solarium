@@ -21,6 +21,7 @@ void camera_init(Camera *c, vec3 pos, float yaw, float pitch) {
     c->move_speed = 4.5f;        /* units/sec; a brisk indoor walk */
     c->target     = vec3_make(0.0f, 0.0f, 0.0f);
     c->distance   = 5.0f;
+    c->ground_y   = 0.0f;        /* the world floor until terrain says otherwise */
 }
 
 /* yaw/pitch -> a unit forward direction (spherical coordinates) */
@@ -74,12 +75,15 @@ void camera_update(Camera *c, const CameraInput *in, float dt) {
         move   = vec3_normalize(move);
         c->pos = vec3_add(c->pos, vec3_scale(move, c->move_speed * dt));
         if (c->mode == CAMERA_WALK) {
-            /* settle toward standing eye height — but only while moving, so a
-               camera_focus framing (which parks the eye at the surface's height
-               and leaves us in walk mode) holds until you step away. The
-               exponential form makes the ease framerate-independent. */
+            /* settle toward standing eye height ABOVE THE GROUND (terrain
+               feeds ground_y per frame; item 10) — but only while moving,
+               so a camera_focus framing (which parks the eye at the
+               surface's height and leaves us in walk mode) holds until you
+               step away. The exponential form makes the ease framerate-
+               independent — and it is also the climb up a hillside and the
+               feather-fall off an island rim: the same glide, new ground. */
             float k = 1.0f - expf(-CAMERA_SETTLE_RATE * dt);
-            c->pos.y += (CAMERA_EYE_HEIGHT - c->pos.y) * k;
+            c->pos.y += (c->ground_y + CAMERA_EYE_HEIGHT - c->pos.y) * k;
         }
     }
 }

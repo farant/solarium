@@ -1215,6 +1215,37 @@ static float mint_range(float lo, float hi) {
     return lo + (hi - lo) * (float)((g_mint_rng >> 16) & 0x7FFF) / 32767.0f;
 }
 
+/* The ground under a world point (item 10): the highest terrain plot
+   beneath it — within a step-up tolerance, so a plot floating overhead
+   doesn't claim you — else the world floor at 0. terrain_height is the
+   SAME function the mesh was built from, and the chain inverse handles
+   placed/rotated plots; the camera's walk settle targets this + eye
+   height, so the doorway-threshold glide becomes hill-climbing and
+   rim-stepping for free. */
+static float ground_under(AppState *st, vec3 p) {
+    Scene  *s = &st->scene;
+    float   best = 0.0f;
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        float w, d, h, gy;
+        vec3  local;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "terrain") != 0) continue;
+        local = scene_world_to_local(s, o->handle, p);
+        w = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "w");
+        d = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "d");
+        if (local.x < -w * 0.5f || local.x > w * 0.5f ||
+            local.z < -d * 0.5f || local.z > d * 0.5f)
+            continue;
+        h  = terrain_height(o->mesh_params, o->mesh_param_count,
+                            local.x, local.z);
+        gy = mat4_mul_point(scene_world_matrix(s, o),
+                            vec3_make(local.x, h, local.z)).y;
+        if (gy <= p.y + 0.6f && gy > best) best = gy;
+    }
+    return best;
+}
+
 /* ---- the reader (item 9 piece 3) ----
    Skyrim-shaped: the book rises from its resting place and faces you on
    the slerp arc, holding a lectern tilt just under the sightline. All of
@@ -3817,6 +3848,7 @@ int main(void) {
         glfwGetFramebufferSize(window, &state.fb_width, &state.fb_height);
 
         read_input(window, &in, dt, &state);          /* poll GLFW -> CameraInput */
+        state.camera.ground_y = ground_under(&state, state.camera.pos);
         camera_update(&state.camera, &in, (float)dt);
         update(&state, dt);                           /* animate the scene */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */

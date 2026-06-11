@@ -55,6 +55,20 @@ int main(void) {
     printf("walk idle -> pos=(%.3f, %.3f, %.3f)\n", c.pos.x, c.pos.y, c.pos.z);
     if (!approx(c.pos.y, 0.9f)) { printf("FAIL: idle walk drifted\n"); return 1; }
 
+    /* WALK on terrain (item 10): the settle targets ground_y + eye height —
+       the doorway glide becomes hill-climbing when the ground rises */
+    clear_input(&in);
+    in.forward = SOL_TRUE;
+    c.ground_y = 2.0f;
+    c.pos = vec3_make(0.0f, CAMERA_EYE_HEIGHT, 0.0f);
+    camera_update(&c, &in, 1.0f);
+    printf("walk on ground_y=2 -> y=%.3f\n", c.pos.y);
+    if (!approx(c.pos.y, 2.0f + CAMERA_EYE_HEIGHT)) {
+        printf("FAIL: walk must settle above the GROUND, not sea level\n");
+        return 1;
+    }
+    c.ground_y = 0.0f;
+
     /* FLY: looking up (pitch=45) and moving forward gains height */
     clear_input(&in);
     in.forward = SOL_TRUE;
