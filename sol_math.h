@@ -61,5 +61,6 @@ sol_bool mat4_project_point(mat4 m, vec3 p, vec3 *ndc);  /* full mul + perspecti
 Aabb     aabb_transform(mat4 m, Aabb box);               /* AABB of the transformed corners */
 sol_bool ray_vs_aabb(Ray ray, Aabb box, float *t_out);  /* slab test; *t_out = entry distance */
 sol_bool ray_vs_plane(Ray ray, vec3 point, vec3 normal, float *t_out);  /* FALSE if parallel or behind */
+sol_bool ray_vs_triangle(Ray ray, vec3 v0, vec3 v1, vec3 v2, float *t_out); /* Moller-Trumbore; two-sided; t in units of |dir| */
 
 #endif /* SOL_MATH_H */

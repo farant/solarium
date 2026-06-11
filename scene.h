@@ -62,7 +62,14 @@ sol_u32      scene_handle_for_nid(Scene *s, const char *nid);  /* 0 if none — 
 mat4         scene_world_matrix(Scene *s, const SceneObject *o);  /* parent-chain * local */
 vec3         scene_world_to_local(Scene *s, sol_u32 parent, vec3 p);  /* its inverse on a point; parent 0 = world */
 quat         scene_world_rotation(Scene *s, sol_u32 handle);  /* chain-composed rotation (no-shear TRS assumed) */
-sol_u32      scene_pick(Scene *s, Ray ray, float *out_t);  /* nearest AABB hit's handle; 0 = none */
+/* App policy hook for picking: return SOL_TRUE to make an object pick-
+   transparent (the palace declares room shells and terrain LAND this way —
+   the engine never learns those names). NULL = nothing skipped. */
+typedef sol_bool (*ScenePickSkip)(const Scene *s, const SceneObject *o, void *ctx);
+sol_u32      scene_pick(Scene *s, Ray ray, float *out_t,
+                        ScenePickSkip skip, void *skip_ctx);  /* nearest hit's handle; 0 = none.
+                        TRIANGLE-precise where CPU geometry is retained
+                        (mesh_geom_get), AABB fallback elsewhere (P4 item 2) */
 
 /* slot operations — handle-based (resolve internally, immune to stale pointers) */
 void        scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char *value);

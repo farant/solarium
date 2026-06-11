@@ -853,3 +853,95 @@ void mb_compute_tangents(MeshBuilder *b) {
 /* mesh_from_builder lives in mesh_gpu.c (the one function here that uploads):
    everything in THIS file is pure CPU, so the emitters + registry stay
    headless-testable and linkable by scene_io for the param schema. */
+
+/* ---------------------------------------- retained CPU geometry (P4 item 2) */
+/* The store behind mesh_geom_register/get/drop (mesh.h): a flat id->geometry
+   table, linear-scanned (picking visits it per object per CLICK — clicks are
+   rare; the spatial index, not this table, is where per-frame speed lives).
+   Re-registering an id replaces its entry (the RHI free-list reuses slots);
+   L-reload's deliberately-undestroyed meshes keep their entries alive the
+   same bounded way they keep their buffers — the asset registry (P4 item 4)
+   inherits both debts together. */
+
+typedef struct {
+    sol_u32 id;
+    CpuGeom g;
+} GeomEntry;
+
+static GeomEntry *g_geom       = NULL;
+static int        g_geom_count = 0;
+static int        g_geom_cap   = 0;
+
+static void geom_free_payload(CpuGeom *g) {
+    free(g->pos);
+    free(g->idx);
+    g->pos = NULL;  g->idx = NULL;
+    g->vert_count = 0;  g->idx_count = 0;
+}
+
+void mesh_geom_register(sol_u32 vbuffer_id, const MeshBuilder *b) {
+    GeomEntry *e = NULL;
+    sol_f32   *pos;
+    sol_u32   *idx;
+    sol_u32    v;
+    int        i;
+    if (vbuffer_id == 0 || b->vertex_count == 0 || b->index_count == 0) return;
+
+    /* allocate-first, commit-last: an OOM leaves the table untouched and
+       picking simply falls back to the AABB for this mesh */
+    pos = (sol_f32 *)malloc((size_t)b->vertex_count * 3 * sizeof(sol_f32));
+    idx = (sol_u32 *)malloc((size_t)b->index_count * sizeof(sol_u32));
+    if (pos == NULL || idx == NULL) {
+        free(pos);
+        free(idx);
+        return;
+    }
+    for (v = 0; v < b->vertex_count; v++) {  /* positions only: floats [v*12+0..2] */
+        pos[v * 3 + 0] = b->vertices[v * 12 + 0];
+        pos[v * 3 + 1] = b->vertices[v * 12 + 1];
+        pos[v * 3 + 2] = b->vertices[v * 12 + 2];
+    }
+    memcpy(idx, b->indices, (size_t)b->index_count * sizeof(sol_u32));
+
+    for (i = 0; i < g_geom_count; i++) {
+        if (g_geom[i].id == vbuffer_id) { e = &g_geom[i]; break; }
+    }
+    if (e) {
+        geom_free_payload(&e->g);            /* slot reuse: replace in place */
+    } else {
+        if (g_geom_count == g_geom_cap) {
+            int        ncap = g_geom_cap ? g_geom_cap * 2 : 32;
+            GeomEntry *ng   = (GeomEntry *)realloc(g_geom,
+                                  (size_t)ncap * sizeof *ng);
+            if (ng == NULL) { free(pos); free(idx); return; }
+            g_geom     = ng;
+            g_geom_cap = ncap;
+        }
+        e = &g_geom[g_geom_count++];
+        e->id = vbuffer_id;
+    }
+    e->g.pos        = pos;
+    e->g.idx        = idx;
+    e->g.vert_count = b->vertex_count;
+    e->g.idx_count  = b->index_count;
+}
+
+void mesh_geom_drop(sol_u32 vbuffer_id) {
+    int i;
+    for (i = 0; i < g_geom_count; i++) {
+        if (g_geom[i].id == vbuffer_id) {
+            geom_free_payload(&g_geom[i].g);
+            g_geom[i] = g_geom[--g_geom_count];   /* order-free swap-remove */
+            return;
+        }
+    }
+}
+
+const CpuGeom *mesh_geom_get(sol_u32 vbuffer_id) {
+    int i;
+    if (vbuffer_id == 0) return NULL;
+    for (i = 0; i < g_geom_count; i++) {
+        if (g_geom[i].id == vbuffer_id) return &g_geom[i].g;
+    }
+    return NULL;
+}

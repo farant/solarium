@@ -129,7 +129,27 @@ float mesh_ref_param(const char *ref, const float *params, int count, const char
 Mesh    mesh_from_builder(MeshBuilder *b);
 
 /* Release a mesh's GPU buffers and zero it — for DERIVED meshes (arrows)
-   that rebuild as their sources move; everything else lives for the session. */
+   that rebuild as their sources move; everything else lives for the session.
+   Also drops the retained CPU geometry below. */
 void    mesh_destroy(Mesh *m);
+
+/* ---- retained CPU geometry (P4 item 2): triangles kept at upload ----
+   Picking needs actual triangles (a doorway is a hole in the geometry but
+   not in the AABB), so mesh_from_builder registers positions + indices
+   here, keyed by the mesh's vbuffer id (shared meshes share one entry; the
+   RHI's slot reuse means a destroyed id re-registers cleanly). Pure CPU,
+   lives in mesh.c — headless tests register fake ids by hand. Positions
+   are packed xyz (a third of the full vertex), in LOCAL space like
+   mesh.bounds. id 0 (no buffer) never registers and never resolves. */
+typedef struct {
+    sol_f32 *pos;          /* xyz per vertex, packed */
+    sol_u32  vert_count;
+    sol_u32 *idx;
+    sol_u32  idx_count;
+} CpuGeom;
+
+void           mesh_geom_register(sol_u32 vbuffer_id, const MeshBuilder *b);
+void           mesh_geom_drop(sol_u32 vbuffer_id);
+const CpuGeom *mesh_geom_get(sol_u32 vbuffer_id);
 
 #endif /* MESH_H */

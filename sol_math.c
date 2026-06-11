@@ -282,6 +282,37 @@ sol_bool ray_vs_plane(Ray ray, vec3 point, vec3 normal, float *t_out) {
     return SOL_TRUE;
 }
 
+/* Moller-Trumbore ray-vs-triangle (P4 item 2). The idea: any point on the
+   triangle's plane is v0 + u*e1 + v*e2 (BARYCENTRIC coordinates — walk u of
+   the way along one edge, v along the other); setting that equal to
+   origin + t*dir gives a 3x3 linear system whose Cramer's-rule solution is
+   exactly these cross/dot products. Inside the triangle iff u>=0, v>=0,
+   u+v<=1 — the test and the hit location come from the same arithmetic.
+   TWO-SIDED (no backface cull: cards are slabs, picking shouldn't care
+   which face you see). dir need NOT be unit: t comes back in units of
+   |dir|, which callers exploit to test in object-local space while keeping
+   t comparable across objects (transform two points, never normalize). */
+sol_bool ray_vs_triangle(Ray ray, vec3 v0, vec3 v1, vec3 v2, float *t_out) {
+    vec3  e1  = vec3_sub(v1, v0);
+    vec3  e2  = vec3_sub(v2, v0);
+    vec3  p   = vec3_cross(ray.dir, e2);
+    float det = vec3_dot(e1, p);
+    vec3  tv, q;
+    float inv, u, v, t;
+    if (det > -1e-8f && det < 1e-8f) return SOL_FALSE;  /* parallel / degenerate */
+    inv = 1.0f / det;
+    tv  = vec3_sub(ray.origin, v0);
+    u   = vec3_dot(tv, p) * inv;
+    if (u < 0.0f || u > 1.0f) return SOL_FALSE;
+    q   = vec3_cross(tv, e1);
+    v   = vec3_dot(ray.dir, q) * inv;
+    if (v < 0.0f || u + v > 1.0f) return SOL_FALSE;
+    t   = vec3_dot(e2, q) * inv;
+    if (t < 0.0f) return SOL_FALSE;                     /* behind the origin */
+    if (t_out) *t_out = t;
+    return SOL_TRUE;
+}
+
 /* Project a world point through a view-projection matrix to NDC: the full
    4-component multiply (w out), then the PERSPECTIVE DIVIDE — the one place
    w earns its keep (distant points have larger w, so they shrink toward the

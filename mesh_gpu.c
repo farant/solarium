@@ -6,7 +6,10 @@
 #include "mesh.h"
 
 void mesh_destroy(Mesh *m) {
-    if (m->vbuffer.id) rhi_destroy_buffer(m->vbuffer);
+    if (m->vbuffer.id) {
+        mesh_geom_drop(m->vbuffer.id);       /* retained triangles go with it */
+        rhi_destroy_buffer(m->vbuffer);
+    }
     if (m->ibuffer.id) rhi_destroy_buffer(m->ibuffer);
     m->vbuffer.id  = 0;
     m->ibuffer.id  = 0;
@@ -21,6 +24,9 @@ Mesh mesh_from_builder(MeshBuilder *b) {
     m.ibuffer = rhi_create_buffer(RHI_BUFFER_INDEX, b->indices,
                     (size_t)b->index_count * sizeof(sol_u32));
     m.index_count = (int)b->index_count;
+    mesh_geom_register(m.vbuffer.id, b);     /* P4 item 2: triangles retained
+                                                at THE upload chokepoint —
+                                                every path goes through here */
 
     /* local-space AABB over the vertex positions (floats [i*12 + 0..2]) */
     if (b->vertex_count == 0) {

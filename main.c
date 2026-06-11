@@ -879,12 +879,18 @@ static float room_ambient(Scene *s, sol_u32 anchor) {
     return 1.0f;
 }
 
-/* The top-level ancestor of an object: walk the parent chain to the root. For a
-   grouped import this is the model anchor (so every part shares one group root);
-   for a root-level object it's the object itself. Drives group highlighting. */
+/* The GROUP an object belongs to: walk the parent chain upward, but STOP at
+   a room anchor — a room is a PLACE things sit in, not a group they belong
+   to (P4 item 2: with room shells pick-transparent, clicking the shared
+   doorway wall surfaced this — it promoted to the hall anchor and lit the
+   whole room + path). For a grouped import this is still the model anchor
+   (every part shares one root, even when the import sits inside a room);
+   for furniture parented to a room it's the piece itself — which also makes
+   walls/paths individually draggable, as the drag rule always intended. */
 static sol_u32 group_root(Scene *s, sol_u32 handle) {
     SceneObject *o = scene_get(s, handle);
     while (o && o->parent != 0) {
+        if (scene_meta_get(s, o->parent, "room_type")) break;  /* the room boundary */
         handle = o->parent;
         o = scene_get(s, handle);
     }
@@ -907,6 +913,17 @@ static Ray pick_ray(AppState *st, GLFWwindow *w) {
     return camera_ray(&st->camera, nx, ny, aspect);
 }
 
+/* Pick policy (P4 item 2): room shells and terrain are LAND — places you
+   stand, not things you select. Their triangles are pick-TRANSPARENT, so a
+   click through a doorway reaches what stands beyond, and a click on a wall
+   or a hillside means "nothing" (deselect), as it always has. The engine
+   takes this as a callback; scene.c never learns these names. */
+static sol_bool pick_skip_land(const Scene *s, const SceneObject *o, void *ctx) {
+    (void)s; (void)ctx;
+    return o->mesh_ref != NULL && (strcmp(o->mesh_ref, "room") == 0 ||
+                                   strcmp(o->mesh_ref, "terrain") == 0);
+}
+
 /* Side-effect-free pick through an NDC point: the nearest hit's handle (0 =
    none). do_pick adds the selection/focus behavior on top; the drag path
    (item 4) needs just the hit. */
@@ -917,7 +934,7 @@ static sol_u32 pick_at(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y, fl
     glfwGetWindowSize(w, &ww, &wh);                 /* cursor is in window coords */
     aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
     ray = camera_ray(&st->camera, ndc_x, ndc_y, aspect);
-    return scene_pick(&st->scene, ray, t_out);
+    return scene_pick(&st->scene, ray, t_out, pick_skip_land, NULL);
 }
 
 /* The selection UNIT's root, mirroring the drag rule (item 6): a card

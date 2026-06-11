@@ -178,9 +178,20 @@ quat scene_world_rotation(Scene *s, sol_u32 handle) {
 }
 
 /* CPU ray-cast against object AABBs; returns the nearest hit's stable handle
-   (0 = none). Empties (no mesh) aren't pickable. Broad-phase only — AABB is
-   exact for boxes; a triangle test would need retained CPU geometry (future). */
-sol_u32 scene_pick(Scene *s, Ray ray, float *out_t) {
+   (0 = none). Empties (no mesh) aren't pickable. TRIANGLE-PRECISE (P4 item
+   2) where CPU geometry was retained at upload (mesh_geom_get by vbuffer
+   id): the world AABB is only the broad phase, then the ray is taken into
+   the object's LOCAL frame — two points through scene_world_to_local, so
+   direction needs no new machinery, and the un-normalized local dir keeps
+   t in WORLD units, comparable across objects — and tested against the
+   actual triangles. A doorway's opening is genuinely empty: the ray passes
+   through to whatever stands beyond. The item-5 "can't pick what you're
+   inside" rule survives only on the AABB FALLBACK path (no retained
+   geometry); with triangles an enclosing shell no longer shadows at t=0,
+   because what you hit must be a real surface. `skip` is the app's policy
+   hook (pick-transparency) — engine picking knows no palace names. */
+sol_u32 scene_pick(Scene *s, Ray ray, float *out_t,
+                   ScenePickSkip skip, void *skip_ctx) {
     sol_u32 i, best = 0;
     float   best_t = 1e30f;
     for (i = 0; i < s->count; i++) {
@@ -188,16 +199,42 @@ sol_u32 scene_pick(Scene *s, Ray ray, float *out_t) {
         mat4  world;
         Aabb  wbox;
         float t;
+        int   inside;
+        const CpuGeom *g;
         if (o->mesh.index_count == 0) continue;            /* empties aren't pickable */
-        world = scene_world_matrix(s, o);
-        wbox  = aabb_transform(world, o->mesh.bounds);     /* local AABB -> world */
-        /* you cannot pick what you are INSIDE: a ray starting in the box hits
-           at t=0, so a room shell enclosing the camera (item 5) would shadow
-           every pick. Skip containers of the ray origin. */
-        if (ray.origin.x >= wbox.min.x && ray.origin.x <= wbox.max.x &&
-            ray.origin.y >= wbox.min.y && ray.origin.y <= wbox.max.y &&
-            ray.origin.z >= wbox.min.z && ray.origin.z <= wbox.max.z) continue;
-        if (ray_vs_aabb(ray, wbox, &t) && t < best_t) {    /* keep the nearest */
+        if (skip && skip(s, o, skip_ctx)) continue;        /* app policy: land, not things */
+        world  = scene_world_matrix(s, o);
+        wbox   = aabb_transform(world, o->mesh.bounds);    /* local AABB -> world */
+        inside = (ray.origin.x >= wbox.min.x && ray.origin.x <= wbox.max.x &&
+                  ray.origin.y >= wbox.min.y && ray.origin.y <= wbox.max.y &&
+                  ray.origin.z >= wbox.min.z && ray.origin.z <= wbox.max.z);
+        if (!inside) {                                     /* broad phase */
+            if (!ray_vs_aabb(ray, wbox, &t)) continue;
+            if (t >= best_t) continue;                     /* can't beat the champion */
+        }
+        g = mesh_geom_get(o->mesh.vbuffer.id);
+        if (g) {                                           /* narrow phase: real triangles */
+            Ray     lr;
+            vec3    l1;
+            sol_u32 k;
+            lr.origin = scene_world_to_local(s, o->handle, ray.origin);
+            l1        = scene_world_to_local(s, o->handle,
+                            vec3_add(ray.origin, ray.dir));
+            lr.dir    = vec3_sub(l1, lr.origin);   /* NOT normalized: t stays world-scaled */
+            for (k = 0; k + 2 < g->idx_count; k += 3) {
+                const sol_f32 *a = &g->pos[g->idx[k]     * 3];
+                const sol_f32 *b = &g->pos[g->idx[k + 1] * 3];
+                const sol_f32 *c = &g->pos[g->idx[k + 2] * 3];
+                float tt;
+                if (ray_vs_triangle(lr,
+                        vec3_make(a[0], a[1], a[2]),
+                        vec3_make(b[0], b[1], b[2]),
+                        vec3_make(c[0], c[1], c[2]), &tt) && tt < best_t) {
+                    best_t = tt;
+                    best   = o->handle;
+                }
+            }
+        } else if (!inside && t < best_t) {                /* AABB fallback */
             best_t = t;
             best   = o->handle;
         }

@@ -1,13 +1,48 @@
-/* pick_test.c — headless checks for the picking math. 4a covers ray_vs_aabb;
-   4b will add scene_pick cases. Built by `build.sh picktest` under ASan/UBSan. */
+/* pick_test.c — headless checks for the picking math: ray_vs_aabb (item 4a),
+   scene_pick (4b), the item-8 inverse-transform suite, slerp/smoothstep
+   (item 9), and the P4-item-2 triangle precision: ray_vs_triangle units, a
+   wall-with-opening whose DOORWAY admits the ray to the box beyond (the
+   item's acceptance, headless), the pick-transparency filter, and the
+   local-space narrow phase under scale + yaw. Built by `build.sh picktest`. */
 
 #include "sol_math.h"
 #include "scene.h"
+#include "mesh.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 
 static int approx(float a, float b) { return fabsf(a - b) < 0.001f; }
+
+/* headless "upload": what mesh_from_builder does minus the GPU — register
+   the triangles under a chosen fake vbuffer id, bounds from the verts */
+static Mesh geom_mesh(MeshBuilder *b, sol_u32 fake_id) {
+    Mesh    m;
+    sol_u32 i;
+    m.vbuffer.id  = fake_id;
+    m.ibuffer.id  = 0;
+    m.index_count = (int)b->index_count;
+    m.bounds.min  = vec3_make(b->vertices[0], b->vertices[1], b->vertices[2]);
+    m.bounds.max  = m.bounds.min;
+    for (i = 1; i < b->vertex_count; i++) {
+        float x = b->vertices[i*12+0], y = b->vertices[i*12+1], z = b->vertices[i*12+2];
+        if (x < m.bounds.min.x) m.bounds.min.x = x;
+        if (x > m.bounds.max.x) m.bounds.max.x = x;
+        if (y < m.bounds.min.y) m.bounds.min.y = y;
+        if (y > m.bounds.max.y) m.bounds.max.y = y;
+        if (z < m.bounds.min.z) m.bounds.min.z = z;
+        if (z > m.bounds.max.z) m.bounds.max.z = z;
+    }
+    mesh_geom_register(fake_id, b);
+    return m;
+}
+
+/* the app-policy shape: skip ref "wall" (the palace skips room/terrain) */
+static sol_bool skip_wall_ref(const Scene *s, const SceneObject *o, void *ctx) {
+    (void)s; (void)ctx;
+    return o->mesh_ref != NULL && strcmp(o->mesh_ref, "wall") == 0;
+}
 
 /* A pickable Mesh built by hand — scene_pick reads only bounds + index_count,
    so no GPU upload is needed (keeps this test headless). Unit box [-0.5, 0.5]. */
@@ -72,19 +107,19 @@ int main(void) {
         /* ray down -Z through both boxes -> the NEARER (z=-2) wins */
         r.origin = vec3_make(0.0f, 0.0f, 0.0f);
         r.dir    = vec3_make(0.0f, 0.0f, -1.0f);
-        hit = scene_pick(&sc, r, &t);
+        hit = scene_pick(&sc, r, &t, NULL, NULL);
         printf("scene_pick nearest = handle %u (near=%u far=%u) t=%.3f\n",
                (unsigned)hit, (unsigned)near_h, (unsigned)far_h, t);
         if (hit != near_h) { printf("FAIL: should pick the nearer box\n"); scene_free(&sc); return 1; }
 
         /* ray pointing +Z hits nothing */
         r.dir = vec3_make(0.0f, 0.0f, 1.0f);
-        if (scene_pick(&sc, r, &t) != 0) { printf("FAIL: +Z ray should hit nothing\n"); scene_free(&sc); return 1; }
+        if (scene_pick(&sc, r, &t, NULL, NULL) != 0) { printf("FAIL: +Z ray should hit nothing\n"); scene_free(&sc); return 1; }
 
         /* ray offset in X misses both unit boxes */
         r.origin = vec3_make(10.0f, 0.0f, 0.0f);
         r.dir    = vec3_make(0.0f, 0.0f, -1.0f);
-        if (scene_pick(&sc, r, &t) != 0) { printf("FAIL: offset ray should miss\n"); scene_free(&sc); return 1; }
+        if (scene_pick(&sc, r, &t, NULL, NULL) != 0) { printf("FAIL: offset ray should miss\n"); scene_free(&sc); return 1; }
         printf("scene_pick miss cases: ok\n");
         scene_free(&sc);
     }
@@ -99,7 +134,7 @@ int main(void) {
                           quat_identity(), vec3_make(3.0f, 3.0f, 3.0f));
         r.origin = vec3_make(1.0f, 0.0f, 0.0f);
         r.dir    = vec3_make(0.0f, 0.0f, -1.0f);
-        if (scene_pick(&sc, r, &t) != big_h) { printf("FAIL: scaled box should be hit at x=1.0\n"); scene_free(&sc); return 1; }
+        if (scene_pick(&sc, r, &t, NULL, NULL) != big_h) { printf("FAIL: scaled box should be hit at x=1.0\n"); scene_free(&sc); return 1; }
         printf("scene_pick scaled AABB: ok\n");
         scene_free(&sc);
     }
@@ -278,6 +313,134 @@ int main(void) {
             printf("FAIL: sol_smoothstep\n"); return 1;
         }
         printf("sol_smoothstep: ok\n");
+    }
+
+    /* ---- ray_vs_triangle (P4 item 2): Moller-Trumbore units ---- */
+    {
+        vec3 v0 = vec3_make(0.0f, 0.0f, 0.0f);
+        vec3 v1 = vec3_make(2.0f, 0.0f, 0.0f);
+        vec3 v2 = vec3_make(0.0f, 2.0f, 0.0f);
+
+        r.origin = vec3_make(0.5f, 0.5f, 5.0f);     /* inside, straight down -Z */
+        r.dir    = vec3_make(0.0f, 0.0f, -1.0f);
+        if (!ray_vs_triangle(r, v0, v1, v2, &t) || !approx(t, 5.0f)) {
+            printf("FAIL: triangle straight-on hit (t=%.3f)\n", t); return 1;
+        }
+        r.origin = vec3_make(1.5f, 1.5f, 5.0f);     /* u+v > 1: past the hypotenuse */
+        if (ray_vs_triangle(r, v0, v1, v2, &t)) {
+            printf("FAIL: outside the hypotenuse must miss\n"); return 1;
+        }
+        r.origin = vec3_make(0.5f, 0.5f, -5.0f);    /* TWO-SIDED: from behind */
+        r.dir    = vec3_make(0.0f, 0.0f, 1.0f);
+        if (!ray_vs_triangle(r, v0, v1, v2, &t) || !approx(t, 5.0f)) {
+            printf("FAIL: triangles are two-sided for picking\n"); return 1;
+        }
+        r.dir    = vec3_make(0.0f, 0.0f, -1.0f);    /* behind the origin */
+        if (ray_vs_triangle(r, v0, v1, v2, &t)) {
+            printf("FAIL: behind-the-origin hit must be rejected\n"); return 1;
+        }
+        r.origin = vec3_make(0.5f, 0.5f, 5.0f);     /* parallel to the plane */
+        r.dir    = vec3_make(1.0f, 0.0f, 0.0f);
+        if (ray_vs_triangle(r, v0, v1, v2, &t)) {
+            printf("FAIL: parallel ray must miss\n"); return 1;
+        }
+        r.dir    = vec3_make(0.0f, 0.0f, -2.0f);    /* |dir|=2: t in dir units */
+        if (!ray_vs_triangle(r, v0, v1, v2, &t) || !approx(t, 2.5f)) {
+            printf("FAIL: t must come back in units of |dir| (t=%.3f)\n", t); return 1;
+        }
+        printf("ray_vs_triangle hit/edges/two-sided/behind/parallel/units: ok\n");
+    }
+
+    /* ---- THE DOORWAY (P4 item 2 acceptance, headless): a wall-with-opening
+       between the ray and a box. AABB picking stops at the wall's box; the
+       triangles know the opening is EMPTY — the ray reaches what stands
+       beyond. Geometry comes through the real registry (one author). ---- */
+    {
+        Scene       sc;
+        MeshBuilder wb, bb;
+        Mesh        wm, bm;
+        sol_u32     wall, box, hit;
+        float       wprm[6];
+        float       want_t;
+        wprm[0] = 4.0f; wprm[1] = 3.0f; wprm[2] = 1.5f;   /* opening x in [-0.5, 0.5] */
+        wprm[3] = 1.0f; wprm[4] = 2.2f; wprm[5] = 0.2f;
+
+        scene_init(&sc);
+        mb_init(&wb);
+        if (!mesh_ref_build("wall", wprm, 6, &wb)) { printf("FAIL: registry wall\n"); return 1; }
+        wm   = geom_mesh(&wb, 101);
+        wall = scene_add(&sc, 0, wm, vec3_make(0.0f, 0.0f, 0.0f),
+                         quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&sc, wall, "wall");
+
+        mb_init(&bb);
+        if (!mesh_ref_build("box", NULL, 0, &bb)) { printf("FAIL: registry box\n"); return 1; }
+        bm  = geom_mesh(&bb, 102);
+        box = scene_add(&sc, 0, bm,
+                        vec3_make(0.0f, 1.0f - (bm.bounds.min.y + bm.bounds.max.y) * 0.5f, 3.0f),
+                        quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+
+        /* through the gap: |x|<0.5 and y=1 < oh — the ray must sail through
+           the wall's AABB and land on the box's near face */
+        r.origin = vec3_make(0.0f, 1.0f, -3.0f);
+        r.dir    = vec3_make(0.0f, 0.0f, 1.0f);
+        want_t   = (3.0f + bm.bounds.min.z) - (-3.0f);
+        hit = scene_pick(&sc, r, &t, NULL, NULL);
+        printf("doorway: hit=%u (wall=%u box=%u) t=%.3f (want %.3f)\n",
+               (unsigned)hit, (unsigned)wall, (unsigned)box, t, want_t);
+        if (hit != box || !approx(t, want_t)) {
+            printf("FAIL: the click must pass THROUGH the doorway\n");
+            scene_free(&sc); return 1;
+        }
+
+        /* into the left panel: a solid part of the wall still catches it */
+        r.origin = vec3_make(-1.5f, 1.0f, -3.0f);
+        hit = scene_pick(&sc, r, &t, NULL, NULL);
+        if (hit != wall || !approx(t, 2.9f)) {
+            printf("FAIL: the solid panel must still catch the ray (t=%.3f)\n", t);
+            scene_free(&sc); return 1;
+        }
+
+        /* the policy filter: with "wall" pick-transparent, the same panel
+           click passes through to nothing (the palace's land rule) */
+        if (scene_pick(&sc, r, &t, skip_wall_ref, NULL) != 0) {
+            printf("FAIL: a skipped ref must be transparent to picking\n");
+            scene_free(&sc); return 1;
+        }
+        printf("doorway admits / panel catches / filter passes: ok\n");
+        mb_free(&wb);
+        mb_free(&bb);
+        scene_free(&sc);
+    }
+
+    /* ---- narrow phase in LOCAL space: one hand-built triangle under
+       scale (1,1,2) + yaw 90. Local plane z=1 -> scaled z=2 -> rotated to
+       world x=+2 facing +X; a -X ray from (5, .5, -.5) must hit at t=3
+       with t in WORLD units despite the local-space test. ---- */
+    {
+        Scene       sc;
+        MeshBuilder tb;
+        sol_u32     h, hit;
+        mb_init(&tb);
+        mb_push_vertex(&tb, 0.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f);
+        mb_push_vertex(&tb, 4.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f);
+        mb_push_vertex(&tb, 0.0f, 4.0f, 1.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f);
+        mb_push_triangle(&tb, 0, 1, 2);
+        scene_init(&sc);
+        h = scene_add(&sc, 0, geom_mesh(&tb, 103), vec3_make(0.0f, 0.0f, 0.0f),
+                      quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), sol_radians(90.0f)),
+                      vec3_make(1.0f, 1.0f, 2.0f));
+        r.origin = vec3_make(5.0f, 0.5f, -0.5f);
+        r.dir    = vec3_make(-1.0f, 0.0f, 0.0f);
+        hit = scene_pick(&sc, r, &t, NULL, NULL);
+        printf("local narrow phase: hit=%u t=%.3f (want %u, 3.0)\n",
+               (unsigned)hit, t, (unsigned)h);
+        if (hit != h || !approx(t, 3.0f)) {
+            printf("FAIL: scaled+yawed triangle must hit at world t\n");
+            scene_free(&sc); return 1;
+        }
+        mb_free(&tb);
+        scene_free(&sc);
     }
 
     printf("pick_test: OK\n");
