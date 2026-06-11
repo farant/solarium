@@ -752,6 +752,14 @@ static void emit_molding(MeshBuilder *b, const float *p) {
     }
 }
 
+static void emit_wall_arched(MeshBuilder *b, const float *p) {
+    gothic_wall_arched(b, p[0], p[1], p[6], p[2], p[3], p[4], p[5]);
+}
+static void emit_portal(MeshBuilder *b, const float *p) {
+    gothic_wall_portal(b, p[0], p[1], p[2], p[3], p[4], p[5],
+                       (int)(p[6] + 0.5f), p[7], 1);
+}
+
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
     { "grid", 0, { 0 }, { 0.0f }, emit_grid },
@@ -787,7 +795,15 @@ static const MeshRefEntry REGISTRY[] = {
     /* molding (P6 item 1): prof indexes gothic.h's append-only table —
        RIB 0, MULLION 1, STRING 2, BASE 3, HOOD 4, SHAFT_OCT 5 */
     { "molding", 5, { "prof", "len", "scale", "bend", "vert" },
-      { 0.0f, 2.0f, 1.0f, 0.0f, 0.0f }, emit_molding }
+      { 0.0f, 2.0f, 1.0f, 0.0f, 0.0f }, emit_molding },
+    /* the arch family (P6 item 2): wall_arched = "wall"'s param family
+       with a pointed head (springing height + acuteness replace oh);
+       portal = the same opening as centered RECESSED ORDERS stepping
+       through the thickness, archivolt-dressed */
+    { "wall_arched", 7, { "w", "h", "ox", "ow", "spring", "acute", "t" },
+      { 4.0f, 3.5f, 1.25f, 1.5f, 1.4f, 1.0f, 0.3f }, emit_wall_arched },
+    { "portal", 8, { "w", "h", "t", "ow", "spring", "acute", "orders", "step" },
+      { 6.0f, 5.0f, 0.9f, 1.6f, 2.2f, 1.0f, 3.0f, 0.18f }, emit_portal }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 

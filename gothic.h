@@ -70,4 +70,53 @@ void gothic_sweep(MeshBuilder *b, const ProfilePt *prof, int prof_n,
                   const vec3 *path, int path_n, vec3 plane_n,
                   float scale, int cap0, int cap1);
 
+/* ---- item 2: the arch family ----
+   The two-arc pointed construction: an opening of span s springs at
+   y=0 from (+-s/2, 0); each half is a circular arc centered ON the
+   springing line at -+c, radius r = c + s/2, crown at sqrt(r^2 - c^2).
+   One shape float, ACUTENESS a = 2c/s, spans the whole historical
+   family: 0 = semicircular, 1 = equilateral, >1 = lancet, between =
+   drop arch. */
+
+/* head height above the springing at offset x from center (0 outside) */
+float gothic_arch_y(float s, float a, float x);
+
+/* the LEVEL-CROWN solve — the formula Gothic exists for: the acuteness
+   that lifts span s to crown height H (valid H >= s/2; flatter clamps
+   to 0, the semicircle). Item 5's vaults lean on this: arches of
+   different spans meeting at one crown. */
+float gothic_arch_acuteness_for(float s, float crown_h);
+
+/* The arch polyline in the XY plane (z = 0), springing (-s/2,0) to
+   (+s/2,0), subdivided per half by the two-cap rule against max_seg
+   (pass GOTHIC_MAX_SEG normally). Returns the point count — always ODD,
+   apex EXACTLY at (0, crown) (the crown must be a vertex or every rib
+   boss floats), bit-symmetric about x=0, x monotone. 0 if max_n is too
+   small or params are degenerate. */
+#define GOTHIC_ARCH_MAX_PTS 129
+int gothic_arch_path(vec3 *out, int max_n, float s, float a, float max_seg);
+
+/* make_wall_with_opening's sibling with a pointed head (TODO6 §1.4 —
+   around-the-gap, now with curves): jamb panels left/right, jamb
+   reveals up to the springing, the head as VERTICAL STRIPS off the arch
+   polyline (front/back from curve to wall top, intrados across the real
+   thickness, creased per strip — voussoir faceting, deliberately not
+   smooth), threshold at y=0. Same conventions and degenerate handling
+   as the flat emitter: x in [-w/2,w/2], y in [0,h], thickness centered,
+   opening ox from the LEFT edge, ow wide, springing at spring_h.
+   A crown above the wall top emits nothing. */
+void gothic_wall_arched(MeshBuilder *b, float w, float h, float t,
+                        float ox, float ow, float spring_h, float a);
+
+/* The same wall with N RECESSED ORDERS stepping through the thickness
+   (the mechanism item 7's portal dresses): the centered opening repeats
+   at spans stepped +2*step per order toward the FRONT (+z) face —
+   widest outside, funneling in. Step faces connect each order's
+   reveals to the next; archivolts != 0 dresses every order's arris
+   with a PROF_RIB sweep (roll toward the opening). */
+#define GOTHIC_MAX_ORDERS 4
+void gothic_wall_portal(MeshBuilder *b, float w, float h, float t,
+                        float ow, float spring_h, float a,
+                        int orders, float step, int archivolts);
+
 #endif /* GOTHIC_H */

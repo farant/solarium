@@ -220,30 +220,159 @@ static void test_arc_segments(void) {
         fail("arc segments: minimum is 1");
 }
 
-/* ---- 6: §1.8 — bit-determinism, through the registry row ---- */
+/* ---- 6: §1.8 — bit-determinism, through the registry rows ---- */
+static void det_check(const char *ref, const float *params, int count,
+                      float min_dot) {
+    MeshBuilder a, b;
+    mb_init(&a); mb_init(&b);
+    if (!mesh_ref_build(ref, params, count, &a) ||
+        !mesh_ref_build(ref, params, count, &b)) {
+        printf("FAIL: determinism: registry refused %s\n", ref);
+        g_fail = 1; return;
+    }
+    if (a.vertex_count != b.vertex_count || a.index_count != b.index_count)
+        { printf("FAIL: determinism: %s counts differ\n", ref); g_fail = 1; }
+    else if (memcmp(a.vertices, b.vertices,
+                    (size_t)a.vertex_count * 12 * sizeof(sol_f32)) != 0 ||
+             memcmp(a.indices, b.indices,
+                    (size_t)a.index_count * sizeof(sol_u32)) != 0)
+        { printf("FAIL: determinism: %s identical params, different bytes\n", ref); g_fail = 1; }
+    if (a.index_count == 0)
+        { printf("FAIL: determinism: %s emitted nothing\n", ref); g_fail = 1; }
+    check_consistency(&a, min_dot, ref);
+    mb_free(&a); mb_free(&b);
+}
+
 static void test_determinism(void) {
     static const float P_BENT[5] = { 2.0f, 3.0f, 1.0f, 180.0f, 1.0f };
-    MeshBuilder a, b;
-    int k;
-    for (k = 0; k < 2; k++) {
-        const float *params = k ? P_BENT : (const float *)0;
-        int count = k ? 5 : 0;
-        mb_init(&a); mb_init(&b);
-        if (!mesh_ref_build("molding", params, count, &a) ||
-            !mesh_ref_build("molding", params, count, &b)) {
-            fail("determinism: registry refused the molding"); return;
+    det_check("molding", (const float *)0, 0, 0.5f);
+    det_check("molding", P_BENT, 5, 0.5f);
+    det_check("wall_arched", (const float *)0, 0, 0.99f);
+    det_check("portal", (const float *)0, 0, 0.5f);
+}
+
+/* ---- 7: the arch math — closed forms & the level-crown solve ---- */
+static void test_arch_math(void) {
+    static const float S[5] = { 0.6f, 1.0f, 2.0f, 5.0f, 9.0f };
+    static const float F[4] = { 0.55f, 0.75f, 1.0f, 1.6f };
+    int i, j;
+    for (i = 0; i < 5; i++) {
+        float s = S[i];
+        if (fabsf(gothic_arch_y(s, 1.0f, 0.0f) - 0.8660254f * s) > 1e-5f * s)
+            fail("arch: equilateral crown != 0.866*s");
+        if (fabsf(gothic_arch_y(s, 0.0f, 0.0f) - 0.5f * s) > 1e-6f * s)
+            fail("arch: semicircular crown != s/2");
+        if (gothic_arch_y(s, 1.0f, 0.5f * s) != 0.0f)
+            fail("arch: head must be 0 at the springing");
+        for (j = 0; j < 4; j++) {
+            float hgt = F[j] * s;
+            float ac  = gothic_arch_acuteness_for(s, hgt);
+            if (fabsf(gothic_arch_y(s, ac, 0.0f) - hgt) >
+                2e-5f * (s > 1.0f ? s : 1.0f))
+                fail("arch: acuteness solve does not round-trip");
         }
-        if (a.vertex_count != b.vertex_count || a.index_count != b.index_count)
-            fail("determinism: counts differ between identical builds");
-        else if (memcmp(a.vertices, b.vertices,
-                        (size_t)a.vertex_count * 12 * sizeof(sol_f32)) != 0 ||
-                 memcmp(a.indices, b.indices,
-                        (size_t)a.index_count * sizeof(sol_u32)) != 0)
-            fail("determinism: identical params, different bytes");
-        if (a.index_count == 0) fail("determinism: molding emitted nothing");
-        check_consistency(&a, 0.5f, k ? "bent molding" : "default molding");
-        mb_free(&a); mb_free(&b);
     }
+    if (gothic_arch_acuteness_for(2.0f, 0.5f) != 0.0f)
+        fail("arch: flatter-than-round must clamp to the semicircle");
+}
+
+/* ---- 8: the arch polyline — odd, exact, symmetric, monotone ---- */
+static void test_arch_path(void) {
+    vec3 p[GOTHIC_ARCH_MAX_PTS];
+    int  n = gothic_arch_path(p, GOTHIC_ARCH_MAX_PTS, 1.5f, 1.0f, GOTHIC_MAX_SEG);
+    int  i;
+    if (n <= 0 || (n & 1) == 0) { fail("arch path: count must be odd"); return; }
+    if (p[0].x != -0.75f || p[0].y != 0.0f ||
+        p[n - 1].x != 0.75f || p[n - 1].y != 0.0f)
+        fail("arch path: springings must be exact");
+    if (p[(n - 1) / 2].x != 0.0f)
+        fail("arch path: the apex must be a vertex at x = 0");
+    if (fabsf(p[(n - 1) / 2].y - 0.8660254f * 1.5f) > 1e-5f)
+        fail("arch path: apex height off the closed form");
+    for (i = 0; i < n; i++)
+        if (p[i].x != -p[n - 1 - i].x || p[i].y != p[n - 1 - i].y)
+            { fail("arch path: not bit-symmetric"); break; }
+    for (i = 0; i + 1 < n; i++)
+        if (p[i + 1].x <= p[i].x)
+            { fail("arch path: x must be monotone"); break; }
+}
+
+/* count the triangles using positional edge (p,q), either direction */
+static int edge_uses(const MeshBuilder *b, vec3 p, vec3 q) {
+    sol_u32 t, k;
+    int uses = 0;
+    for (t = 0; t < b->index_count / 3; t++) {
+        for (k = 0; k < 3; k++) {
+            vec3 e0 = vpos(b, b->indices[t * 3 + k]);
+            vec3 e1 = vpos(b, b->indices[t * 3 + (k + 1) % 3]);
+            if ((near3(e0, p.x, p.y, p.z, 1e-5f) && near3(e1, q.x, q.y, q.z, 1e-5f)) ||
+                (near3(e0, q.x, q.y, q.z, 1e-5f) && near3(e1, p.x, p.y, p.z, 1e-5f)))
+                uses++;
+        }
+    }
+    return uses;
+}
+
+/* every polyline edge at a given z-plane must be used by EXACTLY two
+   triangles — the head/intrados (or intrados/ladder) seam closes with
+   shared stations, no cracks, no T-junctions (TODO6 item 2 acceptance) */
+static void check_arch_seams(const MeshBuilder *b, const vec3 *arc, int n,
+                             float cx, float spring, float z, const char *who) {
+    int j;
+    for (j = 0; j + 1 < n; j++) {
+        vec3 p = v3(cx + arc[j].x,     spring + arc[j].y,     z);
+        vec3 q = v3(cx + arc[j + 1].x, spring + arc[j + 1].y, z);
+        int uses = edge_uses(b, p, q);
+        if (uses != 2) {
+            printf("FAIL: %s: seam edge %d at z=%.3f used %d times (want 2)\n",
+                   who, j, z, uses);
+            g_fail = 1; return;
+        }
+    }
+}
+
+/* ---- 9: the arched wall — seams closed on both faces ---- */
+static void test_wall_arched(void) {
+    MeshBuilder b;
+    vec3 arc[GOTHIC_ARCH_MAX_PTS];
+    int  n;
+
+    mb_init(&b);
+    gothic_wall_arched(&b, 4.0f, 3.5f, 0.3f, 1.25f, 1.5f, 1.4f, 1.0f);
+    if (b.index_count == 0) { fail("arched wall: emitted nothing"); mb_free(&b); return; }
+    check_consistency(&b, 0.99f, "arched wall");
+
+    n = gothic_arch_path(arc, GOTHIC_ARCH_MAX_PTS, 1.5f, 1.0f, GOTHIC_MAX_SEG);
+    check_arch_seams(&b, arc, n, 0.0f, 1.4f,  0.15f, "arched wall front");
+    check_arch_seams(&b, arc, n, 0.0f, 1.4f, -0.15f, "arched wall back");
+    mb_free(&b);
+
+    /* a crown above the wall top is impossible: emit nothing, loudly no */
+    mb_init(&b);
+    gothic_wall_arched(&b, 4.0f, 2.0f, 0.3f, 1.25f, 1.5f, 1.4f, 1.0f);
+    if (b.index_count != 0) fail("arched wall: impossible crown must emit nothing");
+    mb_free(&b);
+}
+
+/* ---- 10: the portal — the widest order's seams close through the
+   step ladder (front face + first slab boundary); inner orders are the
+   same machinery at the same shared station count ---- */
+static void test_portal(void) {
+    MeshBuilder b;
+    vec3 arc[GOTHIC_ARCH_MAX_PTS];
+    int  n;
+
+    mb_init(&b);
+    gothic_wall_portal(&b, 6.0f, 5.0f, 0.9f, 1.6f, 2.2f, 1.0f, 3, 0.18f, 1);
+    if (b.index_count == 0) { fail("portal: emitted nothing"); mb_free(&b); return; }
+    check_consistency(&b, 0.5f, "portal");
+
+    /* widest span = ow + 2*step*(orders-1) = 2.32; front plane z = 0.45,
+       its slab boundary at z = 0.45 - 0.9/3 = 0.15 */
+    n = gothic_arch_path(arc, GOTHIC_ARCH_MAX_PTS, 2.32f, 1.0f, GOTHIC_MAX_SEG);
+    check_arch_seams(&b, arc, n, 0.0f, 2.2f, 0.45f, "portal front");
+    check_arch_seams(&b, arc, n, 0.0f, 2.2f, 0.15f, "portal step");
+    mb_free(&b);
 }
 
 int main(void) {
@@ -253,6 +382,10 @@ int main(void) {
     test_table();
     test_arc_segments();
     test_determinism();
+    test_arch_math();
+    test_arch_path();
+    test_wall_arched();
+    test_portal();
     if (g_fail) { printf("gothic_test: FAILED\n"); return 1; }
     printf("gothic_test: OK\n");
     return 0;

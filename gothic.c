@@ -90,19 +90,25 @@ const ProfilePt *gothic_profile(int prof_id, int *out_n) {
     }
 }
 
-int gothic_arc_segments(float arc_len, float arc_angle) {
+/* the two-cap rule against an explicit linear cap (the arch path takes
+   a caller max_seg per the brief's sketch); ceil with a dust epsilon —
+   an arc that is EXACTLY k segments must not flip to k+1 on the last
+   bit of a float division */
+static int seg_two_caps(float arc_len, float arc_angle, float max_seg) {
     float q;
     int   nl, na;
     if (arc_len   < 0.0f) arc_len   = -arc_len;
     if (arc_angle < 0.0f) arc_angle = -arc_angle;
-    /* ceil with a dust epsilon: an arc that is EXACTLY k segments must
-       not flip to k+1 on the last bit of a float division */
-    q  = arc_len / GOTHIC_MAX_SEG;   nl = (int)q;
+    q  = arc_len / max_seg;          nl = (int)q;
     if ((float)nl + 1e-4f < q) nl++;
     q  = arc_angle / GOTHIC_MAX_ANG; na = (int)q;
     if ((float)na + 1e-4f < q) na++;
     if (na > nl) nl = na;
     return nl < 1 ? 1 : nl;
+}
+
+int gothic_arc_segments(float arc_len, float arc_angle) {
+    return seg_two_caps(arc_len, arc_angle, GOTHIC_MAX_SEG);
 }
 
 /* ---- the sweep ---- */
@@ -332,4 +338,330 @@ void gothic_sweep(MeshBuilder *b, const ProfilePt *prof, int prof_n,
             }
         }
     }
+}
+
+/* ================== item 2: the arch family ==================
+   The two-arc pointed construction (see gothic.h): centers ON the
+   springing line at -+c, r = c + s/2, acuteness a = 2c/s. One float,
+   the whole historical family — and the level-crown solve below is
+   *why* Gothic exists: arches of different spans reaching one height. */
+
+static void arch_cr(float s, float a, float *c, float *r) {
+    *c = 0.5f * a * s;
+    *r = *c + 0.5f * s;
+}
+
+float gothic_arch_y(float s, float a, float x) {
+    float c, r, q;
+    if (s <= 0.0f || a < 0.0f) return 0.0f;
+    arch_cr(s, a, &c, &r);
+    if (x < 0.0f) x = -x;
+    if (x >= 0.5f * s) return 0.0f;
+    q = x + c;
+    q = r * r - q * q;
+    return q > 0.0f ? sqrtf(q) : 0.0f;
+}
+
+float gothic_arch_acuteness_for(float s, float crown_h) {
+    float c;
+    if (s <= 0.0f || crown_h <= 0.5f * s) return 0.0f;  /* round at flattest */
+    c = (crown_h * crown_h - 0.25f * s * s) / s;
+    return 2.0f * c / s;
+}
+
+/* segments per HALF arc by the two-cap rule (>= 2 so a head reads curved) */
+static int arch_half_segments(float s, float a, float max_seg) {
+    float c, r, hgt, phi;
+    int   n;
+    arch_cr(s, a, &c, &r);
+    hgt = sqrtf(r * r - c * c);
+    phi = atan2f(hgt, c);                 /* the half-arc's angular extent */
+    n = seg_two_caps(r * phi, phi, max_seg);
+    return n < 2 ? 2 : n;
+}
+
+/* the polyline at a FIXED per-half count — the orders emitter forces one
+   count across nested arches (same acuteness = same arc angle, so equal
+   counts make every step-face ladder a clean 1:1 strip). The right half
+   is computed and the left MIRRORED (bit-symmetry); springings and apex
+   are then forced exact — the crown must be a vertex (item 5's bosses). */
+static int arch_path_n(vec3 *out, float s, float a, int n_h) {
+    float c, r, hgt, phi;
+    int   k;
+    arch_cr(s, a, &c, &r);
+    hgt = sqrtf(r * r - c * c);
+    phi = atan2f(hgt, c);
+    for (k = 1; k < n_h; k++) {
+        float t  = phi * (float)(n_h - k) / (float)n_h;
+        float xr = -c + r * cosf(t);
+        float yr = r * sinf(t);
+        out[n_h + k] = vec3_make(xr, yr, 0.0f);
+        out[n_h - k] = vec3_make(-xr, yr, 0.0f);
+    }
+    out[0]       = vec3_make(-0.5f * s, 0.0f, 0.0f);
+    out[2 * n_h] = vec3_make( 0.5f * s, 0.0f, 0.0f);
+    out[n_h]     = vec3_make(0.0f, hgt, 0.0f);
+    return 2 * n_h + 1;
+}
+
+int gothic_arch_path(vec3 *out, int max_n, float s, float a, float max_seg) {
+    int n_h;
+    if (!out || s <= 0.0f || a < 0.0f || max_seg <= 0.0f) return 0;
+    n_h = arch_half_segments(s, a, max_seg);
+    if (2 * n_h + 1 > max_n) return 0;
+    return arch_path_n(out, s, a, n_h);
+}
+
+/* ---------- the arched wall & recessed orders (§1.4 with curves) ----------
+   Conventions mirror make_wall_with_opening exactly (mesh.c): exposed
+   faces only, never coplanar, world-scale UVs, threshold top-only,
+   panels emit tops AND bottoms, outer ends emitted, flush openings get
+   the head's exposed end. mesh.c's face helpers are static, so the kit
+   carries its own — same corner order, same UV scheme. */
+
+static void g_quad4(MeshBuilder *b,
+                    float x0, float y0, float z0, float u0, float v0,
+                    float x1, float y1, float z1, float u1, float v1,
+                    float x2, float y2, float z2, float u2, float v2,
+                    float x3, float y3, float z3, float u3, float v3,
+                    float nx, float ny, float nz) {
+    sol_u32 a = mb_push_vertex(b, x0, y0, z0, nx, ny, nz, u0, v0);
+    sol_u32 c = mb_push_vertex(b, x1, y1, z1, nx, ny, nz, u1, v1);
+    sol_u32 d = mb_push_vertex(b, x2, y2, z2, nx, ny, nz, u2, v2);
+    sol_u32 e = mb_push_vertex(b, x3, y3, z3, nx, ny, nz, u3, v3);
+    mb_push_triangle(b, a, c, d);
+    mb_push_triangle(b, a, d, e);
+}
+
+static void gz_face(MeshBuilder *b, float x0, float x1, float y0, float y1,
+                    float z, int dir) {
+    if (dir > 0)
+        g_quad4(b, x0,y0,z, x0,y0,  x1,y0,z, x1,y0,  x1,y1,z, x1,y1,  x0,y1,z, x0,y1,
+                0.0f, 0.0f, 1.0f);
+    else
+        g_quad4(b, x1,y0,z, x1,y0,  x0,y0,z, x0,y0,  x0,y1,z, x0,y1,  x1,y1,z, x1,y1,
+                0.0f, 0.0f, -1.0f);
+}
+static void gx_face(MeshBuilder *b, float x, float y0, float y1,
+                    float z0, float z1, int dir) {
+    if (dir > 0)
+        g_quad4(b, x,y0,z1, z1,y0,  x,y0,z0, z0,y0,  x,y1,z0, z0,y1,  x,y1,z1, z1,y1,
+                1.0f, 0.0f, 0.0f);
+    else
+        g_quad4(b, x,y0,z0, z0,y0,  x,y0,z1, z1,y0,  x,y1,z1, z1,y1,  x,y1,z0, z0,y1,
+                -1.0f, 0.0f, 0.0f);
+}
+static void gy_face(MeshBuilder *b, float x0, float x1, float y,
+                    float z0, float z1, int dir) {
+    if (dir > 0)
+        g_quad4(b, x0,y,z0, x0,z0,  x0,y,z1, x0,z1,  x1,y,z1, x1,z1,  x1,y,z0, x1,z0,
+                0.0f, 1.0f, 0.0f);
+    else
+        g_quad4(b, x0,y,z0, x0,z0,  x1,y,z0, x1,z0,  x1,y,z1, x1,z1,  x0,y,z1, x0,z1,
+                0.0f, -1.0f, 0.0f);
+}
+
+/* one intrados strip: the reveal under the arch between consecutive
+   polyline stations, across the slab's thickness — flat per strip
+   (voussoir-scale faceting, deliberately not smoothed: TODO6 item 2),
+   normal the in-plane arc normal pointing INTO the opening. u = arc
+   length along the head, v = z: world-scale. */
+static void intrados_strip(MeshBuilder *b, float xa, float ya, float xb,
+                           float yb, float zb, float zf, float u0, float u1) {
+    float dx = xb - xa, dy = yb - ya;
+    float l  = sqrtf(dx * dx + dy * dy);
+    float nx, ny;
+    sol_u32 i0, i1, i2, i3;
+    if (l < 1e-7f) return;
+    nx = dy / l; ny = -dx / l;
+    i0 = mb_push_vertex(b, xa, ya, zf, nx, ny, 0.0f, u0, zf);
+    i1 = mb_push_vertex(b, xa, ya, zb, nx, ny, 0.0f, u0, zb);
+    i2 = mb_push_vertex(b, xb, yb, zb, nx, ny, 0.0f, u1, zb);
+    i3 = mb_push_vertex(b, xb, yb, zf, nx, ny, 0.0f, u1, zf);
+    mb_push_triangle(b, i0, i1, i2);
+    mb_push_triangle(b, i0, i2, i3);
+}
+
+/* one head strip: front/back wall face above the arch, curve to top */
+static void head_strip(MeshBuilder *b, float xa, float ya, float xb, float yb,
+                       float top, float z, int dir) {
+    if (dir > 0)
+        g_quad4(b, xa,ya,z, xa,ya,  xb,yb,z, xb,yb,  xb,top,z, xb,top,  xa,top,z, xa,top,
+                0.0f, 0.0f, 1.0f);
+    else
+        g_quad4(b, xb,yb,z, xb,yb,  xa,ya,z, xa,ya,  xa,top,z, xa,top,  xb,top,z, xb,top,
+                0.0f, 0.0f, -1.0f);
+}
+
+/* one step-face ladder rung: between the OUTER (wider, in front) and
+   INNER order's arch stations at the slab boundary plane, facing +z —
+   equal per-half counts make this an exact 1:1 strip, no T-junctions */
+static void ladder_strip(MeshBuilder *b, float ox0, float oy0, float ox1,
+                         float oy1, float ix0, float iy0, float ix1,
+                         float iy1, float z) {
+    g_quad4(b, ox0,oy0,z, ox0,oy0,  ix0,iy0,z, ix0,iy0,
+               ix1,iy1,z, ix1,iy1,  ox1,oy1,z, ox1,oy1,
+            0.0f, 0.0f, 1.0f);
+}
+
+/* the shared core: N recessed orders, widest at the FRONT (+z) face,
+   sharing center cx, springing height and acuteness. Around the gap,
+   slab by slab: each order owns its sub-thickness's jamb reveals,
+   intrados strips, threshold/top/bottom strips; the wall's front face
+   reads the widest arch, the back face the narrowest; step faces
+   connect consecutive orders (jamb rectangles + the curved ladder).
+   Impossible parameters (crown above the top, opening past the wall)
+   emit nothing — the plan (item 3) never asks for them. */
+static void arched_orders(MeshBuilder *b, float w, float h, float t,
+                          float cx, float ow, float spring_h, float a,
+                          int orders, float step, int archivolts) {
+    vec3  arch[GOTHIC_MAX_ORDERS][GOTHIC_ARCH_MAX_PTS];
+    float x0[GOTHIC_MAX_ORDERS], x1[GOTHIC_MAX_ORDERS];
+    float hw = 0.5f * w, zf, dt;
+    int   n_h, np, k, j, has_l, has_r;
+
+    if (orders < 1) orders = 1;
+    if (orders > GOTHIC_MAX_ORDERS) orders = GOTHIC_MAX_ORDERS;
+    if (step < 0.0f) step = 0.0f;
+    if (t < 0.01f) t = 0.01f;
+    if (spring_h < 0.0f) spring_h = 0.0f;
+    zf = 0.5f * t;
+    dt = t / (float)orders;
+
+    {
+        float s0 = ow + 2.0f * step * (float)(orders - 1);
+        n_h = arch_half_segments(s0, a, GOTHIC_MAX_SEG);
+        if (2 * n_h + 1 > GOTHIC_ARCH_MAX_PTS) n_h = (GOTHIC_ARCH_MAX_PTS - 1) / 2;
+        np = 2 * n_h + 1;
+        for (k = 0; k < orders; k++) {
+            float sk = ow + 2.0f * step * (float)(orders - 1 - k);
+            arch_path_n(arch[k], sk, a, n_h);
+            x0[k] = cx - 0.5f * sk;
+            x1[k] = cx + 0.5f * sk;
+        }
+        if (spring_h + arch[0][n_h].y > h - 1e-4f) return;   /* crown clears top */
+        if (x0[0] < -hw - 1e-5f || x1[0] > hw + 1e-5f) return;
+        if (orders > 1 && (x0[0] < -hw + 1e-5f || x1[0] > hw - 1e-5f))
+            return;                       /* flush is the single-order case */
+    }
+    has_l = x0[0] > -hw + 1e-5f;
+    has_r = x1[0] <  hw - 1e-5f;
+
+    /* outer ends: once, full height by full thickness */
+    if (has_l) gx_face(b, -hw, 0.0f, h, -zf, zf, -1);
+    if (has_r) gx_face(b,  hw, 0.0f, h, -zf, zf,  1);
+
+    for (k = 0; k < orders; k++) {
+        float zk_f = zf - dt * (float)k;
+        float zk_b = (k == orders - 1) ? -zf : zf - dt * (float)(k + 1);
+
+        if (has_l) {
+            gy_face(b, -hw, x0[k], h,    zk_b, zk_f,  1);    /* panel tops    */
+            gy_face(b, -hw, x0[k], 0.0f, zk_b, zk_f, -1);    /* panel bottoms */
+        }
+        if (has_r) {
+            gy_face(b, x1[k], hw, h,    zk_b, zk_f,  1);
+            gy_face(b, x1[k], hw, 0.0f, zk_b, zk_f, -1);
+        }
+        gy_face(b, x0[k], x1[k], h,    zk_b, zk_f, 1);       /* head top      */
+        gy_face(b, x0[k], x1[k], 0.0f, zk_b, zk_f, 1);       /* the THRESHOLD */
+        gx_face(b, x0[k], 0.0f, spring_h, zk_b, zk_f,  1);   /* jamb reveals  */
+        gx_face(b, x1[k], 0.0f, spring_h, zk_b, zk_f, -1);
+        if (!has_l) gx_face(b, x0[k], spring_h, h, zk_b, zk_f, -1);  /* flush */
+        if (!has_r) gx_face(b, x1[k], spring_h, h, zk_b, zk_f,  1);
+
+        {                                  /* the intrados, strip by strip */
+            float u = 0.0f;
+            for (j = 0; j + 1 < np; j++) {
+                float xa = cx + arch[k][j].x,     ya = spring_h + arch[k][j].y;
+                float xb = cx + arch[k][j + 1].x, yb = spring_h + arch[k][j + 1].y;
+                float dl = sqrtf((xb - xa) * (xb - xa) + (yb - ya) * (yb - ya));
+                intrados_strip(b, xa, ya, xb, yb, zk_b, zk_f, u, u + dl);
+                u += dl;
+            }
+        }
+    }
+
+    /* front face off the WIDEST arch, back face off the NARROWEST */
+    if (has_l) gz_face(b, -hw, x0[0], 0.0f, h, zf, 1);
+    if (has_r) gz_face(b, x1[0],  hw, 0.0f, h, zf, 1);
+    for (j = 0; j + 1 < np; j++)
+        head_strip(b, cx + arch[0][j].x,     spring_h + arch[0][j].y,
+                      cx + arch[0][j + 1].x, spring_h + arch[0][j + 1].y,
+                   h, zf, 1);
+    k = orders - 1;
+    if (has_l) gz_face(b, -hw, x0[k], 0.0f, h, -zf, -1);
+    if (has_r) gz_face(b, x1[k],  hw, 0.0f, h, -zf, -1);
+    for (j = 0; j + 1 < np; j++)
+        head_strip(b, cx + arch[k][j].x,     spring_h + arch[k][j].y,
+                      cx + arch[k][j + 1].x, spring_h + arch[k][j + 1].y,
+                   h, -zf, -1);
+
+    /* step faces between consecutive orders */
+    for (k = 1; k < orders; k++) {
+        float z = zf - dt * (float)k;
+        gz_face(b, x0[k - 1], x0[k], 0.0f, spring_h, z, 1);
+        gz_face(b, x1[k], x1[k - 1], 0.0f, spring_h, z, 1);
+        for (j = 0; j + 1 < np; j++)
+            ladder_strip(b,
+                         cx + arch[k - 1][j].x,     spring_h + arch[k - 1][j].y,
+                         cx + arch[k - 1][j + 1].x, spring_h + arch[k - 1][j + 1].y,
+                         cx + arch[k][j].x,         spring_h + arch[k][j].y,
+                         cx + arch[k][j + 1].x,     spring_h + arch[k][j + 1].y,
+                         z);
+    }
+
+    /* archivolts: PROF_RIB swept along each order's arch at its front
+       plane, path REVERSED so the section's o points radially INWARD —
+       the roll hangs under the arris into the opening, the open o=0
+       back rests against the intrados line, side faces straddle the
+       step plane into the wider order's open air. No coplanar contact. */
+    if (archivolts) {
+        vec3 rev[GOTHIC_ARCH_MAX_PTS];
+        int  pn;
+        const ProfilePt *rib = gothic_profile(PROF_RIB, &pn);
+        float sc = step * 3.5f;
+        if (sc < 0.35f) sc = 0.35f;
+        if (sc > 1.0f)  sc = 1.0f;
+        for (k = 0; k < orders; k++) {
+            float z = zf - dt * (float)k;
+            for (j = 0; j < np; j++) {
+                rev[j].x = cx + arch[k][np - 1 - j].x;
+                rev[j].y = spring_h + arch[k][np - 1 - j].y;
+                rev[j].z = z;
+            }
+            gothic_sweep(b, rib, pn, rev, np, vec3_make(0.0f, 0.0f, 1.0f),
+                         sc, 1, 1);
+        }
+    }
+}
+
+void gothic_wall_arched(MeshBuilder *b, float w, float h, float t,
+                        float ox, float ow, float spring_h, float a) {
+    float hw;
+    if (!b || w <= 0.0f || h <= 0.0f) return;
+    hw = 0.5f * w;
+    if (t < 0.01f) t = 0.01f;
+    if (ox < 0.0f) ox = 0.0f;                /* clamp into the wall, like the */
+    if (ox > w)    ox = w;                   /* flat emitter                  */
+    if (ow > w - ox) ow = w - ox;
+    if (ow < 1e-5f) {                        /* no opening: one solid box */
+        float zf = 0.5f * t;
+        gz_face(b, -hw, hw, 0.0f, h,  zf,  1);
+        gz_face(b, -hw, hw, 0.0f, h, -zf, -1);
+        gx_face(b, -hw, 0.0f, h, -zf, zf, -1);
+        gx_face(b,  hw, 0.0f, h, -zf, zf,  1);
+        gy_face(b, -hw, hw, h,    -zf, zf,  1);
+        gy_face(b, -hw, hw, 0.0f, -zf, zf, -1);
+        return;
+    }
+    arched_orders(b, w, h, t, -hw + ox + 0.5f * ow, ow, spring_h, a,
+                  1, 0.0f, 0);
+}
+
+void gothic_wall_portal(MeshBuilder *b, float w, float h, float t,
+                        float ow, float spring_h, float a,
+                        int orders, float step, int archivolts) {
+    if (!b || w <= 0.0f || h <= 0.0f || ow <= 1e-5f) return;
+    arched_orders(b, w, h, t, 0.0f, ow, spring_h, a, orders, step, archivolts);
 }
