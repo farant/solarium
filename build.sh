@@ -77,13 +77,14 @@ if [ "$MODE" = "picktest" ]; then
     exit 0
 fi
 
-# Build + run the headless collision-math test under the sanitizers. Links
-# only collide.c (pure plan-view math; no scene, no GL).
+# Build + run the headless collision test under the sanitizers. The math
+# core is scene-free; collide_rebuild derives from the scene spine, so the
+# test links the pure-CPU half of it (mesh.c has no GL since the gpu split).
 if [ "$MODE" = "coltest" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        collide.c collide_test.c \
+        collide.c scene.c material.c mesh.c nid.c sol_math.c collide_test.c \
         -o collide_test
     echo "built ./collide_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0

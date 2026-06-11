@@ -7,9 +7,11 @@
    `build.sh coltest`. */
 
 #include "collide.h"
+#include "sol_math.h"
 
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 
 static int approx(float a, float b, float tol) { return fabsf(a - b) < tol; }
 
@@ -17,6 +19,24 @@ static vec3 v3(float x, float y, float z) {
     vec3 v;
     v.x = x; v.y = y; v.z = z;
     return v;
+}
+
+static quat qid(void) {
+    quat q;
+    q.x = q.y = q.z = 0.0f; q.w = 1.0f;
+    return q;
+}
+
+/* add an empty-meshed object carrying a parametric ref */
+static sol_u32 add_ref(Scene *s, sol_u32 parent, vec3 pos, quat rot,
+                       const char *ref, const float *params, int n) {
+    Mesh    m0;
+    sol_u32 h;
+    memset(&m0, 0, sizeof m0);
+    h = scene_add(s, parent, m0, pos, rot, v3(1, 1, 1));
+    scene_mesh_ref_set(s, h, ref);
+    if (n > 0) scene_mesh_params_set(s, h, params, n);
+    return h;
 }
 
 /* press the same move N times, like holding a key for N frames */
@@ -267,6 +287,235 @@ int main(void) {
             return 1;
         }
         collide_set_free(&cs);
+    }
+
+    /* ================= piece 2: the derivation (collide_rebuild) ========= */
+
+    /* ---- a sealed room: 4 wall slabs + ceiling, interior faces exactly at
+       the rendered planes (make_room: x=+/-w/2, z=+/-d/2) */
+    {
+        Scene       s;
+        ColliderSet cs;
+        vec3        p;
+        float       prm[8];
+        prm[0] = 6; prm[1] = 4; prm[2] = 3;
+        prm[3] = 1; prm[4] = 1; prm[5] = 1; prm[6] = 1; prm[7] = 1;
+        scene_init(&s);
+        collide_set_init(&cs);
+        add_ref(&s, 0, v3(0, 0, 0), qid(), "room", prm, 8);
+        collide_rebuild(&cs, &s);
+        printf("room: %d boxes\n", cs.count);
+        if (cs.count != 5) { printf("FAIL: sealed room = 4 walls + ceiling\n"); return 1; }
+
+        p = press(&cs, v3(0, 0, 0), v3(0, 0, 0.1f), 30);
+        printf("room south: z=%.3f (want ~%.3f)\n", p.z, 2.0f - R);
+        if (!approx(p.z, 2.0f - R, 0.01f)) {
+            printf("FAIL: the collider face must sit at the rendered wall\n");
+            return 1;
+        }
+        p = press(&cs, p, v3(-0.1f, 0, 0), 40);
+        printf("room west:  x=%.3f (want ~%.3f)\n", p.x, -(3.0f - R));
+        if (!approx(p.x, -(3.0f - R), 0.01f)) {
+            printf("FAIL: hugging one wall must still slide into the next\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+        scene_free(&s);
+    }
+
+    /* ---- an open side emits no slab: walk out through it */
+    {
+        Scene       s;
+        ColliderSet cs;
+        vec3        p;
+        float       prm[8];
+        prm[0] = 6; prm[1] = 4; prm[2] = 3;
+        prm[3] = 1; prm[4] = 1; prm[5] = 0; prm[6] = 1; prm[7] = 1;   /* ws=0 */
+        scene_init(&s);
+        collide_set_init(&cs);
+        add_ref(&s, 0, v3(0, 0, 0), qid(), "room", prm, 8);
+        collide_rebuild(&cs, &s);
+        p = press(&cs, v3(0, 0, 0), v3(0, 0, 0.1f), 40);
+        printf("open south: %d boxes, z=%.3f\n", cs.count, p.z);
+        if (cs.count != 4 || p.z < 2.5f) {
+            printf("FAIL: an absent wall must not resist\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+        scene_free(&s);
+    }
+
+    /* ---- the defaults-merge: a 3-param room (w,d,h only) still gets its
+       flags from the registry schema — sealed, 5 boxes (the item-7
+       schema-growth rule, honored by the derivation too) */
+    {
+        Scene       s;
+        ColliderSet cs;
+        float       prm[3];
+        prm[0] = 6; prm[1] = 4; prm[2] = 3;
+        scene_init(&s);
+        collide_set_init(&cs);
+        add_ref(&s, 0, v3(0, 0, 0), qid(), "room", prm, 3);
+        collide_rebuild(&cs, &s);
+        printf("defaults: %d boxes\n", cs.count);
+        if (cs.count != 5) {
+            printf("FAIL: absent params must take registry defaults\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+        scene_free(&s);
+    }
+
+    /* ---- a room under a ROTATED PARENT: anchor at (10,0,0) yawed 90deg;
+       the room's local +Z (south, d/2=2) lands at world x=+2 off the anchor.
+       This is the chain + yaw extraction working through scene_world_matrix. */
+    {
+        Scene       s;
+        ColliderSet cs;
+        vec3        p;
+        sol_u32     anchor;
+        Mesh        m0;
+        float       prm[8];
+        prm[0] = 6; prm[1] = 4; prm[2] = 3;
+        prm[3] = 1; prm[4] = 1; prm[5] = 1; prm[6] = 1; prm[7] = 1;
+        memset(&m0, 0, sizeof m0);
+        scene_init(&s);
+        collide_set_init(&cs);
+        anchor = scene_add(&s, 0, m0, v3(10, 0, 0),
+                           quat_from_axis_angle(v3(0, 1, 0), 3.14159265f * 0.5f),
+                           v3(1, 1, 1));
+        add_ref(&s, anchor, v3(0, 0, 0), qid(), "room", prm, 8);
+        collide_rebuild(&cs, &s);
+        p = press(&cs, v3(10, 0, 0), v3(0.1f, 0, 0), 40);
+        printf("rotated room: x=%.3f (want ~%.3f)\n", p.x, 12.0f - R);
+        if (!approx(p.x, 12.0f - R, 0.01f)) {
+            printf("FAIL: a yawed parent must carry the walls with it\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+        scene_free(&s);
+    }
+
+    /* ---- the doorway wall: three derived panels; the gap admits, the jamb
+       resists from inside the opening, the solid panel blocks */
+    {
+        Scene       s;
+        ColliderSet cs;
+        vec3        p;
+        float       prm[6];
+        prm[0] = 4; prm[1] = 3; prm[2] = 1.5f;        /* opening x in [-0.5, 0.5] */
+        prm[3] = 1; prm[4] = 2.2f; prm[5] = 0.2f;
+        scene_init(&s);
+        collide_set_init(&cs);
+        add_ref(&s, 0, v3(0, 0, 0), qid(), "wall", prm, 6);
+        collide_rebuild(&cs, &s);
+        printf("wall: %d boxes\n", cs.count);
+        if (cs.count != 3) { printf("FAIL: left + right + header\n"); return 1; }
+
+        p = press(&cs, v3(0, 0, -1.0f), v3(0, 0, 0.1f), 30);
+        printf("wall gap:   z=%.3f\n", p.z);
+        if (p.z < 1.0f) { printf("FAIL: the derived doorway must admit\n"); return 1; }
+
+        p = press(&cs, v3(0, 0, 0), v3(-0.1f, 0, 0), 30);
+        printf("wall jamb:  x=%.3f (want ~%.3f)\n", p.x, -0.5f + R);
+        if (!approx(p.x, -0.5f + R, 0.01f)) {
+            printf("FAIL: the jamb must resist at the panel's true end\n");
+            return 1;
+        }
+
+        p = press(&cs, v3(-1.5f, 0, -1.0f), v3(0, 0, 0.1f), 30);
+        printf("wall panel: z=%.3f (want ~%.3f)\n", p.z, -(0.1f + R));
+        if (!approx(p.z, -(0.1f + R), 0.01f)) {
+            printf("FAIL: the solid panel must block at its true thickness\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+        scene_free(&s);
+    }
+
+    /* ---- a solid wall (no opening) collapses to one box, like the emitter */
+    {
+        Scene       s;
+        ColliderSet cs;
+        float       prm[6];
+        prm[0] = 4; prm[1] = 3; prm[2] = 0;
+        prm[3] = 0; prm[4] = 0; prm[5] = 0.15f;
+        scene_init(&s);
+        collide_set_init(&cs);
+        add_ref(&s, 0, v3(0, 0, 0), qid(), "wall", prm, 6);
+        collide_rebuild(&cs, &s);
+        printf("solid wall: %d box\n", cs.count);
+        if (cs.count != 1) { printf("FAIL: no opening = one solid box\n"); return 1; }
+        collide_set_free(&cs);
+        scene_free(&s);
+    }
+
+    /* ---- a path: one deck slab — a step laterally (the gate ignores it),
+       a landing for fly's sinking clamp */
+    {
+        Scene       s;
+        ColliderSet cs;
+        vec3        p;
+        float       dy;
+        float       prm[3];
+        prm[0] = 6; prm[1] = 1.5f; prm[2] = 0.15f;
+        scene_init(&s);
+        collide_set_init(&cs);
+        add_ref(&s, 0, v3(0, 0, 0), qid(), "path", prm, 3);
+        collide_rebuild(&cs, &s);
+        p  = press(&cs, v3(-4, 0, 0), v3(0.1f, 0, 0), 80);
+        dy = collide_clamp_y(&cs, v3(0, 0.5f, 0), -1.0f, COLLIDE_RADIUS, COLLIDE_HEIGHT);
+        printf("path: %d box, walk x=%.3f, fly-land dy=%.3f\n", cs.count, p.x, dy);
+        if (cs.count != 1 || p.x < 3.5f) {
+            printf("FAIL: a deck is a step, not a wall\n");
+            return 1;
+        }
+        if (!approx(dy, -0.5f, 0.01f)) {
+            printf("FAIL: fly must land on the deck top\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+        scene_free(&s);
+    }
+
+    /* ---- ONE AUTHOR (the acceptance check of the piece): build the room's
+       actual mesh through the registry and compare the emitter's outermost
+       vertex against the collider's interior face — same params, two
+       consumers, zero drift allowed */
+    {
+        Scene       s;
+        ColliderSet cs;
+        MeshBuilder b;
+        sol_u32     i;
+        float       maxz = -1e9f;
+        float       inner;
+        float       prm[8];
+        prm[0] = 6; prm[1] = 4; prm[2] = 3;
+        prm[3] = 1; prm[4] = 1; prm[5] = 1; prm[6] = 1; prm[7] = 1;
+        scene_init(&s);
+        collide_set_init(&cs);
+        add_ref(&s, 0, v3(0, 0, 0), qid(), "room", prm, 8);
+        collide_rebuild(&cs, &s);
+
+        mb_init(&b);
+        if (!mesh_ref_build("room", prm, 8, &b)) {
+            printf("FAIL: registry refused the room\n");
+            return 1;
+        }
+        for (i = 0; i < b.vertex_count; i++) {
+            float z = b.vertices[i * 12 + 2];
+            if (z > maxz) maxz = z;
+        }
+        /* emit order in collide_rebuild: n, s, w, e, ceil -> south is [1] */
+        inner = cs.boxes[1].cz - cs.boxes[1].hz;
+        printf("one author: mesh max z=%.5f, collider face=%.5f\n", maxz, inner);
+        if (!approx(inner, maxz, 0.0001f)) {
+            printf("FAIL: emitter and collider have diverged — two authors\n");
+            return 1;
+        }
+        mb_free(&b);
+        collide_set_free(&cs);
+        scene_free(&s);
     }
 
     printf("collide_test: OK\n");

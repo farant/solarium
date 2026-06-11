@@ -10,13 +10,16 @@
    Vertical motion is deliberately NOT resolved here: the ground seam
    (ground_under + the settle glide) keeps the up-down authority; this layer
    owns sideways, plus a fly-mode clamp at undersides and tops. Pure CPU math
-   over a flat array — no GL, no scene types, headless-tested (coltest). */
+   over a flat array, headless-tested (coltest) — the primitives know nothing
+   of the scene; collide_rebuild at the bottom is the one bridge, deriving
+   the set from the scene's parametric refs. No GL anywhere. */
 
 #ifndef COLLIDE_H
 #define COLLIDE_H
 
 #include "sol_base.h"
 #include "sol_types.h"
+#include "scene.h"
 
 /* The treaty constant between the two motion authorities: a box whose top is
    within STEP_UP of your feet is GROUND (the settle glide climbs it — this
@@ -74,5 +77,17 @@ vec3 collide_slide(const ColliderSet *cs, vec3 feet, vec3 move,
    all fly motion can legally attempt. */
 float collide_clamp_y(const ColliderSet *cs, vec3 feet, float dy,
                       float radius, float height);
+
+/* Derive the collider set from the scene (TODO4 §1.3 — one author): reads
+   the SAME refs through the SAME mesh_ref_param defaults-merge the renderer
+   resolves, so render geometry and collision geometry cannot drift. Today's
+   vocabulary: `room` (each present shell wall gets a slab whose interior
+   face IS the rendered plane, thickness synthesized outward; the ceiling
+   too), `wall` (the around-the-gap pieces at their real thickness — the
+   doorway is passable because the hole was never modeled), `path` (the deck
+   slab; the step gate ignores it laterally, fly can land on it). Props are
+   decoration by decision; terrain is the ground seam's vertical business.
+   Call on load and after edits — derived data, the arrows_rebuild pattern. */
+void collide_rebuild(ColliderSet *cs, Scene *s);
 
 #endif /* COLLIDE_H */
