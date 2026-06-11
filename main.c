@@ -9,6 +9,7 @@
 
 #include "rhi.h"                 /* the graphics seam — no GL above here */
 #include "mesh.h"
+#include "gothic.h"              /* the kit: church_plan + queries (P6) */
 #include "scene.h"
 #include "sol_math.h"
 #include "camera.h"
@@ -1702,6 +1703,12 @@ typedef struct {
     sol_u32     current_terrain;   /* plot underfoot; 0 = none (HUD naming) */
     sol_bool    h_was_down;        /* edge-detect mint-island (H) */
     sol_bool    o_was_down;        /* edge-detect mint-lantern (O, P4 item 5) */
+    /* the floor-plan overlay (P6 item 3): J toggles; the island underfoot
+       is the plot, so every island shows its destined church */
+    sol_bool    j_was_down;
+    sol_bool    plan_on;
+    sol_u32     plan_plot;         /* island the overlay was built for */
+    Mesh        plan_mesh;         /* DERIVED, never serialized (arrows law) */
 } AppState;
 
 #define READER_IDLE      0
@@ -3178,6 +3185,165 @@ static float wander_ground(void *ctx, vec3 p, sol_u32 *plot) {
     return ground_under((AppState *)ctx, p, plot);
 }
 
+/* ---- the floor-plan overlay (P6 item 3) ----
+   The plan made visible before one stone exists: J toggles, the island
+   underfoot is the plot (w, d, seed straight from its terrain ref — the
+   island IS the commission), and the overlay is DERIVED geometry on the
+   arrows law: never serialized, rebuilt when the standing island
+   changes, drawn in the island's local frame so the plan rides it. */
+
+static void plan_overlay_drop(AppState *st) {
+    if (st->plan_mesh.vbuffer.id) mesh_destroy(&st->plan_mesh);
+    memset(&st->plan_mesh, 0, sizeof st->plan_mesh);
+    st->plan_plot = 0;
+}
+
+/* plan frame -> island local: church_plan works east-along-the-longer-
+   dimension; a deeper-than-wide plot swaps the axes */
+static void plan_to_local(const ChurchPlan *cp, float px, float pz,
+                          float *lx, float *lz) {
+    if (cp->swapped) { *lx = pz; *lz = px; }
+    else             { *lx = px; *lz = pz; }
+}
+
+/* one chalk line: a thin flat quad on the overlay plane, up normal */
+static void plan_seg(MeshBuilder *mb, const ChurchPlan *cp,
+                     float x0, float z0, float x1, float z1,
+                     float y, float wd) {
+    float ax, az, bx, bz, dx, dz, l, px, pz;
+    sol_u32 a, b2, c, d;
+    plan_to_local(cp, x0, z0, &ax, &az);
+    plan_to_local(cp, x1, z1, &bx, &bz);
+    dx = bx - ax; dz = bz - az;
+    l  = sqrtf(dx * dx + dz * dz);
+    if (l < 1e-6f) return;
+    px = -dz / l * 0.5f * wd; pz = dx / l * 0.5f * wd;
+    a  = mb_push_vertex(mb, ax + px, y, az + pz, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+    b2 = mb_push_vertex(mb, ax - px, y, az - pz, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f);
+    c  = mb_push_vertex(mb, bx - px, y, bz - pz, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f);
+    d  = mb_push_vertex(mb, bx + px, y, bz + pz, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f);
+    mb_push_triangle(mb, a, b2, c);
+    mb_push_triangle(mb, a, c, d);
+}
+
+static void plan_mark(MeshBuilder *mb, const ChurchPlan *cp,
+                      float x, float z, float y, float s) {
+    plan_seg(mb, cp, x - 0.5f * s, z, x + 0.5f * s, z, y, s);
+}
+
+static void plan_overlay_build(AppState *st, SceneObject *isl) {
+    float       params[8];
+    ChurchPlan  cp;
+    MeshBuilder mb;
+    float       datum = 0.0f, y, x, z, hwid;
+    int         i, j;
+
+    params[0] = mesh_ref_param("terrain", isl->mesh_params,
+                               isl->mesh_param_count, "w");
+    params[1] = mesh_ref_param("terrain", isl->mesh_params,
+                               isl->mesh_param_count, "d");
+    params[2] = mesh_ref_param("terrain", isl->mesh_params,
+                               isl->mesh_param_count, "seed");
+    params[3] = -1.0f; params[4] = 0.0f; params[5] = 1.0f;
+    params[6] = 1.0f;  params[7] = 0.0f;
+    church_plan(&cp, params, 8);
+
+    /* the datum — item 9's law previewed: the building stands at the
+       HIGHEST pier station's ground (it must nowhere float) */
+    for (i = 0; i <= cp.nbays; i++)
+        for (j = 0; j <= PIER_ROW_N_WALL; j++) {
+            float lx, lz, h;
+            if (!plan_pier(&cp, i, j, &x, &z)) continue;
+            plan_to_local(&cp, x, z, &lx, &lz);
+            h = terrain_height(isl->mesh_params, isl->mesh_param_count, lx, lz);
+            if (h > datum) datum = h;
+        }
+    for (i = 0; i < 6; i++) {
+        float lx, lz, h;
+        if (!plan_apse_pier(&cp, i, &x, &z)) continue;
+        plan_to_local(&cp, x, z, &lx, &lz);
+        h = terrain_height(isl->mesh_params, isl->mesh_param_count, lx, lz);
+        if (h > datum) datum = h;
+    }
+    y = datum + 0.15f;
+
+    mb_init(&mb);
+    hwid = 0.5f * cp.nave_w + cp.aisle_w;
+
+    {   /* the usable rect: where the margin reserves buttress depth */
+        float ux0 = -0.5f * cp.plot_l + cp.margin;
+        float ux1 =  0.5f * cp.plot_l - cp.margin;
+        float uz  =  0.5f * cp.plot_w - cp.margin;
+        plan_seg(&mb, &cp, ux0, -uz, ux1, -uz, y, 0.05f);
+        plan_seg(&mb, &cp, ux0,  uz, ux1,  uz, y, 0.05f);
+        plan_seg(&mb, &cp, ux0, -uz, ux0,  uz, y, 0.05f);
+        plan_seg(&mb, &cp, ux1, -uz, ux1,  uz, y, 0.05f);
+    }
+    /* the body: west front, the apse mouth chord, the long walls */
+    plan_seg(&mb, &cp, cp.west_x, -hwid, cp.west_x,  hwid, y, 0.12f);
+    plan_seg(&mb, &cp, cp.east_x, -hwid, cp.east_x,  hwid, y, 0.12f);
+    plan_seg(&mb, &cp, cp.west_x, -hwid, cp.east_x, -hwid, y, 0.12f);
+    plan_seg(&mb, &cp, cp.west_x,  hwid, cp.east_x,  hwid, y, 0.12f);
+    if (cp.aisles) {                                       /* the arcades */
+        plan_seg(&mb, &cp, cp.west_x + cp.tower_d, -0.5f * cp.nave_w,
+                 cp.east_x, -0.5f * cp.nave_w, y, 0.07f);
+        plan_seg(&mb, &cp, cp.west_x + cp.tower_d,  0.5f * cp.nave_w,
+                 cp.east_x,  0.5f * cp.nave_w, y, 0.07f);
+    }
+    for (i = 0; i <= cp.nbays; i++) {       /* bay stations + the piers */
+        if (plan_pier(&cp, i, PIER_ROW_S_WALL, &x, &z))
+            plan_seg(&mb, &cp, x, -hwid, x, hwid, y, 0.04f);
+        for (j = 0; j <= PIER_ROW_N_WALL; j++)
+            if (plan_pier(&cp, i, j, &x, &z))
+                plan_mark(&mb, &cp, x, z, y + 0.02f, 0.45f);
+    }
+    if (cp.apse_sides == 5) {               /* the chevet */
+        float px0, pz0, px1, pz1;
+        for (i = 0; i < 5; i++) {
+            plan_apse_pier(&cp, i,     &px0, &pz0);
+            plan_apse_pier(&cp, i + 1, &px1, &pz1);
+            plan_seg(&mb, &cp, px0, pz0, px1, pz1, y, 0.12f);
+            plan_mark(&mb, &cp, px0, pz0, y + 0.02f, 0.45f);
+        }
+        plan_apse_pier(&cp, 5, &px0, &pz0);
+        plan_mark(&mb, &cp, px0, pz0, y + 0.02f, 0.45f);
+    }
+    for (i = 0; i < cp.nbays; i++) {        /* the windows' rhythm */
+        GothicOpening o;
+        plan_opening(&cp, WALL_AISLE_S, i, &o);
+        if (o.kind == GOTHIC_OPEN_WINDOW)
+            plan_seg(&mb, &cp, o.cx - 0.5f * o.w, -hwid + 0.3f,
+                     o.cx + 0.5f * o.w, -hwid + 0.3f, y, 0.1f);
+        plan_opening(&cp, WALL_AISLE_N, i, &o);
+        if (o.kind == GOTHIC_OPEN_WINDOW)
+            plan_seg(&mb, &cp, o.cx - 0.5f * o.w, hwid - 0.3f,
+                     o.cx + 0.5f * o.w, hwid - 0.3f, y, 0.1f);
+    }
+    {                                        /* the portal */
+        GothicOpening o;
+        plan_opening(&cp, WALL_WEST, 0, &o);
+        if (o.kind == GOTHIC_OPEN_DOOR)
+            plan_seg(&mb, &cp, cp.west_x + 0.3f, o.cx - 0.5f * o.w,
+                     cp.west_x + 0.3f, o.cx + 0.5f * o.w, y, 0.18f);
+    }
+    if (cp.tower)                            /* the tower's inner wall */
+        plan_seg(&mb, &cp, cp.west_x + cp.tower_d, -hwid,
+                 cp.west_x + cp.tower_d, hwid, y, 0.10f);
+
+    plan_overlay_drop(st);
+    st->plan_mesh = mesh_from_builder(&mb);
+    st->plan_plot = isl->handle;
+    {
+        const char *nm = scene_meta_get(&st->scene, isl->handle, "name");
+        printf("plan: %s on %s — %d bays%s%s, nave %.1fm\n",
+               cp.style == CHURCH_CHAPEL ? "a chapel" :
+               cp.style == CHURCH_HALL ? "a hall church" : "a basilica",
+               nm ? nm : "the island", cp.nbays,
+               cp.apse_sides ? ", apsed" : "", cp.tower ? ", towered" : "",
+               (double)cp.nave_w);
+    }
+}
+
 /* ---- the reader (item 9 piece 3) ----
    Skyrim-shaped: the book rises from its resting place and faces you on
    the slerp arc, holding a lectern tilt just under the sightline. All of
@@ -4240,6 +4406,18 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                    (int)p[4], pos.y > 0.05f ? " (floating)" : "");
         }
         st->h_was_down = h_now;
+    }
+
+    /* J toggles the FLOOR-PLAN OVERLAY (P6 item 3): every island shows
+       its destined church — params straight from the terrain ref, so the
+       drawing is as permanent as the hills it sits on */
+    {
+        sol_bool j_now = glfwGetKey(w, GLFW_KEY_J) == GLFW_PRESS;
+        if (j_now && !st->j_was_down) {
+            st->plan_on = !st->plan_on;
+            if (!st->plan_on) plan_overlay_drop(st);
+        }
+        st->j_was_down = j_now;
     }
 
     /* O mints a LANTERN (P4 item 5): an ordinary draggable prop whose light
@@ -5953,6 +6131,22 @@ static void render(AppState *state) {
                       state->reader_block_mat);
     }
 
+    /* the floor-plan overlay (P6 item 3): the island's destined church
+       as glowing chalk — view-state geometry like the reader, drawn in
+       the island's frame so the plan rides its plot */
+    if (state->plan_on && state->plan_mesh.index_count > 0) {
+        SceneObject *isl = scene_get(&state->scene, state->plan_plot);
+        if (isl) {
+            Material pm   = material_default();
+            pm.base_color = vec3_make(0.85f, 0.75f, 0.40f);
+            pm.emissive   = vec3_make(1.6f, 1.15f, 0.35f);
+            pm.roughness  = 1.0f;
+            draw_mesh(state, state->plan_mesh,
+                      scene_world_matrix(&state->scene, isl),
+                      view, proj, eye, 0.0f, pm);
+        }
+    }
+
     /* world text (item 8): card labels + note bodies, drawn as depth-tested
        INK after the opaque geometry, still inside the HDR pass — it rides
        through ACES like everything else. Same atlas as the HUD; the SDF
@@ -6687,6 +6881,18 @@ int main(void) {
         read_input(window, &in, dt, &state);          /* poll GLFW -> CameraInput */
         state.camera.ground_y = ground_under(&state, state.camera.pos,
                                              &state.current_terrain);
+        /* the plan overlay follows you island to island (P6 item 3);
+           a reload's stale handle drops it, the next step rebuilds it */
+        if (state.plan_on) {
+            if (state.plan_plot && !scene_get(&state.scene, state.plan_plot))
+                plan_overlay_drop(&state);
+            if (state.current_terrain != 0 &&
+                state.current_terrain != state.plan_plot) {
+                SceneObject *isl = scene_get(&state.scene,
+                                             state.current_terrain);
+                if (isl) plan_overlay_build(&state, isl);
+            }
+        }
         {
             /* collision (P4 item 1): camera_update PROPOSES, the world
                DISPOSES. The desired move is read back as a delta so
@@ -6745,6 +6951,7 @@ int main(void) {
         yardstick_ms(&state.t_swap, glfwGetTime() - y2);  /* the vsync block */
     }
 
+    plan_overlay_drop(&state);
     font_destroy(state.mono_font);
     font_destroy(state.ui_font);
     wtext_shutdown();

@@ -665,3 +665,281 @@ void gothic_wall_portal(MeshBuilder *b, float w, float h, float t,
     if (!b || w <= 0.0f || h <= 0.0f || ow <= 1e-5f) return;
     arched_orders(b, w, h, t, 0.0f, ow, spring_h, a, orders, step, archivolts);
 }
+
+/* ================== item 3: the plan function ==================
+   One pure expansion; everything else is a reader (§1.2). Every random
+   decision draws from a NAMED LANE (§1.3) so the seed's meaning can
+   only grow, never shift. */
+
+#include <string.h>
+
+float gothic_hash01(unsigned seed, int lane, int i, int j) {
+    unsigned h = seed;
+    h ^= (unsigned)lane * 0x9E3779B9u;
+    h ^= (unsigned)i    * 0x85EBCA6Bu;
+    h ^= (unsigned)j    * 0xC2B2AE35u;
+    h ^= h >> 16; h *= 0x7FEB352Du;
+    h ^= h >> 15; h *= 0x846CA68Bu;
+    h ^= h >> 16;
+    return (float)(h & 0xFFFFFFu) / 16777216.0f;   /* 24 bits: mantissa-exact */
+}
+
+/* the church ref schema's defaults — item 4's registry rows must carry
+   these same values (gothictest will assert the two tables agree) */
+static const float CHURCH_DEFAULTS[8] =
+    { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f };
+
+/* the 5/8 apse: 5 sides of an octagon whose mouth chord equals the nave
+   width — mouth = 2 r sin(112.5), depth = r (cos(22.5) - cos(112.5)) */
+#define APSE_R_PER_NAVE   0.5411961f    /* r / nave_w                  */
+#define APSE_D_PER_NAVE   0.7071068f    /* depth / nave_w              */
+
+void church_plan(ChurchPlan *p, const float *params, int count) {
+    float full[8];
+    float pl, pw, ul, uw, rem, roll;
+    int   k;
+
+    memset(p, 0, sizeof *p);                /* padding too: memcmp-clean */
+    for (k = 0; k < 8; k++)
+        full[k] = (params && k < count) ? params[k] : CHURCH_DEFAULTS[k];
+
+    p->seed  = full[2] > 0.0f ? (unsigned)(full[2] + 0.5f) : 0u;
+    p->acute = full[6] < 0.0f ? 0.0f : full[6];
+
+    /* 1. orientation: the nave runs the LONGER dimension; east = +X */
+    pl = full[0]; pw = full[1];
+    if (pl < 6.0f) pl = 6.0f;
+    if (pw < 6.0f) pw = 6.0f;
+    p->swapped = pw > pl;
+    if (p->swapped) { float tmp = pl; pl = pw; pw = tmp; }
+    p->plot_l = pl;
+    p->plot_w = pw;
+
+    /* 2. style: forced, or derived from the provisional interior area
+       (margin is style-dependent, so derivation uses a 1 m stand-in) */
+    k = (int)full[3];
+    if (k >= CHURCH_CHAPEL && k <= CHURCH_BASILICA) {
+        p->style = k;
+    } else if ((pl - 2.0f) * (pw - 2.0f) < 120.0f) {
+        p->style = CHURCH_CHAPEL;
+    } else {
+        float pb = ((pw - 2.0f) - 12.0f) / 6.0f;   /* basilica wants width */
+        if (pb < 0.0f)   pb = 0.0f;
+        if (pb > 0.85f)  pb = 0.85f;
+        roll = gothic_hash01(p->seed, LANE_STYLE, 0, 0);
+        p->style = roll < pb ? CHURCH_BASILICA : CHURCH_HALL;
+    }
+    p->aisles = p->style != CHURCH_CHAPEL;
+
+    /* the buttress reserve (flyers want depth) */
+    roll = gothic_hash01(p->seed, LANE_ELEV, 0, 0);
+    if      (p->style == CHURCH_CHAPEL) p->margin = 0.8f + 0.2f * roll;
+    else if (p->style == CHURCH_HALL)   p->margin = 1.2f + 0.4f * roll;
+    else                                p->margin = 1.6f + 0.6f * roll;
+    ul = pl - 2.0f * p->margin;
+    uw = pw - 2.0f * p->margin;
+
+    /* 3. the bay module — ad quadratum: aisle = nave/2, bay = nave/2 */
+    roll = gothic_hash01(p->seed, LANE_NAVE_W, 0, 0);
+    if (p->style == CHURCH_CHAPEL) {
+        p->nave_w  = 4.0f + 3.0f * roll;             /* 4..7        */
+        if (p->nave_w > uw) p->nave_w = uw;
+        p->aisle_w = 0.0f;
+    } else {
+        if (p->style == CHURCH_BASILICA) p->nave_w = 7.0f + 3.0f * roll;
+        else                             p->nave_w = 5.5f + 2.5f * roll;
+        p->aisle_w = 0.5f * p->nave_w;
+        if (p->nave_w + 2.0f * p->aisle_w > uw) {    /* squeeze, keep ratio */
+            p->nave_w  = uw * 0.5f;
+            p->aisle_w = uw * 0.25f;
+        }
+    }
+    roll = gothic_hash01(p->seed, LANE_MODULE, 0, 0);
+    p->bay_l = p->nave_w * (0.5f + 0.12f * (roll - 0.5f));  /* nw/2 +-6% */
+
+    p->nbays = (int)(ul / p->bay_l);
+    if (p->nbays > PLAN_MAX_BAYS) p->nbays = PLAN_MAX_BAYS;
+    if (p->nbays < 1)             p->nbays = 1;
+    rem = ul - (float)p->nbays * p->bay_l;
+
+    /* the remainder is absorbed east-first: apse, then tower, then the
+       west porch. The chevet is deep — when the leftover is promising
+       but short, it EATS BAYS until the polygon fits (deterministic). */
+    if (p->style != CHURCH_CHAPEL && rem >= 0.6f * p->bay_l &&
+        gothic_hash01(p->seed, LANE_APSE, 0, 0) > 0.25f) {
+        float need = APSE_D_PER_NAVE * p->nave_w;
+        while (rem < need && p->nbays > 2) { p->nbays--; rem += p->bay_l; }
+        if (rem >= need) {
+            p->apse_sides = 5;
+            p->apse_d     = need;
+            rem          -= need;
+        }
+    }
+    if (p->style != CHURCH_CHAPEL && rem >= 0.8f * p->bay_l &&
+        gothic_hash01(p->seed, LANE_TOWER, 0, 0) > 0.5f) {
+        p->tower   = 1;
+        p->tower_d = rem > p->bay_l ? p->bay_l : rem;
+        rem       -= p->tower_d;
+    }
+    p->porch  = rem;
+    p->west_x = -0.5f * pl + p->margin + rem;
+    p->east_x = p->west_x + p->tower_d + (float)p->nbays * p->bay_l;
+
+    /* 4. the elevation formula — drawn once per building (LANE_ELEV by
+       scalar index), arcade band height DERIVED from the arch math */
+    {
+        float r1 = gothic_hash01(p->seed, LANE_ELEV, 1, 0);
+        float r2 = gothic_hash01(p->seed, LANE_ELEV, 2, 0);
+        float r3 = gothic_hash01(p->seed, LANE_ELEV, 3, 0);
+        float r4 = gothic_hash01(p->seed, LANE_ELEV, 4, 0);
+        float r5 = gothic_hash01(p->seed, LANE_ELEV, 5, 0);
+        float r6 = gothic_hash01(p->seed, LANE_ELEV, 6, 0);
+        float arc_span = 0.8f * p->bay_l;       /* arcade clear span */
+
+        p->plinth_h = 0.4f + 0.15f * r1;
+        p->sill_h   = 1.1f + 0.5f  * r2;
+        if (p->style == CHURCH_CHAPEL) {
+            p->wall_t   = 0.6f + 0.2f * r3;
+            p->impost_h = 2.2f + 0.8f * r4;     /* window springing line */
+            p->arcade_h = p->impost_h;
+            p->wall_h   = p->impost_h
+                        + gothic_arch_y(0.55f * p->bay_l, p->acute, 0.0f)
+                        + 1.0f;
+            p->aisle_h  = p->wall_h;
+        } else if (p->style == CHURCH_HALL) {
+            p->wall_t   = 0.7f + 0.25f * r3;
+            p->impost_h = 3.0f + 1.0f  * r4;
+            p->arcade_h = p->impost_h
+                        + gothic_arch_y(arc_span, p->acute, 0.0f) + 0.5f;
+            p->wall_h   = p->arcade_h + 0.8f;
+            p->aisle_h  = p->wall_h;            /* THE hall trait        */
+        } else {
+            p->wall_t     = 0.8f + 0.3f * r3;
+            p->impost_h   = 3.4f + 1.2f * r4;
+            p->arcade_h   = p->impost_h
+                          + gothic_arch_y(arc_span, p->acute, 0.0f) + 0.5f;
+            p->clerest_h0 = p->arcade_h + 0.8f + 0.4f * r5;  /* triforium */
+            p->clerest_h1 = p->clerest_h0 + 1.7f + 0.6f * r6;
+            p->wall_h     = p->clerest_h1 + 0.5f;
+            p->aisle_h    = p->arcade_h + 0.4f;
+        }
+    }
+}
+
+int plan_pier(const ChurchPlan *p, int i, int j, float *out_x, float *out_z) {
+    float z;
+    if (!p || i < 0 || i > p->nbays || j < 0 || j > PIER_ROW_N_WALL) return 0;
+    if (!p->aisles && (j == PIER_ROW_S_ARCADE || j == PIER_ROW_N_ARCADE))
+        return 0;                               /* chapel: no arcades */
+    switch (j) {
+    case PIER_ROW_S_WALL:   z = -(0.5f * p->nave_w + p->aisle_w); break;
+    case PIER_ROW_S_ARCADE: z = -0.5f * p->nave_w;                break;
+    case PIER_ROW_N_ARCADE: z =  0.5f * p->nave_w;                break;
+    default:                z =  0.5f * p->nave_w + p->aisle_w;   break;
+    }
+    if (out_x) *out_x = p->west_x + p->tower_d + (float)i * p->bay_l;
+    if (out_z) *out_z = z;
+    return 1;
+}
+
+int plan_apse_pier(const ChurchPlan *p, int k, float *out_x, float *out_z) {
+    float r, cxa, ang;
+    if (!p || p->apse_sides != 5 || k < 0 || k > 5) return 0;
+    r   = APSE_R_PER_NAVE * p->nave_w;
+    cxa = p->east_x + 0.3826834f * r;     /* center east of the mouth chord */
+    ang = (-112.5f + 45.0f * (float)k) * (SOL_PI / 180.0f);
+    if (out_x) *out_x = cxa + r * cosf(ang);
+    if (out_z) *out_z = r * sinf(ang);
+    return 1;
+}
+
+int plan_bay_kind(const ChurchPlan *p, int i, int lane) {
+    if (!p || i < 0 || i >= p->nbays || lane < 0 || lane > 2)
+        return GOTHIC_BAY_NONE;
+    if (lane == 1) return GOTHIC_BAY_NAVE;
+    return p->aisles ? GOTHIC_BAY_AISLE : GOTHIC_BAY_NONE;
+}
+
+/* flatten-to-fit: if the default acuteness pushes the crown past the
+   limit, re-solve via the level-crown formula; if even the SEMICIRCLE
+   is too tall, drop the springing toward the sill, and narrow the
+   light as the last resort. The plan guarantees the emitters'
+   preconditions — an opening it returns always fits its wall. */
+static void opening_fit(GothicOpening *o, float limit) {
+    float room;
+    if (o->spring + gothic_arch_y(o->w, o->acute, 0.0f) <= limit) return;
+    o->acute = gothic_arch_acuteness_for(o->w, limit - o->spring);
+    if (o->spring + gothic_arch_y(o->w, o->acute, 0.0f) <= limit + 1e-4f)
+        return;
+    o->acute = 0.0f;
+    room = limit - 0.5f * o->w;       /* springing for an exact round fit */
+    if (room >= o->sill + 0.15f) { o->spring = room; return; }
+    o->spring = o->sill + 0.15f;
+    o->w      = 2.0f * (limit - o->spring);
+    if (o->w < 0.3f) o->kind = GOTHIC_OPEN_NONE;
+}
+
+void plan_opening(const ChurchPlan *p, int wall, int i, GothicOpening *out) {
+    float clear, limit, head;
+    memset(out, 0, sizeof *out);
+    if (!p) return;
+    out->acute = p->acute;
+    switch (wall) {
+    case WALL_AISLE_S:
+    case WALL_AISLE_N:
+        if (i < 0 || i >= p->nbays) return;
+        clear = p->bay_l - p->wall_t - 0.4f;
+        if (clear < 0.6f) return;
+        out->kind   = GOTHIC_OPEN_WINDOW;
+        out->cx     = p->west_x + p->tower_d + ((float)i + 0.5f) * p->bay_l;
+        out->w      = 0.55f * clear;
+        out->sill   = p->sill_h;
+        limit       = p->aisle_h - 0.8f;     /* two courses above the crown */
+        head        = limit - out->sill;
+        if (head < 0.8f) { out->kind = GOTHIC_OPEN_NONE; return; }
+        out->spring = out->sill + 0.45f * head;
+        opening_fit(out, limit);
+        break;
+    case WALL_CLEREST_S:
+    case WALL_CLEREST_N:
+        if (p->style != CHURCH_BASILICA || i < 0 || i >= p->nbays) return;
+        clear = p->bay_l - p->wall_t - 0.4f;
+        if (clear < 0.6f) return;
+        out->kind   = GOTHIC_OPEN_WINDOW;
+        out->cx     = p->west_x + p->tower_d + ((float)i + 0.5f) * p->bay_l;
+        out->w      = 0.55f * clear;
+        out->sill   = p->clerest_h0 + 0.15f * (p->clerest_h1 - p->clerest_h0);
+        limit       = p->clerest_h1 - 0.3f;
+        head        = limit - out->sill;
+        if (head < 0.6f) { out->kind = GOTHIC_OPEN_NONE; return; }
+        out->spring = out->sill + 0.4f * head;
+        opening_fit(out, limit);
+        break;
+    case WALL_WEST:
+        if (i == 0) {                        /* the portal */
+            out->kind   = GOTHIC_OPEN_DOOR;
+            out->cx     = 0.0f;
+            out->w      = 0.3f * p->nave_w;
+            if (out->w < 1.2f) out->w = 1.2f;
+            out->sill   = 0.0f;
+            out->spring = 2.0f + 0.1f * p->nave_w;
+            opening_fit(out, p->wall_h - 1.2f);   /* room for the window */
+        } else if (i == 1) {                 /* the great window above */
+            GothicOpening door;
+            plan_opening(p, WALL_WEST, 0, &door);
+            out->kind   = GOTHIC_OPEN_WINDOW;
+            out->cx     = 0.0f;
+            out->w      = 0.5f * p->nave_w;
+            out->sill   = door.spring
+                        + gothic_arch_y(door.w, door.acute, 0.0f) + 0.5f;
+            limit       = p->wall_h - 0.8f;
+            head        = limit - out->sill;
+            if (head < 0.8f) { out->kind = GOTHIC_OPEN_NONE; return; }
+            out->spring = out->sill + 0.4f * head;
+            opening_fit(out, limit);
+        }
+        break;
+    default:
+        break;
+    }
+}

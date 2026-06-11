@@ -119,4 +119,117 @@ void gothic_wall_portal(MeshBuilder *b, float w, float h, float t,
                         float ow, float spring_h, float a,
                         int orders, float step, int archivolts);
 
+/* ---- item 3: the plan function — the constitutional centerpiece ----
+   church_plan() is to the church what terrain_height is to the island
+   (§1.2): a pure, deterministic, allocation-free expansion of the ref
+   params into the building's structural truth. The stone emitter, the
+   glass emitter, the collider derivation, the ruin pass — every one a
+   READER of the same expansion. There is no stored plan, no cached
+   layout, no second description. */
+
+/* The lane hash (§1.3): every architectural decision draws from a NAMED
+   LANE — never a sequential stream, so adding a decision can never
+   reshuffle an existing church. Per-bay decisions key on (i, j). */
+float gothic_hash01(unsigned seed, int lane, int i, int j);
+
+/* APPEND-ONLY: reordering lanes is a save-breaking change, treated like
+   reordering the STML schema. Add at the tail, forever. */
+enum {
+    LANE_STYLE = 0,   /* hall vs basilica                            */
+    LANE_MODULE,      /* bay length jitter about nave_w/2            */
+    LANE_NAVE_W,      /* nave width within the style range           */
+    LANE_APSE,        /* polygonal vs flat east end                  */
+    LANE_TOWER,       /* west tower bay                              */
+    LANE_ELEV,        /* the elevation formula's scalars (j = which) */
+    LANE_TOWER_H,     /* item 4: tower height                        */
+    LANE_PITCH,       /* item 7: roof pitch                          */
+    LANE_TRACERY,     /* item 6: lights divisor jitter               */
+    LANE_RUIN,        /* item 8: the decay field                     */
+    LANE_RUIN_DIR,    /* item 8: which end collapses first           */
+    LANE_SPIRE,       /* item 7: broach vs parapet-and-needle        */
+    LANE_COUNT
+};
+
+enum { CHURCH_CHAPEL = 0, CHURCH_HALL = 1, CHURCH_BASILICA = 2 };
+
+#define PLAN_MAX_BAYS 16
+
+/* Scalars ONLY — every ELEMENT is answered by the queries below,
+   computed on demand (terrain_height's citizenship). The plan frame:
+   east = local +X, the nave runs the plot's LONGER dimension, plot
+   centered on the origin; `swapped` says the source plot was deeper
+   than wide (the spawner's yaw concern, the readers just need to map
+   x<->z). memset-zeroed before filling, so struct memcmp IS the §1.8
+   determinism test. */
+typedef struct {
+    int      style;            /* CHURCH_CHAPEL / HALL / BASILICA          */
+    int      nbays;            /* regular bays, west -> east               */
+    int      aisles;           /* 1 = aisled (hall/basilica)               */
+    int      apse_sides;       /* 0 = flat east wall, 5 = the 5/8 octagon  */
+    int      tower;            /* 1 = west tower annex                     */
+    int      swapped;          /* plot was deeper than wide                */
+    float    plot_l, plot_w;   /* nave-frame plot dims (l = the long one)  */
+    float    margin;           /* perimeter buttress reserve               */
+    float    nave_w, aisle_w;  /* clear widths (ad quadratum: aw = nw/2)   */
+    float    bay_l;            /* the module (the doubled-square bay)      */
+    float    wall_t;
+    float    tower_d, apse_d;  /* annex depths (0 when absent)             */
+    float    west_x, east_x;   /* the BODY's west/east faces (tower+bays)  */
+    float    porch;            /* west residue: item 7's steps             */
+    float    plinth_h, sill_h;
+    float    impost_h;         /* arcade springing / capital line          */
+    float    arcade_h;         /* top of the arcade band                   */
+    float    clerest_h0, clerest_h1;  /* clerestory band (basilica only)   */
+    float    aisle_h, wall_h;  /* aisle / nave wall heads                  */
+    float    acute;
+    unsigned seed;
+} ChurchPlan;
+
+/* params follow the church ref schema (shared verbatim by all four
+   sub-refs, §1.7): { w, d, seed, style, ruin, built, acute, reserved },
+   defaults { 18, 30, 7, -1, 0, 1, 1, 0 }. A PREFIX is legal; the tail
+   fills from defaults (the registry's merge rule). */
+void church_plan(ChurchPlan *p, const float *params, int count);
+
+/* pier stations: i = 0..nbays along the axis (fenceposts), j = row.
+   Chapel has no arcade rows. Returns 1 + position in the plan frame. */
+enum {
+    PIER_ROW_S_WALL = 0, PIER_ROW_S_ARCADE,
+    PIER_ROW_N_ARCADE,   PIER_ROW_N_WALL
+};
+int plan_pier(const ChurchPlan *p, int i, int j, float *out_x, float *out_z);
+
+/* the apse polygon's 6 vertices (5 sides of an octagon), south to
+   north; the mouth pair sits ON the east wall line at z = -+nave_w/2 */
+int plan_apse_pier(const ChurchPlan *p, int k, float *out_x, float *out_z);
+
+enum { GOTHIC_BAY_NONE = 0, GOTHIC_BAY_NAVE, GOTHIC_BAY_AISLE };
+int plan_bay_kind(const ChurchPlan *p, int i, int lane);  /* lane 0/1/2 = S aisle/nave/N aisle */
+
+/* openings by RULE, not by draw: aisle and clerestory bays get one
+   window each (width 0.55 x the bay's clear span, sill at the string
+   course); the west front gets the portal (i = 0) and the great window
+   (i = 1). Windows FLATTEN TO FIT via the level-crown solve when the
+   default acuteness would push the crown into the wall head — the plan
+   guarantees the emitters' preconditions. kind NONE = nothing there. */
+enum { GOTHIC_OPEN_NONE = 0, GOTHIC_OPEN_WINDOW, GOTHIC_OPEN_DOOR };
+enum {
+    WALL_AISLE_S = 0, WALL_AISLE_N,
+    WALL_CLEREST_S,   WALL_CLEREST_N,
+    WALL_WEST
+};
+typedef struct {
+    int   kind;
+    float cx;             /* center ALONG the wall (x for S/N, z for west) */
+    float w;              /* opening span                                  */
+    float sill, spring;   /* heights; doors sill 0                         */
+    float acute;          /* possibly flattened from the plan's            */
+} GothicOpening;
+void plan_opening(const ChurchPlan *p, int wall, int i, GothicOpening *out);
+
+/* plan_supports (§1.5, the dependency edges) lands with its consumers:
+   item 5 registers flyer/web edges, item 8 traverses them. The element
+   id encoding is deferred until those classes exist — nothing reads it
+   yet, and an unread encoding is a guess. */
+
 #endif /* GOTHIC_H */

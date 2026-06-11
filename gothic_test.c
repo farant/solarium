@@ -375,6 +375,148 @@ static void test_portal(void) {
     mb_free(&b);
 }
 
+/* ---- 11: the plan invariants — ~200 seeds x sizes (TODO6 item 3) ---- */
+static void check_one_plan(const ChurchPlan *p, float pl_in, float pw_in) {
+    float hl = 0.5f * p->plot_l, hw = 0.5f * p->plot_w;
+    float x, z;
+    int   i, j;
+
+    /* the frame: plot_l is the long dimension, swapped honest */
+    if (p->plot_l + 1e-5f < p->plot_w) { fail("plan: plot_l must be the long axis"); return; }
+    if (!p->swapped && pw_in > pl_in && pw_in > 6.0f)
+        { fail("plan: deeper-than-wide must set swapped"); return; }
+
+    /* the module within the ad-quadratum band */
+    if (p->bay_l < 0.43f * p->nave_w || p->bay_l > 0.57f * p->nave_w)
+        { fail("plan: bay module out of the ad-quadratum band"); return; }
+    if (p->nbays < 1 || p->nbays > PLAN_MAX_BAYS)
+        { fail("plan: bay count out of range"); return; }
+
+    /* the body and annexes fit inside the usable rect */
+    if (p->west_x < -hl + p->margin - 1e-4f)
+        { fail("plan: body west of the usable rect"); return; }
+    if (p->east_x + p->apse_d > hl - p->margin + 1e-3f)
+        { fail("plan: body+apse east of the usable rect"); return; }
+    if (0.5f * p->nave_w + p->aisle_w > hw - p->margin + 1e-3f)
+        { fail("plan: body wider than the usable rect"); return; }
+
+    /* every pier inside the plot; every nave bay's four piers exist */
+    for (i = 0; i <= p->nbays; i++)
+        for (j = 0; j <= PIER_ROW_N_WALL; j++) {
+            if (!plan_pier(p, i, j, &x, &z)) {
+                if (p->aisles) { fail("plan: aisled church missing a pier"); return; }
+                continue;
+            }
+            if (x < -hl - 1e-4f || x > hl + 1e-4f ||
+                z < -hw - 1e-4f || z > hw + 1e-4f)
+                { fail("plan: pier outside the plot"); return; }
+        }
+    if (plan_pier(p, p->nbays + 1, 0, &x, &z) ||
+        plan_pier(p, -1, 0, &x, &z) || plan_pier(p, 0, 4, &x, &z))
+        { fail("plan: out-of-range pier query must refuse"); return; }
+
+    /* the apse closes: 6 vertices on one circle, mouth on the east wall */
+    if (p->apse_sides == 5) {
+        float r   = 0.5411961f * p->nave_w;
+        float cxa = p->east_x + 0.3826834f * r;
+        float zk[6], xk[6];
+        for (i = 0; i < 6; i++) {
+            float dx, dz;
+            if (!plan_apse_pier(p, i, &xk[i], &zk[i]))
+                { fail("plan: apse vertex missing"); return; }
+            dx = xk[i] - cxa; dz = zk[i];
+            if (fabsf(sqrtf(dx * dx + dz * dz) - r) > 1e-4f)
+                { fail("plan: apse vertex off the circle"); return; }
+        }
+        if (fabsf(xk[0] - p->east_x) > 1e-4f ||
+            fabsf(zk[0] + 0.5f * p->nave_w) > 1e-4f ||
+            fabsf(zk[5] - 0.5f * p->nave_w) > 1e-4f)
+            { fail("plan: apse mouth off the east wall"); return; }
+        for (i = 0; i < 6; i++)
+            if (fabsf(zk[i] + zk[5 - i]) > 1e-4f || fabsf(xk[i] - xk[5 - i]) > 1e-4f)
+                { fail("plan: apse not symmetric"); return; }
+    }
+
+    /* openings: inside their bays, crowns under their limits */
+    for (i = 0; i < p->nbays; i++) {
+        GothicOpening o;
+        float bx0 = p->west_x + p->tower_d + (float)i * p->bay_l;
+        plan_opening(p, WALL_AISLE_S, i, &o);
+        if (o.kind == GOTHIC_OPEN_WINDOW) {
+            if (o.cx - 0.5f * o.w < bx0 - 1e-4f ||
+                o.cx + 0.5f * o.w > bx0 + p->bay_l + 1e-4f)
+                { fail("plan: window outside its bay"); return; }
+            if (o.spring + gothic_arch_y(o.w, o.acute, 0.0f) >
+                p->aisle_h - 0.8f + 1e-3f)
+                { fail("plan: window crown into the wall head"); return; }
+        }
+        plan_opening(p, WALL_CLEREST_S, i, &o);
+        if (o.kind == GOTHIC_OPEN_WINDOW &&
+            o.spring + gothic_arch_y(o.w, o.acute, 0.0f) >
+            p->clerest_h1 - 0.3f + 1e-3f)
+            { fail("plan: clerestory crown out of its band"); return; }
+    }
+    {   /* the portal admits the capsule, the great window fits above */
+        GothicOpening o;
+        plan_opening(p, WALL_WEST, 0, &o);
+        if (o.kind != GOTHIC_OPEN_DOOR || o.w < 1.2f - 1e-5f || o.spring < 1.9f)
+            { fail("plan: portal must admit the capsule with margin"); return; }
+        plan_opening(p, WALL_WEST, 1, &o);
+        if (o.kind == GOTHIC_OPEN_WINDOW &&
+            o.spring + gothic_arch_y(o.w, o.acute, 0.0f) > p->wall_h - 0.8f + 1e-3f)
+            { fail("plan: great window into the wall head"); return; }
+    }
+}
+
+static void test_plan(void) {
+    static const float SIZES[5][2] = {
+        { 18.0f, 30.0f }, { 14.0f, 22.0f }, { 30.0f, 46.0f },
+        { 9.0f, 12.0f },  { 40.0f, 24.0f }
+    };
+    int si, seed;
+    for (si = 0; si < 5 && !g_fail; si++) {
+        for (seed = 0; seed < 40 && !g_fail; seed++) {
+            float params[8];
+            ChurchPlan p, q;
+            params[0] = SIZES[si][0]; params[1] = SIZES[si][1];
+            params[2] = (float)seed;  params[3] = -1.0f;
+            params[4] = 0.0f; params[5] = 1.0f; params[6] = 1.0f;
+            params[7] = 0.0f;
+            church_plan(&p, params, 8);
+            church_plan(&q, params, 8);
+            if (memcmp(&p, &q, sizeof p) != 0)
+                { fail("plan: identical params, different structs"); return; }
+            check_one_plan(&p, params[0], params[1]);
+        }
+    }
+    {   /* forced styles honored; derive picks chapel for small plots */
+        float params[8] = { 18, 30, 7, 0, 0, 1, 1, 0 };
+        ChurchPlan p;
+        int s;
+        for (s = 0; s <= 2; s++) {
+            params[3] = (float)s;
+            church_plan(&p, params, 8);
+            if (p.style != s) { fail("plan: forced style not honored"); return; }
+        }
+        params[0] = 9.0f; params[1] = 12.0f; params[3] = -1.0f;
+        church_plan(&p, params, 8);
+        if (p.style != CHURCH_CHAPEL)
+            { fail("plan: small plot must derive chapel"); return; }
+        if (p.aisles || plan_pier(&p, 0, PIER_ROW_S_ARCADE, 0, 0))
+            { fail("plan: chapel must have no arcade row"); return; }
+    }
+    {   /* a prefix is legal (the registry merge rule); the bay clamp holds */
+        float params[3] = { 20.0f, 120.0f, 11.0f };
+        ChurchPlan p;
+        church_plan(&p, params, 3);
+        if (p.nbays != PLAN_MAX_BAYS)
+            { fail("plan: huge plot must clamp to PLAN_MAX_BAYS"); return; }
+        if (!p.swapped) { fail("plan: 20x120 must swap"); return; }
+        church_plan(&p, (const float *)0, 0);   /* all defaults */
+        if (p.nbays < 2) { fail("plan: default church too short"); return; }
+    }
+}
+
 int main(void) {
     test_square_is_box();
     test_miter();
@@ -386,6 +528,7 @@ int main(void) {
     test_arch_path();
     test_wall_arched();
     test_portal();
+    test_plan();
     if (g_fail) { printf("gothic_test: FAILED\n"); return 1; }
     printf("gothic_test: OK\n");
     return 0;
