@@ -120,7 +120,7 @@ if [ "$MODE" = "asan" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c image.c font.c platform_fs.c json.c glb.c \
+        main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c image.c font.c platform_fs.c json.c glb.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit \
         -o solarium-asan
@@ -135,7 +135,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c image.c font.c platform_fs.c json.c glb.c \
+    main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c image.c font.c platform_fs.c json.c glb.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit \
     -o solarium

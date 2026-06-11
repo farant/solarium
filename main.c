@@ -22,6 +22,7 @@
 #include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
+#include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
 
 /* one island's grass (P4 item 3): a static instance buffer + the island it
    grows on — drawn only when the island itself survives the frustum */
@@ -1480,6 +1481,71 @@ static float mint_range(float lo, float hi) {
     return lo + (hi - lo) * (float)((g_mint_rng >> 16) & 0x7FFF) / 32767.0f;
 }
 
+/* ---- the mesh asset registry (P4 item 4): shared shapes, owned once ----
+   The store is the ONLY destroyer of registered meshes; objects borrow.
+   File-static like the mint rng — main.c is the composition layer, and
+   every consumer (resolve, release, the death sites, the HUD) lives here. */
+static AssetStore g_mesh_assets;
+
+static void mesh_asset_destroy(void *payload, void *user) {
+    (void)user;
+    mesh_destroy((Mesh *)payload);   /* GPU buffers + retained CpuGeom together */
+}
+
+/* The registry key for an object's geometry: the ref + its EFFECTIVE
+   parameters — the file's prefix merged with the schema defaults, so an old
+   3-param room and its explicit full-param twin read as THE SAME SHAPE
+   (params are identity, and defaults are part of it). SOL_FALSE = not
+   registry material: no ref, an unknown ref, or an arrow (scene-derived,
+   arrows_rebuild owns those). Key budget: "m|" + ref + 8 params x ~15
+   chars < 140 — callers pass char[160]. */
+static sol_bool mesh_asset_key(const SceneObject *o, char *buf) {
+    const char *const *names;
+    const float       *defaults;
+    int                n, i;
+    size_t             len;
+    if (!o->mesh_ref) return SOL_FALSE;
+    if (strcmp(o->mesh_ref, "arrow") == 0) return SOL_FALSE;
+    n = mesh_ref_schema(o->mesh_ref, &names, &defaults);
+    if (n < 0) return SOL_FALSE;
+    (void)defaults;
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    len = (size_t)sprintf(buf, "m|%s", o->mesh_ref);
+    for (i = 0; i < n; i++) {
+        float v = mesh_ref_param(o->mesh_ref, o->mesh_params,
+                                 o->mesh_param_count, names[i]);
+        len += (size_t)sprintf(buf + len, "|%.9g", (double)v);
+    }
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+    return SOL_TRUE;
+}
+
+/* The mirror walk of scene_resolve_meshes: registry meshes go BACK to the
+   store (each object carries everything its release needs — the key
+   re-derives from ref + params); non-registry meshes — arrows, glb import
+   parts — are uniquely owned per object today and die outright with their
+   scene. With both handled, the L-reload leak (tolerated since P3 item 1)
+   is retired. */
+static void scene_release_meshes(Scene *s) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        char key[160];
+        if (o->mesh.index_count == 0) continue;
+        if (mesh_asset_key(o, key)) {
+            asset_release(&g_mesh_assets, key);
+            memset(&o->mesh, 0, sizeof o->mesh);   /* borrowed: just forget it */
+        } else {
+            mesh_destroy(&o->mesh);                /* owned: destroy it */
+        }
+    }
+}
+
 /* The ground under a world point (item 10): the highest terrain plot
    beneath it — within a step-up tolerance, so a plot floating overhead
    doesn't claim you — else the world floor at 0. terrain_height is the
@@ -2575,8 +2641,11 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             SceneObject *o = scene_get(&st->scene, st->selected_handle);
             if (o && o->kind == KIND_TOMBSTONE) {
                 char        lbuf[16];
+                char        akey[160];
                 const char *label = object_label(&st->scene, st->selected_handle, lbuf);
                 printf("dismissed tombstone: %s\n", label);
+                if (mesh_asset_key(o, akey))           /* its shape goes back (P4 i4) */
+                    asset_release(&g_mesh_assets, akey);
                 scene_remove(&st->scene, st->selected_handle);
                 st->selected_handle = 0;
                 arrows_rebuild(st);            /* edges to the dead card go dormant */
@@ -2594,8 +2663,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
     /* L reverts to the palace on disk mid-session (since 6e the startup
        loads it automatically; L remains the manual "reload my save" key).
-       Old GPU meshes are not destroyed (glb parts may share buffers) — a
-       bounded leak for a manual key; the asset registry owns this later. */
+       Since P4 item 4 the swap is leak-free: registry meshes release,
+       uniquely-owned ones die — press L all day, the counts hold still. */
     l_now = glfwGetKey(w, GLFW_KEY_L) == GLFW_PRESS;
     if (l_now && !st->l_was_down) {
         if (load_palace(st))
@@ -2739,18 +2808,28 @@ static void build_brdf_lut(AppState *state) {
    AFTER rhi_init (it uploads) and after scene_load or scene-building — the
    data phase stays pure (headless iotest keeps working), realization happens
    here. An unknown ref leaves the object as a transform-only empty, warned:
-   placed data must outlive a missing generator (it re-saves intact). */
+   placed data must outlive a missing generator (it re-saves intact).
+   SINCE P4 ITEM 4 this is also the ACQUIRE path: the registry is consulted
+   before any upload, so two objects naming the same shape (same ref, same
+   effective params — fifty default cards, twin rooms) share ONE GPU mesh. */
 static void scene_resolve_meshes(Scene *s) {
     sol_u32 i;
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         MeshBuilder  mb;
+        char         key[160];
+        sol_bool     keyed;
         if (!o->mesh_ref || o->mesh.index_count != 0) continue;
         if (strcmp(o->mesh_ref, "arrow") == 0) continue;   /* scene-derived:
                                                               arrows_rebuild owns it */
+        keyed = mesh_asset_key(o, key);
+        if (keyed && asset_acquire(&g_mesh_assets, key, &o->mesh, sizeof o->mesh))
+            continue;                          /* the shape already lives: borrow it */
         mb_init(&mb);
         if (mesh_ref_build(o->mesh_ref, o->mesh_params, o->mesh_param_count, &mb)) {
             o->mesh = mesh_from_builder(&mb);
+            if (keyed)
+                asset_store_add(&g_mesh_assets, key, &o->mesh, sizeof o->mesh);
         } else {
             fprintf(stderr, "scene: unknown mesh ref \"%s\" on %s — left empty\n",
                     o->mesh_ref, o->nid ? o->nid : "(no nid)");
@@ -2888,13 +2967,20 @@ static int rescan_mirrors(AppState *st) {
    today's disk — the folder may have changed while the palace slept.
    SOL_FALSE if the file is absent or won't parse. */
 static sol_bool load_palace(AppState *st) {
-    Scene fresh;
+    Scene fresh, old;
     int   changes;
     if (!scene_load(&fresh, "scene.stml")) return SOL_FALSE;
-    scene_free(&st->scene);
+    /* THE SWAP, acquire-first (P4 item 4): the fresh scene realizes its
+       meshes BEFORE the old scene releases, so a shape present on both
+       sides never sees refcount zero — survivors keep their buffers.
+       Then the old scene's registry refs go back and its uniquely-owned
+       meshes (arrows, glb parts) die outright. */
+    old       = st->scene;
     st->scene = fresh;
     scene_reimport_glbs(st);
-    scene_resolve_meshes(&st->scene);
+    scene_resolve_meshes(&st->scene);             /* ACQUIRE (the new) */
+    scene_release_meshes(&old);                   /* RELEASE (the old) */
+    scene_free(&old);
     arrows_rebuild(st);              /* edges re-derive from the loaded cards */
     collide_rebuild(&st->colliders, &st->scene);  /* and so do the walls */
     meadow_rebuild(st);                           /* and the grass */
@@ -3892,8 +3978,8 @@ static void render(AppState *state) {
 
     /* the debug readout panel — live state, monospace-aligned (3c; this
        retired the window-title sprintf hack). ui_text positions BASELINES. */
-    ui_quad(8.0f * us, 8.0f * us, 340.0f * us, 170.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
-    ui_quad_outline(8.0f * us, 8.0f * us, 340.0f * us, 170.0f * us,
+    ui_quad(8.0f * us, 8.0f * us, 340.0f * us, 190.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
+    ui_quad_outline(8.0f * us, 8.0f * us, 340.0f * us, 190.0f * us,
                     1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
     if (state->ui_font) {
         float ts   = 0.45f * us;
@@ -3960,6 +4046,14 @@ static void render(AppState *state) {
             sprintf(line, "post %4.2f  draws %d/%d",
                     (double)state->t_post,
                     state->draws_done, state->draws_total);
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
+            mb += font_line_height(state->mono_font) * ms;
+
+            /* the registry's instruments (P4 item 4): entries alive and refs
+               held — the L-reload acceptance is these NOT moving */
+            sprintf(line, "assets %d (%d refs)",
+                    asset_live_count(&g_mesh_assets),
+                    asset_ref_total(&g_mesh_assets));
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
@@ -4202,6 +4296,8 @@ int main(void) {
     AppState state = {0};
     double last;
 
+    asset_store_init(&g_mesh_assets, mesh_asset_destroy, NULL);
+
     if (!glfwInit()) {
         fprintf(stderr, "glfwInit failed\n");
         return EXIT_FAILURE;
@@ -4254,9 +4350,10 @@ int main(void) {
     /* persistence self-check (P3 item 1 acceptance): the scene.stml written
        by init_scene must load back and RECONSTRUCT geometry, not just data.
        Load into a second Scene, resolve, verify every ref'd object got real
-       geometry, then free it — including the check meshes, which are safe to
-       destroy per-object here because they were just resolved (uniquely
-       owned), unlike the live scene's possibly-instanced glb buffers. */
+       geometry, then free it. THE TEARDOWN GOES THROUGH THE REGISTRY (P4
+       item 4): the check's resolve SHARES meshes with the live palace (same
+       keys, by design), so a raw destroy here would tear the buffers out
+       from under the live scene — release gives the refs back instead. */
     {
         Scene   check;
         sol_u32 i, refs = 0, solid = 0;
@@ -4278,12 +4375,9 @@ int main(void) {
                is the registry's invariant, not theirs (iotest covers their
                rel round-trip instead) */
             refs++;
-            if (o->mesh.index_count > 0) {
-                solid++;
-                rhi_destroy_buffer(o->mesh.vbuffer);
-                rhi_destroy_buffer(o->mesh.ibuffer);
-            }
+            if (o->mesh.index_count > 0) solid++;
         }
+        scene_release_meshes(&check);     /* shared shapes go BACK, not down */
         /* counts may legitimately differ now: scene.stml can be the user's
            saved arrangement (item 4), not a mirror of the built default —
            the hard requirement is that every ref RECONSTRUCTS */
@@ -4394,6 +4488,7 @@ int main(void) {
     free(state.bvh_ids);
     free(state.bvh_boxes);
     free(state.vis);
+    asset_store_free(&g_mesh_assets);   /* sweeps the living, before rhi dies */
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
     if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);
     rhi_shutdown();
