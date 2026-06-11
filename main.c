@@ -3024,6 +3024,23 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             scene_meta_set(&st->scene, h, "light_radius", "9");
             scene_component_add(&st->scene, h, "flicker", (const float *)0, 0);
             {
+                /* sparks (item 7): the lantern's other voice — a few embers
+                   a second, rising off the flame and REDDENING as they die.
+                   Birth rgb > 1 on purpose: each ember is bloom's customer,
+                   exactly like the emissive heart below. */
+                static const float SPARKS[24] = {
+                    7.0f, 1.4f,                   /* rate, life */
+                    0.0f, 0.6f, 0.0f,             /* velocity: rising */
+                    0.12f, 0.15f, 0.12f,          /* spread: a loose plume */
+                    0.05f, 0.05f, 0.05f,          /* born AT the flame */
+                    0.012f, 0.004f,               /* shrinking as they cool */
+                    2.2f, 1.10f, 0.35f, 0.9f,     /* white-gold birth (HDR) */
+                    1.2f, 0.25f, 0.08f, 0.0f,     /* ember-red death */
+                    0.0f, -0.25f, 0.0f            /* gravity wins in the end */
+                };
+                scene_component_add(&st->scene, h, "emit", SPARKS, 24);
+            }
+            {
                 SceneObject *lo = scene_get(&st->scene, h);
                 if (lo) {
                     Material m = material_default();
@@ -4840,9 +4857,12 @@ static void render(AppState *state) {
                     (double)state->t_hdr);
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
-            sprintf(line, "post %4.2f  draws %d/%d",
+            sprintf(line, "post %4.2f draws %d/%d parts %d",
                     (double)state->t_post,
-                    state->draws_done, state->draws_total);
+                    state->draws_done, state->draws_total,
+                    state->part_count);    /* §1.7: the pool's live count —
+                                              thousands at one draw, says the
+                                              acceptance; this is the proof */
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
 

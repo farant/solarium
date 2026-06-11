@@ -188,13 +188,21 @@ imports.
 - **`<component type="..." .../>`** (P4 item 6) — a behavior attachment,
   repeatable: the type names an entry in the component registry (the
   registry-as-schema pattern's third application — `spin`, `bob`, `flicker`,
-  more to come), and the named attrs are the file's own param PREFIX against that
-  schema (absent params take defaults, like mesh refs). Behaviors compute
-  TRANSIENT overlays on top of the persisted transform — the file records
-  the BASE the user placed and which dances are attached, never a frame of
-  the dance (TODO4 §1.6). An unknown type round-trips bare (its params have
-  no names a foreign loader could know); delete the element and the motion
-  is gone — the file IS the behavior.
+  `emit`, more to come), and the named attrs are the file's own param PREFIX
+  against that schema (absent params take defaults, like mesh refs). Behaviors
+  compute TRANSIENT overlays on top of the persisted transform — the file
+  records the BASE the user placed and which dances are attached, never a
+  frame of the dance (TODO4 §1.6). An unknown type round-trips bare (its
+  params have no names a foreign loader could know); delete the element and
+  the motion is gone — the file IS the behavior.
+  - `emit` (P4 item 7) spawns particles instead of moving its object: the
+    file records the WEATHER'S RULE, never the weather (the pool is view
+    state, gone at save). Schema, in prefix order: `rate life vx vy vz`
+    (velocity) `sx sy sz` (velocity spread) `px py pz` (position spread —
+    a world-axis box, so dust is a volume) `size0 size1` (over life)
+    `r0 g0 b0 a0 r1 g1 b1 a1` (color endpoints; rgb may exceed 1 — HDR
+    feeds bloom) `ax ay az` (acceleration). The defaults are dust: a bare
+    `<component type="emit"/>` fills the air with drifting motes.
 - **Overbuilt slots** (`<meta>`, `<rel>`, `<content>`) — present in the model and
   serialized though mostly empty this phase; they cannot be retrofitted onto a
   render-only scene (TODO2.md §1.4/§1.5).

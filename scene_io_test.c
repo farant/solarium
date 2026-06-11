@@ -96,12 +96,16 @@ int main(void) {
     }
 
     /* components (P4 item 6): a known type with a param prefix, and an
-       UNKNOWN type that must survive the trip intact (forward compat) */
+       UNKNOWN type that must survive the trip intact (forward compat).
+       emit (item 7) rides along with a 5-param prefix — the 24-param
+       schema's writer must emit only what the file owns. */
     {
-        float sp[4];
+        float sp[4], ep[5];
         sp[0] = 0.0f; sp[1] = 1.0f; sp[2] = 0.0f; sp[3] = 1.2f;
         scene_component_add(&scene, box_h, "spin", sp, 4);
         scene_component_add(&scene, box_h, "wibble", (const float *)0, 0);
+        ep[0] = 12.0f; ep[1] = 3.0f; ep[2] = 0.1f; ep[3] = 0.2f; ep[4] = 0.3f;
+        scene_component_add(&scene, box_h, "emit", ep, 5);
     }
 
     scene_meta_set(&scene, box_h, "title",  "Test Box");
@@ -233,16 +237,20 @@ int main(void) {
                 return 1;
             }
             printf("material factors (color + roughness + emissive) round-trip: ok\n");
-            if (bb->comp_count != 2 ||
+            if (bb->comp_count != 3 ||
                 strcmp(bb->components[0].type, "spin") != 0 ||
                 bb->components[0].param_count != 4 ||
                 bb->components[0].params[3] != 1.2f ||
-                strcmp(bb->components[1].type, "wibble") != 0) {
+                strcmp(bb->components[1].type, "wibble") != 0 ||
+                strcmp(bb->components[2].type, "emit") != 0 ||
+                bb->components[2].param_count != 5 ||
+                bb->components[2].params[0] != 12.0f ||
+                bb->components[2].params[4] != 0.3f) {
                 printf("FAIL: components did not round-trip\n");
                 scene_free(&b); scene_free(&scene);
                 return 1;
             }
-            printf("components (known params + unknown type) round-trip: ok\n");
+            printf("components (known params + unknown + emit prefix) round-trip: ok\n");
         }
 
         /* the emitters themselves are headless now (mesh.c is pure CPU since
@@ -877,8 +885,67 @@ int main(void) {
             printf("flicker: glow animates, desyncs, never persists: ok\n");
         }
 
+        /* emit (item 7): the component that spawns instead of moving.
+           Headless contract first: with NO pool injected, an emitter is a
+           silent no-op and writes nothing on its object. */
+        {
+            static ParticlePool tp;          /* ~344KB — static, not stack */
+            sol_u32      eh;
+            SceneObject *eo;
+            int          i;
+            eh = scene_add(&cs, 0, m0, v3(5.0f, 2.0f, -3.0f), q_identity(),
+                           v3(1, 1, 1));
+            scene_component_add(&cs, eh, "emit", NULL, 0);   /* bare = dust */
+            components_update(&cs, 3.0f, 0.5f);              /* no pool yet */
+            eo = scene_get(&cs, eh);
+            if (eo->overlay_pos.x != 0.0f || eo->overlay_pos.y != 0.0f ||
+                eo->overlay_rot.w != 1.0f || eo->overlay_glow != 1.0f) {
+                printf("FAIL: emit must write NOTHING on its object\n");
+                return 1;
+            }
+
+            /* inject the pool: default rate 40 x dt 0.5 = 20 spawns, exactly
+               (the fractional accumulator), and 20 more next frame */
+            particles_init(&tp);
+            component_set_particle_pool(&tp);
+            components_update(&cs, 3.0f, 0.5f);
+            if (tp.live != 20) {
+                printf("FAIL: rate 40 x dt 0.5 must spawn 20 (got %d)\n", tp.live);
+                return 1;
+            }
+            components_update(&cs, 3.5f, 0.5f);
+            if (tp.live != 40) {
+                printf("FAIL: the accumulator must carry across frames\n");
+                return 1;
+            }
+
+            /* every newborn is baked from the defaults: inside the position
+               spread box around the object's WORLD pos, life jittered within
+               [0.75, 1.25] x 5s, colors copied exactly */
+            for (i = 0; i < tp.live; i++) {
+                const Particle *q = &tp.items[i];
+                if (fabsf(q->pos.x - 5.0f) > 1.001f ||
+                    fabsf(q->pos.y - 2.0f) > 0.801f ||
+                    fabsf(q->pos.z + 3.0f) > 1.001f) {
+                    printf("FAIL: a newborn left the position spread box\n");
+                    return 1;
+                }
+                if (q->life < 0.75f * 5.0f - 0.01f || q->life > 1.25f * 5.0f + 0.01f) {
+                    printf("FAIL: life jitter out of range (%f)\n", q->life);
+                    return 1;
+                }
+                if (q->col0.w != 0.35f || q->col1.w != 0.10f) {
+                    printf("FAIL: color endpoints must copy from the schema\n");
+                    return 1;
+                }
+            }
+            component_set_particle_pool((ParticlePool *)0);
+            printf("emit: no-op without a pool, exact accumulator, baked newborns: ok\n");
+        }
+
         /* the schema is queryable (the io layer's door, piece 2) */
         if (component_schema("spin", (const char *const **)0, (const float **)0) != 4 ||
+            component_schema("emit", (const char *const **)0, (const float **)0) != 24 ||
             component_schema("nope", (const char *const **)0, (const float **)0) != -1) {
             printf("FAIL: component_schema counts\n");
             return 1;
