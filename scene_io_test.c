@@ -946,6 +946,7 @@ int main(void) {
         /* the schema is queryable (the io layer's door, piece 2) */
         if (component_schema("spin", (const char *const **)0, (const float **)0) != 4 ||
             component_schema("emit", (const char *const **)0, (const float **)0) != 24 ||
+            component_schema("animate", (const char *const **)0, (const float **)0) != 2 ||
             component_schema("nope", (const char *const **)0, (const float **)0) != -1) {
             printf("FAIL: component_schema counts\n");
             return 1;

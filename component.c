@@ -121,6 +121,19 @@ static void comp_emit(Scene *s, SceneObject *o, const float *p,
     }
 }
 
+/* animate (item 9): which clip a skinned model plays, and how fast. The
+   update fn is a NO-OP — the RENDERER is this component's consumer (the
+   pose is computed at draw time from absolute t x speed, view state per
+   §1.6; nothing here could usefully run earlier). The component exists so
+   the choice is DATA: round-trips in the file, editable in a text editor,
+   removable (absent = the rest pose — the file IS the behavior, item 6's
+   acceptance). Clip is an INDEX in v1: params are floats; names wait for
+   string params. */
+static void comp_animate(Scene *s, SceneObject *o, const float *p,
+                         void *st, float t, float dt) {
+    (void)s; (void)o; (void)p; (void)st; (void)t; (void)dt;
+}
+
 /* THE single source of truth for what each component type means — the
    third registry (P3's mesh emitters, P4i4's assets, now behavior). New
    behaviors are one entry + one function. */
@@ -138,7 +151,9 @@ static const ComponentDef C_REGISTRY[] = {
                   { 40.0f, 5.0f,  0.0f, 0.03f, 0.0f,  0.04f, 0.02f, 0.04f,
                     1.0f, 0.8f, 1.0f,  0.015f, 0.015f,
                     1.0f, 0.97f, 0.90f, 0.35f,  1.0f, 0.97f, 0.90f, 0.10f,
-                    0.0f, 0.0f, 0.0f }, sizeof(EmitState), comp_emit }
+                    0.0f, 0.0f, 0.0f }, sizeof(EmitState), comp_emit },
+    { "animate", 2, { "clip", "speed" },
+                 { 0.0f, 1.0f }, 0, comp_animate }
 };
 #define C_COUNT ((int)(sizeof C_REGISTRY / sizeof C_REGISTRY[0]))
 

@@ -1429,6 +1429,28 @@ static SkinnedModel *skinned_get(const char *path) {
     return (SkinnedModel *)0;
 }
 
+/* the animate component's effective (clip, speed) for an object — the
+   renderer is its consumer; absent component = the rest pose (clip -1).
+   The prefix+defaults merge, the standing rule. */
+static void skin_anim_of(const SceneObject *o, int *clip, float *speed) {
+    sol_u32 c;
+    *clip  = -1;
+    *speed = 1.0f;
+    for (c = 0; c < o->comp_count; c++) {
+        const Component *cp = &o->components[c];
+        const float     *def;
+        float            eff[2];
+        int              n, k;
+        if (strcmp(cp->type, "animate") != 0) continue;
+        n = component_schema("animate", (const char *const **)0, &def);
+        for (k = 0; k < n && k < 2; k++)
+            eff[k] = k < cp->param_count ? cp->params[k] : def[k];
+        *clip  = (int)eff[0];
+        *speed = eff[1];
+        return;
+    }
+}
+
 /* one pose at absolute t -> the palette (deterministic; looping) */
 static void skinned_palette_at(const SkinnedModel *sm, int clip, float t,
                                mat4 *pal) {
@@ -3573,6 +3595,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                           vec3_make(0.007f, 0.007f, 0.007f));
             scene_meta_set(&st->scene, h, "name", "fox");
             scene_meta_set(&st->scene, h, "skin_glb", "Fox.glb");
+            scene_component_add(&st->scene, h, "animate", (const float *)0, 0);
+                                       /* bare = clip 0 speed 1; edit the
+                                          line in the file + L to switch */
             st->selected_handle = h;
             scene_save(&st->scene, "scene.stml");
             printf("a fox arrives — it is surveying the situation\n");
@@ -4969,10 +4994,13 @@ static void render(AppState *state) {
                                             o->handle, "skin_glb");
                 SkinnedModel      *sm;
                 mat4               model, pal[SKEL_MAX_JOINTS];
+                int                clip;
+                float              speed;
                 if (!sg) continue;
                 sm = skinned_get(sg);
                 if (!sm) continue;
-                skinned_palette_at(sm, 0, (float)glfwGetTime(), pal);
+                skin_anim_of(o, &clip, &speed);
+                skinned_palette_at(sm, clip, (float)glfwGetTime() * speed, pal);
                 rhi_set_pipeline(state->skinned_shadow_pipeline);
                 rhi_set_uniform_mat4("uLightVP", lvp.m);
                 model = scene_world_matrix(&state->scene, o);
@@ -5090,9 +5118,10 @@ static void render(AppState *state) {
     }
     state->terrain_blend = SOL_FALSE;              /* the reader rig is not land */
 
-    /* skinned models (item 9): objects wearing skin_glb meta. Drawn at the
-       ANIMATED pose — clip 0 at absolute time for now (piece 3 brings the
-       animate component) — with the object's own transform on top. */
+    /* skinned models (item 9): objects wearing skin_glb meta, drawn at the
+       ANIMATED pose — the animate component picks clip and speed, absolute
+       t x speed keeps it deterministic, absent component = the rest pose
+       (the file IS the behavior). */
     if (state->skinned_pipeline.id) {
         sol_u32 sk;
         for (sk = 0; sk < state->scene.count; sk++) {
@@ -5101,12 +5130,16 @@ static void render(AppState *state) {
                                               "skin_glb");
             SkinnedModel *sm;
             mat4          model;
+            int           clip;
+            float         speed;
             if (!sg) continue;
             sm = skinned_get(sg);
             if (!sm) continue;
+            skin_anim_of(o, &clip, &speed);
             model = scene_world_matrix(&state->scene, o);
-            draw_skinned(state, sm, 0, (float)glfwGetTime(), model, view,
-                         proj, eye, o->handle == sel_root ? 1.0f : 0.0f);
+            draw_skinned(state, sm, clip, (float)glfwGetTime() * speed,
+                         model, view, proj, eye,
+                         o->handle == sel_root ? 1.0f : 0.0f);
             state->draws_done++;
         }
     }

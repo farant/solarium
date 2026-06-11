@@ -174,6 +174,15 @@ imports.
   through the ordinary meta round-trip, so lamps needed zero new format
   machinery. The radius is the falloff window's edge (an optimization
   boundary, not physics; inside it the falloff is true inverse-square).
+  Since P4 item 8 the same metas also give the lamp its VOICE: the
+  nearest flames hold crackle loops whose gain rides the identical
+  falloff and the identical flicker — one flame, three senses.
+- `skin_glb` (a path, e.g. `"Fox.glb"`) — the object is a RIGGED model
+  (P4 item 9): the file's skinned mesh draws at this object's transform,
+  posed by its skeleton every frame. The object itself stays an empty
+  anchor (the mesh is never baked into the scene — geometry by reference,
+  the standing rule); pair with `<component type="animate"/>` to choose
+  the clip. Models load once per session, keyed by path.
 
 - **`<scene version>`** — format version, for future migration.
 - **`<object>`** — `nid` (required, persistent ID), `parent` (a `nid`; absent or
@@ -203,6 +212,12 @@ imports.
     `r0 g0 b0 a0 r1 g1 b1 a1` (color endpoints; rgb may exceed 1 — HDR
     feeds bloom) `ax ay az` (acceleration). The defaults are dust: a bare
     `<component type="emit"/>` fills the air with drifting motes.
+  - `animate` (P4 item 9) picks which clip a skinned model plays and how
+    fast: `clip speed` (defaults 0, 1). Clip is an INDEX into the rigged
+    glb's animations (names wait for string params). The pose itself is
+    view state, sampled from absolute time — the file records the choice
+    of dance, never a frame of it; absent component = the rest pose.
+    Pairs with the `skin_glb` meta (below).
 - **Overbuilt slots** (`<meta>`, `<rel>`, `<content>`) — present in the model and
   serialized though mostly empty this phase; they cannot be retrofitted onto a
   render-only scene (TODO2.md §1.4/§1.5).
