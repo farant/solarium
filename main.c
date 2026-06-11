@@ -77,6 +77,9 @@ static const char *FRAGMENT_SRC =
     "uniform float uUseNormalTex;\n"
     "uniform float uNormalScale;\n"
     "uniform vec3  uBaseColor;\n"                            /* baseColorFactor (linear) */
+    "uniform float uTerrainBlend;\n"   /* item 10: 1 = slope/height palette */
+    "uniform float uTerrainY0;\n"      /* the plot's world base height */
+    "uniform float uTerrainAmp;\n"     /* its relief, for height normalization */
     "uniform float uMetallic;\n"
     "uniform float uRoughness;\n"
     "uniform vec3  uLightPos;\n"                             /* spot light: position (item 9a) */
@@ -144,6 +147,20 @@ static const char *FRAGMENT_SRC =
     "    roughness = max(roughness, 0.04);\n"                 /* clamp AFTER compositing */
     "\n"
     "    vec3 N = normalize(vNormal);\n"                       /* renormalize after interp */
+    /* item 10: terrain wears a slope/height palette instead of a flat
+       base color — moss where flat and low, stone as it steepens, pale
+       crag up high. Both inputs are already here (the world normal and
+       the fragment height); this is the "looks right with no hand-
+       painting" win in procedural-palette form. */
+    "    if (uTerrainBlend > 0.5) {\n"
+    "        float slope = clamp(1.0 - N.y, 0.0, 1.0);\n"
+    "        float relh  = clamp((vWorldPos.y - uTerrainY0) / max(uTerrainAmp, 0.001), 0.0, 1.0);\n"
+    "        vec3 moss = vec3(0.30, 0.42, 0.22);\n"
+    "        vec3 rock = vec3(0.46, 0.44, 0.40);\n"
+    "        vec3 crag = vec3(0.64, 0.62, 0.56);\n"
+    "        albedo = mix(moss, rock, smoothstep(0.15, 0.45, slope));\n"
+    "        albedo = mix(albedo, crag, smoothstep(0.55, 0.95, relh));\n"
+    "    }\n"
     "    if (uUseNormalTex > 0.5) {\n"
     "        vec3 T = normalize(vTangent.xyz - dot(vTangent.xyz, N) * N);\n"  /* re-orthogonalize vs N */
     "        vec3 B = cross(N, T) * vTangent.w;\n"             /* bitangent (handedness) */
@@ -629,6 +646,12 @@ typedef struct {
     int         reader_turn_old;   /* the spread we are turning AWAY from */
     Mesh        reader_leaf;       /* rebuilt per frame (curl = vertex map) */
     LeafShape   reader_leaf_shape; /* this frame's section: mesh + ink share it */
+    /* terrain shading (item 10): set per draw by the scene loop, read by
+       draw_mesh — the plot wears the slope/height palette */
+    sol_bool    terrain_blend;
+    float       terrain_y0, terrain_amp;
+    sol_u32     current_terrain;   /* plot underfoot; 0 = none (HUD naming) */
+    sol_bool    h_was_down;        /* edge-detect mint-island (H) */
 } AppState;
 
 #define READER_IDLE      0
@@ -1222,10 +1245,10 @@ static float mint_range(float lo, float hi) {
    placed/rotated plots; the camera's walk settle targets this + eye
    height, so the doorway-threshold glide becomes hill-climbing and
    rim-stepping for free. */
-static float ground_under(AppState *st, vec3 p) {
+static float ground_under(AppState *st, vec3 p, sol_u32 *out_plot) {
     Scene  *s = &st->scene;
     float   best = 0.0f;
-    sol_u32 i;
+    sol_u32 i, best_plot = 0;
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         float w, d, h, gy;
@@ -1241,8 +1264,12 @@ static float ground_under(AppState *st, vec3 p) {
                             local.x, local.z);
         gy = mat4_mul_point(scene_world_matrix(s, o),
                             vec3_make(local.x, h, local.z)).y;
-        if (gy <= p.y + 0.6f && gy > best) best = gy;
+        if (gy <= p.y + 0.6f && gy > best) {
+            best      = gy;
+            best_plot = o->handle;
+        }
     }
+    if (out_plot) *out_plot = best_plot;
     return best;
 }
 
@@ -2226,6 +2253,61 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->v_was_down = v_now;
     }
 
+    /* H mints a terrain ISLAND ahead of you, at your floor level (item 10):
+       press it while flying and the island FLOATS there — vertical
+       placement for free. room_type meta makes it LAND (architecture is
+       never draggable); the seed makes it THIS island forever. */
+    {
+        sol_bool h_now = glfwGetKey(w, GLFW_KEY_H) == GLFW_PRESS;
+        if (h_now && !st->h_was_down) {
+            static const char *isle[] = { "the heath", "the tor", "the fell",
+                                          "the moor", "the downs", "the crag" };
+            Mesh    empty;
+            vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+            float   p[5];
+            vec3    f, pos;
+            sol_u32 h;
+            int     ni;
+            if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
+            p[0] = mint_range(24.0f, 44.0f);             /* w */
+            p[1] = mint_range(24.0f, 44.0f);             /* d */
+            p[2] = 56.0f;                                /* sub */
+            p[3] = mint_range(1.5f, 3.5f);               /* relief */
+            p[4] = (float)(int)mint_range(1.0f, 9999.0f);/* the identity */
+            ni   = (int)mint_range(0.0f, 5.99f);
+            f = camera_forward(&st->camera);
+            f.y = 0.0f;
+            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+            f   = vec3_normalize(f);
+            pos = vec3_add(st->camera.pos, vec3_scale(f, p[0] * 0.5f + 6.0f));
+            pos.y = st->camera.pos.y - CAMERA_EYE_HEIGHT;  /* your floor level */
+            if (pos.y < 0.05f) pos.y = 0.0f;               /* grounded: exactly */
+            memset(&empty, 0, sizeof empty);
+            h = scene_add(&st->scene, 0, empty, pos, quat_identity(), one);
+            scene_mesh_ref_set(&st->scene, h, "terrain");
+            scene_mesh_params_set(&st->scene, h, p, 5);
+            scene_meta_set(&st->scene, h, "name", isle[ni]);
+            scene_meta_set(&st->scene, h, "room_type", "terrain");
+            {
+                SceneObject *to = scene_get(&st->scene, h);
+                if (to) {
+                    Material m = material_default();
+                    m.base_color = vec3_make(0.35f, 0.40f, 0.28f);  /* the shader
+                                                       palette overrides this */
+                    m.roughness  = 0.95f;
+                    to->material = m;
+                }
+            }
+            scene_resolve_meshes(&st->scene);
+            st->selected_handle = h;
+            scene_save(&st->scene, "scene.stml");
+            printf("%s rises: %.0fx%.0fm, relief %.1fm, seed %d%s\n",
+                   isle[ni], (double)p[0], (double)p[1], (double)p[3],
+                   (int)p[4], pos.y > 0.05f ? " (floating)" : "");
+        }
+        st->h_was_down = h_now;
+    }
+
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
        decision): the system never throws away the marker for you. Item 8
        extends it to ARROWS: deleting the edge object deletes the relation. */
@@ -3059,6 +3141,9 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     rhi_set_uniform_mat3("uNormalMatrix", nrm.m);
     rhi_set_uniform_vec3("uViewPos",      eye.x, eye.y, eye.z);
     rhi_set_uniform_float("uHighlight",   highlight);
+    rhi_set_uniform_float("uTerrainBlend", state->terrain_blend ? 1.0f : 0.0f);
+    rhi_set_uniform_float("uTerrainY0",    state->terrain_y0);
+    rhi_set_uniform_float("uTerrainAmp",   state->terrain_amp);
 
     /* spot light (item 9a): constant per-frame, set per-mesh like uViewPos.
        dir + cone cosines computed CPU-side from the AppState light fields. */
@@ -3223,8 +3308,17 @@ static void render(AppState *state) {
         model = scene_world_matrix(&state->scene, o);
         hl    = (sel_root != 0 && selection_root(&state->scene, o->handle) == sel_root)
               ? 1.0f : 0.0f;                       /* light the whole selected group */
+        state->terrain_blend = (o->mesh_ref &&
+                                strcmp(o->mesh_ref, "terrain") == 0)
+                                   ? SOL_TRUE : SOL_FALSE;
+        if (state->terrain_blend) {
+            state->terrain_y0  = model.m[13];      /* the plot's world base */
+            state->terrain_amp = mesh_ref_param("terrain", o->mesh_params,
+                                                o->mesh_param_count, "amp");
+        }
         draw_mesh(state, o->mesh, model, view, proj, eye, hl, o->material);
     }
+    state->terrain_blend = SOL_FALSE;              /* the reader rig is not land */
 
     /* the reader's open book (item 9): view-state geometry, drawn at the
        animated pose — never part of the scene graph */
@@ -3457,8 +3551,14 @@ static void render(AppState *state) {
             {
                 const char *rn = state->current_room
                     ? scene_meta_get(&state->scene, state->current_room, "name") : (const char *)0;
-                sprintf(line, "room %s", rn ? rn
-                        : (state->current_room ? "(unnamed)" : "outside"));
+                if (!rn && !state->current_room && state->current_terrain)
+                    rn = scene_meta_get(&state->scene, state->current_terrain,
+                                        "name");           /* "on the heath" */
+                sprintf(line, "%s %s",
+                        (!state->current_room && state->current_terrain) ? "on" : "room",
+                        rn ? rn
+                           : ((state->current_room || state->current_terrain)
+                                  ? "(unnamed)" : "outside"));
                 ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.80f, 0.85f, 1.0f, 0.85f);
                 mb += font_line_height(state->mono_font) * ms;
             }
@@ -3848,7 +3948,8 @@ int main(void) {
         glfwGetFramebufferSize(window, &state.fb_width, &state.fb_height);
 
         read_input(window, &in, dt, &state);          /* poll GLFW -> CameraInput */
-        state.camera.ground_y = ground_under(&state, state.camera.pos);
+        state.camera.ground_y = ground_under(&state, state.camera.pos,
+                                             &state.current_terrain);
         camera_update(&state.camera, &in, (float)dt);
         update(&state, dt);                           /* animate the scene */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */
