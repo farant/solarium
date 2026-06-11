@@ -228,6 +228,46 @@ mat4 quat_to_mat4(quat q) {
     return r;
 }
 
+/* The reverse trip: extract the rotation from an orthonormal-upper-3x3
+   matrix. Shepperd's method: the four quaternion components can each be
+   derived from the diagonal, and you DIVIDE by whichever is largest —
+   picking the branch keeps every division well away from zero (the naive
+   trace-only formula explodes near 180-degree rotations). Column-major:
+   element (row, col) = m[col*4 + row]. */
+quat quat_from_mat4(mat4 m) {
+    float r00 = m.m[0], r10 = m.m[1], r20 = m.m[2];
+    float r01 = m.m[4], r11 = m.m[5], r21 = m.m[6];
+    float r02 = m.m[8], r12 = m.m[9], r22 = m.m[10];
+    float trace = r00 + r11 + r22;
+    quat  q;
+    if (trace > 0.0f) {
+        float s = sqrtf(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (r21 - r12) / s;
+        q.y = (r02 - r20) / s;
+        q.z = (r10 - r01) / s;
+    } else if (r00 > r11 && r00 > r22) {
+        float s = sqrtf(1.0f + r00 - r11 - r22) * 2.0f;
+        q.x = 0.25f * s;
+        q.w = (r21 - r12) / s;
+        q.y = (r01 + r10) / s;
+        q.z = (r02 + r20) / s;
+    } else if (r11 > r22) {
+        float s = sqrtf(1.0f + r11 - r00 - r22) * 2.0f;
+        q.y = 0.25f * s;
+        q.w = (r02 - r20) / s;
+        q.x = (r01 + r10) / s;
+        q.z = (r12 + r21) / s;
+    } else {
+        float s = sqrtf(1.0f + r22 - r00 - r11) * 2.0f;
+        q.z = 0.25f * s;
+        q.w = (r10 - r01) / s;
+        q.x = (r02 + r20) / s;
+        q.y = (r12 + r21) / s;
+    }
+    return quat_normalize(q);
+}
+
 /* compose a TRS transform into a model matrix: M = T * R * S
    (applied to a vertex, right-to-left: scale, then rotate, then translate) */
 mat4 mat4_from_trs(vec3 pos, quat rot, vec3 scale) {

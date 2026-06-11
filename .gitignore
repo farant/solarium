@@ -12,6 +12,7 @@
 /particles_test
 /synth_test
 /mixer_test
+/skel_test
 *.wav
 /scene.stml
 /scene_io_test.stml

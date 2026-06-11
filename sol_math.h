@@ -46,6 +46,12 @@ quat  quat_conjugate(quat q);     /* the inverse rotation (for unit quaternions)
 quat  quat_normalize(quat q);
 vec3  quat_rotate(quat q, vec3 v);   /* rotate v by unit quaternion q */
 mat4  quat_to_mat4(quat q);
+quat  quat_from_mat4(mat4 m);  /* the rotation in a mat4 whose upper 3x3 is
+                                  ORTHONORMAL (normalize columns first to
+                                  shed scale) — Shepperd's branching method.
+                                  The item-6d deferral (matrix -> TRS
+                                  decomposition) cashed for item 9's
+                                  matrix-form joints. */
 
 /* compose a TRS transform: M = T * R * S (vertex order: scale, rotate, translate) */
 mat4  mat4_from_trs(vec3 pos, quat rot, vec3 scale);

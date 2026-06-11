@@ -13,7 +13,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c json.c glb.c
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c skel.c json.c glb.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     exit 0
 fi
@@ -126,6 +126,20 @@ if [ "$MODE" = "synthtest" ]; then
     exit 0
 fi
 
+# Build + run the headless skeletal-animation test under the sanitizers.
+# Links glb.c for the skin/clip parsing; the two GPU seams glb.c references
+# (texture create, mesh upload) are stubbed inside the test — skeleton
+# loading never executes them.
+if [ "$MODE" = "skeltest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        skel.c glb.c json.c image.c mesh.c sol_math.c skel_test.c \
+        -o skel_test
+    echo "built ./skel_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
 # Build + run the headless mixer test under the sanitizers. The SAME pure
 # core the real-time callback calls, asserted on output samples.
 if [ "$MODE" = "mixtest" ]; then
@@ -156,7 +170,7 @@ if [ "$MODE" = "asan" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c platform_audio.c image.c font.c platform_fs.c json.c glb.c \
+        main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit -framework AudioToolbox \
         -o solarium-asan
@@ -171,7 +185,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c platform_audio.c image.c font.c platform_fs.c json.c glb.c \
+    main.c rhi_gl.c mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit -framework AudioToolbox \
     -o solarium
