@@ -23,6 +23,14 @@
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
 
+/* one island's grass (P4 item 3): a static instance buffer + the island it
+   grows on — drawn only when the island itself survives the frustum */
+typedef struct {
+    RhiBuffer data;
+    int       count;
+    sol_u32   island;
+} MeadowPatch;
+
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
 
@@ -220,26 +228,41 @@ static const char *FRAGMENT_SRC =
 /* --- the fullscreen tonemap/encode pass (item 7b): samples the HDR buffer and
    writes the display image to the window. The vertex shader synthesizes one
    screen-covering triangle from gl_VertexID, so it needs no vertex buffer. --- */
-/* --- instanced shader (P4 item 3): stream 0 = the shape, stream 1 = where/
-   how-big/what-tint each copy is. No per-instance uniforms anywhere — the
-   population is DATA. (Smoke-test version; the meadow refines it in p2.) */
-static const char *INST_VERTEX_SRC =
+/* --- the meadow shader (P4 item 3): stream 0 = one tuft (crossed tapered
+   quads, y in [0,1]), stream 1 = where / how-tall / what-green each copy
+   is. No per-instance uniforms anywhere — the population is DATA. Yaw comes
+   FREE from gl_InstanceID (golden-angle steps decorrelate neighbors:
+   variation costing zero per-instance bytes); the tips sway on uTime, roots
+   pinned; the root-to-tip gradient fakes the occlusion real lighting would
+   give — honest v1, the meadow meets real lights in item 5. */
+static const char *MEADOW_VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
     "layout (location = 1) in vec4 aInst;\n"       /* xyz = world pos, w = scale */
     "layout (location = 2) in vec4 aTint;\n"
     "uniform mat4 uView;\n"
     "uniform mat4 uProj;\n"
-    "out vec4 vTint;\n"
+    "uniform float uTime;\n"
+    "out vec3  vTint;\n"
+    "out float vRoot;\n"
     "void main() {\n"
-    "    vTint = aTint;\n"
-    "    gl_Position = uProj * uView * vec4(aPos * aInst.w + aInst.xyz, 1.0);\n"
+    "    float a = float(gl_InstanceID) * 2.39996;\n"   /* the golden angle */
+    "    float c = cos(a), s = sin(a);\n"
+    "    vec3 p = vec3(c*aPos.x + s*aPos.z, aPos.y, -s*aPos.x + c*aPos.z) * aInst.w;\n"
+    "    p.x += sin(uTime * 1.4 + a * 5.0) * 0.10 * aPos.y * aInst.w;\n"
+    "    p.z += cos(uTime * 1.1 + a * 3.0) * 0.06 * aPos.y * aInst.w;\n"
+    "    vTint = aTint.rgb;\n"
+    "    vRoot = aPos.y;\n"
+    "    gl_Position = uProj * uView * vec4(aInst.xyz + p, 1.0);\n"
     "}\n";
-static const char *INST_FRAGMENT_SRC =
+static const char *MEADOW_FRAGMENT_SRC =
     "#version 330 core\n"
-    "in vec4 vTint;\n"
+    "in vec3  vTint;\n"
+    "in float vRoot;\n"
     "out vec4 FragColor;\n"
-    "void main() { FragColor = vec4(vTint.rgb, 1.0); }\n";
+    "void main() {\n"
+    "    FragColor = vec4(vTint * (0.35 + 0.65 * vRoot), 1.0);\n"
+    "}\n";
 
 static const char *POST_VERTEX_SRC =
     "#version 330 core\n"
@@ -606,10 +629,13 @@ typedef struct {
     int      bvh_count, bvh_cap;
     unsigned char *vis;          /* per-pass visibility, handle-indexed (piece 4) */
     sol_u32        vis_cap;
-    /* instancing smoke test (P4 item 3 piece 1): the helix — one draw, 400
-       quads; replaced by the island meadow in piece 2 */
-    RhiPipeline inst_pipeline;
-    RhiBuffer   inst_vbuf, inst_ibuf, inst_data;
+    /* the meadow (P4 item 3): per-island instanced grass — DERIVED data
+       (the arrows pattern at landscape scale), rebuilt on load and mint,
+       never serialized */
+    RhiPipeline meadow_pipeline;
+    RhiBuffer   meadow_vbuf, meadow_ibuf;   /* the one shared tuft */
+    MeadowPatch meadow[32];
+    int         meadow_count;
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
@@ -996,6 +1022,95 @@ static void bvh_refresh(AppState *st) {
         bvh_build(&st->bvh, st->bvh_boxes, st->bvh_ids, n);
         st->bvh_count = n;
     }
+}
+
+/* The meadow (P4 item 3 piece 2): every terrain island grows its grass.
+   DERIVED data, the arrows pattern at landscape scale: from the island's
+   SEED (its identity) a deterministic LCG scatters tufts; each sits at
+   terrain_height — the one source of truth, the same function that built
+   the hills and stands you on them — and the shader palette's own
+   slope/height rules decide where grass grows at all (moss, not crag:
+   one author, now three consumers). World positions bake into one static
+   instance buffer per island: one draw per island per frame. Rebuilt on
+   load and on mint; never serialized. */
+#define MEADOW_MAX_TUFTS 12000
+#define MEADOW_PER_M2    6.0f
+
+static float meadow_rnd(sol_u32 *rng) {
+    *rng = *rng * 1664525u + 1013904223u;
+    return (float)((*rng >> 8) & 0xFFFFu) / 65535.0f;
+}
+
+static void meadow_rebuild(AppState *st) {
+    sol_u32 i;
+    int     p, total = 0;
+    for (p = 0; p < st->meadow_count; p++)
+        rhi_destroy_buffer(st->meadow[p].data);
+    st->meadow_count = 0;
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        float   w, d, amp;
+        sol_u32 rng;
+        mat4    world;
+        float  *buf;
+        int     target, placed, k;
+        if (st->meadow_count >= (int)(sizeof st->meadow / sizeof st->meadow[0]))
+            break;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "terrain") != 0) continue;
+        w   = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "w");
+        d   = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "d");
+        amp = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "amp");
+        rng = (sol_u32)mesh_ref_param("terrain", o->mesh_params,
+                                      o->mesh_param_count, "seed")
+                  * 2654435761u + 1u;
+        world  = scene_world_matrix(&st->scene, o);
+        target = (int)(w * d * MEADOW_PER_M2);
+        if (target > MEADOW_MAX_TUFTS) target = MEADOW_MAX_TUFTS;
+        buf = (float *)malloc((size_t)target * 8 * sizeof(float));
+        if (buf == NULL) continue;
+        placed = 0;
+        for (k = 0; k < target; k++) {
+            float lx, lz, h, sx, sz, slope, r1, r2, r3;
+            vec3  wp;
+            lx = (meadow_rnd(&rng) - 0.5f) * (w - 1.5f);
+            lz = (meadow_rnd(&rng) - 0.5f) * (d - 1.5f);
+            h  = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz);
+            /* the palette's rules, replayed: full stone by slope 0.45,
+               crag country above ~0.78 of the relief — no grass there */
+            sx = terrain_height(o->mesh_params, o->mesh_param_count,
+                                lx + 0.5f, lz);
+            sz = terrain_height(o->mesh_params, o->mesh_param_count,
+                                lx, lz + 0.5f);
+            slope = sqrtf((sx - h) * (sx - h) + (sz - h) * (sz - h)) * 2.0f;
+            if (slope > 0.45f) continue;
+            if (amp > 0.0f && h / amp > 0.78f) continue;
+            wp = mat4_mul_point(world, vec3_make(lx, h, lz));
+            r1 = meadow_rnd(&rng);
+            r2 = meadow_rnd(&rng);
+            r3 = meadow_rnd(&rng);
+            buf[placed * 8 + 0] = wp.x;
+            buf[placed * 8 + 1] = wp.y;
+            buf[placed * 8 + 2] = wp.z;
+            buf[placed * 8 + 3] = 0.16f + 0.20f * r1;       /* tuft size, m */
+            buf[placed * 8 + 4] = 0.10f + 0.10f * r2;       /* moss-family greens */
+            buf[placed * 8 + 5] = 0.22f + 0.16f * r3;
+            buf[placed * 8 + 6] = 0.05f + 0.06f * r2;
+            buf[placed * 8 + 7] = 1.0f;
+            placed++;
+        }
+        if (placed > 0) {
+            MeadowPatch *mp = &st->meadow[st->meadow_count];
+            mp->data   = rhi_create_buffer(RHI_BUFFER_VERTEX, buf,
+                             (size_t)placed * 8 * sizeof(float));
+            mp->count  = placed;
+            mp->island = o->handle;
+            st->meadow_count++;
+            total += placed;
+        }
+        free(buf);
+    }
+    if (st->meadow_count > 0)
+        printf("the meadow: %d island(s), %d tufts\n", st->meadow_count, total);
 }
 
 /* the leaf visit for picking: app policy first, then the shared narrow
@@ -2441,6 +2556,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 }
             }
             scene_resolve_meshes(&st->scene);
+            meadow_rebuild(st);                  /* a new island, new grass */
             st->selected_handle = h;
             scene_save(&st->scene, "scene.stml");
             printf("%s rises: %.0fx%.0fm, relief %.1fm, seed %d%s\n",
@@ -2781,6 +2897,7 @@ static sol_bool load_palace(AppState *st) {
     scene_resolve_meshes(&st->scene);
     arrows_rebuild(st);              /* edges re-derive from the loaded cards */
     collide_rebuild(&st->colliders, &st->scene);  /* and so do the walls */
+    meadow_rebuild(st);                           /* and the grass */
     apply_kind_materials(&st->scene);
     bind_runtime_handles(st);
     {
@@ -3147,51 +3264,36 @@ static int init_scene(AppState *state) {
         state->brdf_lut_pipeline = rhi_create_pipeline(&brdf_desc);
     }
 
-    /* instancing smoke test (P4 item 3 piece 1): one unit quad + 400
-       per-instance records (pos+scale, tint) in a helix — proves the
-       step-rate path end to end: two streams in one pipeline, divisor 1
-       on stream 1, one instanced draw. Piece 2 replaces it with the
-       island meadow. */
+    /* the meadow's machinery (P4 item 3 piece 2): ONE crossed-tapered-quad
+       tuft (stream 0) shared by every island; the per-island instance
+       buffers come from meadow_rebuild after the palace loads */
     {
-        static const float QUAD[12] = {
-            -0.5f, -0.5f, 0.0f,    0.5f, -0.5f, 0.0f,
-             0.5f,  0.5f, 0.0f,   -0.5f,  0.5f, 0.0f
+        static const float TUFT[24] = {
+            -0.35f, 0.0f, 0.0f,    0.35f, 0.0f, 0.0f,    /* quad in XY, tapered */
+             0.14f, 1.0f, 0.0f,   -0.14f, 1.0f, 0.0f,
+             0.0f, 0.0f, -0.35f,   0.0f, 0.0f, 0.35f,    /* crossed quad in ZY */
+             0.0f, 1.0f,  0.14f,   0.0f, 1.0f, -0.14f
         };
-        static const sol_u32 QIDX[6] = { 0, 1, 2, 0, 2, 3 };
-        static float inst[400 * 8];
-        int          k;
-        RhiShader       ish;
-        RhiPipelineDesc idesc = {0};
-        for (k = 0; k < 400; k++) {
-            float t   = (float)k / 400.0f;
-            float ang = t * 25.13274f;             /* four full turns */
-            inst[k*8+0] = 1.2f * cosf(ang);
-            inst[k*8+1] = 0.4f + t * 2.4f;
-            inst[k*8+2] = 1.2f * sinf(ang);
-            inst[k*8+3] = 0.07f;                   /* 7cm quads */
-            inst[k*8+4] = 0.2f + 0.8f * t;         /* tint walks the helix */
-            inst[k*8+5] = 0.3f + 0.6f * (1.0f - t);
-            inst[k*8+6] = 0.55f;
-            inst[k*8+7] = 1.0f;
-        }
-        ish = rhi_create_shader(INST_VERTEX_SRC, INST_FRAGMENT_SRC);
-        if (ish.id) {
-            idesc.shader = ish;
-            idesc.attr_count = 3;
-            idesc.attrs[0].location = 0;  idesc.attrs[0].format = RHI_FORMAT_FLOAT3;
-            idesc.attrs[0].offset   = 0;  idesc.attrs[0].per_instance = 0;
-            idesc.attrs[1].location = 1;  idesc.attrs[1].format = RHI_FORMAT_FLOAT4;
-            idesc.attrs[1].offset   = 0;  idesc.attrs[1].per_instance = 1;
-            idesc.attrs[2].location = 2;  idesc.attrs[2].format = RHI_FORMAT_FLOAT4;
-            idesc.attrs[2].offset   = 16; idesc.attrs[2].per_instance = 1;
-            idesc.stride          = 3 * sizeof(float);
-            idesc.instance_stride = 8 * sizeof(float);
-            idesc.depth_test      = SOL_TRUE;
-            idesc.blend           = SOL_FALSE;
-            state->inst_pipeline = rhi_create_pipeline(&idesc);
-            state->inst_vbuf = rhi_create_buffer(RHI_BUFFER_VERTEX, QUAD, sizeof QUAD);
-            state->inst_ibuf = rhi_create_buffer(RHI_BUFFER_INDEX,  QIDX, sizeof QIDX);
-            state->inst_data = rhi_create_buffer(RHI_BUFFER_VERTEX, inst, sizeof inst);
+        static const sol_u32 TIDX[12] = { 0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7 };
+        RhiShader       msh;
+        RhiPipelineDesc mdesc = {0};
+        msh = rhi_create_shader(MEADOW_VERTEX_SRC, MEADOW_FRAGMENT_SRC);
+        if (msh.id) {
+            mdesc.shader = msh;
+            mdesc.attr_count = 3;
+            mdesc.attrs[0].location = 0;  mdesc.attrs[0].format = RHI_FORMAT_FLOAT3;
+            mdesc.attrs[0].offset   = 0;  mdesc.attrs[0].per_instance = 0;
+            mdesc.attrs[1].location = 1;  mdesc.attrs[1].format = RHI_FORMAT_FLOAT4;
+            mdesc.attrs[1].offset   = 0;  mdesc.attrs[1].per_instance = 1;
+            mdesc.attrs[2].location = 2;  mdesc.attrs[2].format = RHI_FORMAT_FLOAT4;
+            mdesc.attrs[2].offset   = 16; mdesc.attrs[2].per_instance = 1;
+            mdesc.stride          = 3 * sizeof(float);
+            mdesc.instance_stride = 8 * sizeof(float);
+            mdesc.depth_test      = SOL_TRUE;
+            mdesc.blend           = SOL_FALSE;
+            state->meadow_pipeline = rhi_create_pipeline(&mdesc);
+            state->meadow_vbuf = rhi_create_buffer(RHI_BUFFER_VERTEX, TUFT, sizeof TUFT);
+            state->meadow_ibuf = rhi_create_buffer(RHI_BUFFER_INDEX,  TIDX, sizeof TIDX);
         }
     }
 
@@ -3207,6 +3309,7 @@ static int init_scene(AppState *state) {
     } else {
         populate_default_scene(state);
         collide_rebuild(&state->colliders, &state->scene);
+        meadow_rebuild(state);
     }
 
     /* spawn standing at the south edge of the scene, facing -Z at eye height
@@ -3562,16 +3665,22 @@ static void render(AppState *state) {
     }
     state->terrain_blend = SOL_FALSE;              /* the reader rig is not land */
 
-    /* the instancing smoke test (P4 item 3 piece 1): 400 quads, ONE draw —
-       watch the HUD: draws holds steady while the helix floats in the hall */
-    if (state->inst_pipeline.id) {
-        rhi_set_pipeline(state->inst_pipeline);
+    /* the meadow (P4 item 3 piece 2): thousands of tufts, ONE draw per
+       island — and an island culled by the frustum takes its grass with it
+       (the patch rides the island's own visibility bit) */
+    if (state->meadow_pipeline.id && state->meadow_count > 0) {
+        int mp;
+        rhi_set_pipeline(state->meadow_pipeline);
         rhi_set_uniform_mat4("uView", view.m);
         rhi_set_uniform_mat4("uProj", proj.m);
-        rhi_bind_vertex_buffer(state->inst_vbuf);
-        rhi_bind_index_buffer(state->inst_ibuf);
-        rhi_bind_instance_buffer(state->inst_data);
-        rhi_draw_indexed_instanced(0, 6, 400);
+        rhi_set_uniform_float("uTime", (float)glfwGetTime());
+        rhi_bind_vertex_buffer(state->meadow_vbuf);
+        rhi_bind_index_buffer(state->meadow_ibuf);
+        for (mp = 0; mp < state->meadow_count; mp++) {
+            if (vis && !vis[state->meadow[mp].island]) continue;
+            rhi_bind_instance_buffer(state->meadow[mp].data);
+            rhi_draw_indexed_instanced(0, 12, state->meadow[mp].count);
+        }
     }
 
     /* the reader's open book (item 9): view-state geometry, drawn at the
