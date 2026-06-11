@@ -509,6 +509,41 @@ static const char *FRAGMENT_SRC =
    variation costing zero per-instance bytes); the tips sway on uTime, roots
    pinned; the root-to-tip gradient fakes the occlusion real lighting would
    give — honest v1, the meadow meets real lights in item 5. */
+#ifdef SOL_RHI_METAL
+static const char *MEADOW_VERTEX_SRC =        /* [[instance_id]] = gl_InstanceID;
+                                       the instance stream rides buffer(1),
+                                       stepped by the pipeline's layout */
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn {\n"
+    "    float3 pos  [[attribute(0)]];\n"
+    "    float4 inst [[attribute(1)]];\n"
+    "    float4 tint [[attribute(2)]];\n"
+    "};\n"
+    "struct VU { float4x4 uView; float4x4 uProj; float uTime; };\n"
+    "struct VOut { float4 pos [[position]]; float3 tint; float root; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], uint iid [[instance_id]],\n"
+    "                  constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float a = (float)iid * 2.39996;\n"
+    "    float c = cos(a), s = sin(a);\n"
+    "    float3 p = float3(c*v.pos.x + s*v.pos.z, v.pos.y, -s*v.pos.x + c*v.pos.z) * v.inst.w;\n"
+    "    p.x += sin(u.uTime * 1.4 + a * 5.0) * 0.10 * v.pos.y * v.inst.w;\n"
+    "    p.z += cos(u.uTime * 1.1 + a * 3.0) * 0.06 * v.pos.y * v.inst.w;\n"
+    "    o.tint = v.tint.rgb;\n"
+    "    o.root = v.pos.y;\n"
+    "    o.pos = u.uProj * (u.uView * float4(v.inst.xyz + p, 1.0));\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
+    "    return o;\n"
+    "}\n";
+static const char *MEADOW_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float3 tint; float root; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]]) {\n"
+    "    return float4(v.tint * (0.35 + 0.65 * v.root), 1.0);\n"
+    "}\n";
+#else /* GLSL */
 static const char *MEADOW_VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
@@ -537,6 +572,7 @@ static const char *MEADOW_FRAGMENT_SRC =
     "void main() {\n"
     "    FragColor = vec4(vTint * (0.35 + 0.65 * vRoot), 1.0);\n"
     "}\n";
+#endif /* SOL_RHI_METAL — the meadow */
 
 /* --- the particle shader (P4 item 7): BILLBOARDS — one shared unit quad,
    expanded in the vertex shader along the camera's own right/up so every
@@ -547,6 +583,41 @@ static const char *MEADOW_FRAGMENT_SRC =
    parabola climbs again) — no texture, no sampler. Additive output
    premultiplies rgb by alpha*falloff; the written alpha is never read
    (GL_ONE/GL_ONE). Drawn in the HDR pass: rgb > 1 sails into bloom. */
+#ifdef SOL_RHI_METAL
+static const char *PARTICLE_VERTEX_SRC =      /* the camera's basis still sits
+                                       in uView's ROWS — float4x4 indexes
+                                       columns in MSL exactly as GLSL does */
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn {\n"
+    "    float2 corner [[attribute(0)]];\n"
+    "    float4 inst   [[attribute(1)]];\n"
+    "    float4 color  [[attribute(2)]];\n"
+    "};\n"
+    "struct VU { float4x4 uView; float4x4 uProj; };\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; float4 color; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float3 right = float3(u.uView[0][0], u.uView[1][0], u.uView[2][0]);\n"
+    "    float3 up    = float3(u.uView[0][1], u.uView[1][1], u.uView[2][1]);\n"
+    "    float3 world = v.inst.xyz + right * (v.corner.x * v.inst.w)\n"
+    "                             + up    * (v.corner.y * v.inst.w);\n"
+    "    o.uv    = v.corner * 2.0;\n"
+    "    o.color = v.color;\n"
+    "    o.pos = u.uProj * (u.uView * float4(world, 1.0));\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
+    "    return o;\n"
+    "}\n";
+static const char *PARTICLE_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; float4 color; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]]) {\n"
+    "    float f = max(1.0 - dot(v.uv, v.uv), 0.0);\n"
+    "    f = f * f;\n"
+    "    return float4(v.color.rgb * (v.color.a * f), 1.0);\n"
+    "}\n";
+#else /* GLSL */
 static const char *PARTICLE_VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec2 aCorner;\n"     /* the unit quad, +-0.5 */
@@ -575,6 +646,7 @@ static const char *PARTICLE_FRAGMENT_SRC =
     "    f = f * f;\n"
     "    FragColor = vec4(vColor.rgb * (vColor.a * f), 1.0);\n"
     "}\n";
+#endif /* SOL_RHI_METAL — the particles */
 
 #ifdef SOL_RHI_METAL
 
@@ -816,6 +888,77 @@ static const char *SHADOW_FRAGMENT_SRC =
    fox must not cast a T-posed shadow. uPalette[64] = GL 3.3's guaranteed
    vertex-uniform budget, exactly. Same FRAGMENT_SRC as everything else —
    a skinned surface is lit like any surface. */
+#ifdef SOL_RHI_METAL
+static const char *SKINNED_VERTEX_SRC =       /* uPalette[64] = 4KB: the uniform
+                                       arena's boundary case, by design */
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn {\n"
+    "    float3 pos     [[attribute(0)]];\n"
+    "    float3 normal  [[attribute(1)]];\n"
+    "    float2 uv      [[attribute(2)]];\n"
+    "    float4 tangent [[attribute(3)]];\n"
+    "    float4 joints  [[attribute(4)]];\n"
+    "    float4 weights [[attribute(5)]];\n"
+    "};\n"
+    "struct VU {\n"
+    "    float4x4 uModel;\n"
+    "    float4x4 uView;\n"
+    "    float4x4 uProj;\n"
+    "    float3x3 uNormalMatrix;\n"
+    "    float4x4 uPalette[64];\n"
+    "};\n"
+    "struct VOut {\n"                 /* field names match the core FS's
+                                         stage_in — cross-library linking
+                                         matches by name */
+    "    float4 pos [[position]];\n"
+    "    float3 normal;\n"
+    "    float3 worldPos;\n"
+    "    float2 uv;\n"
+    "    float4 tangent;\n"
+    "};\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float4x4 skin = v.weights.x * u.uPalette[(int)v.joints.x]\n"
+    "                  + v.weights.y * u.uPalette[(int)v.joints.y]\n"
+    "                  + v.weights.z * u.uPalette[(int)v.joints.z]\n"
+    "                  + v.weights.w * u.uPalette[(int)v.joints.w];\n"
+    "    float4 worldPos = u.uModel * (skin * float4(v.pos, 1.0));\n"
+    "    o.pos = u.uProj * (u.uView * worldPos);\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
+    "    float3x3 skin3 = float3x3(skin[0].xyz, skin[1].xyz, skin[2].xyz);\n"
+    "    o.normal = u.uNormalMatrix * (skin3 * v.normal);\n"
+    "    o.worldPos = worldPos.xyz;\n"
+    "    o.uv = v.uv;\n"
+    "    float3x3 lin = float3x3(u.uModel[0].xyz, u.uModel[1].xyz, u.uModel[2].xyz);\n"
+    "    o.tangent = float4(lin * v.tangent.xyz, v.tangent.w);\n"
+    "    return o;\n"
+    "}\n";
+static const char *SKINNED_SHADOW_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn {\n"
+    "    float3 pos     [[attribute(0)]];\n"
+    "    float4 joints  [[attribute(4)]];\n"
+    "    float4 weights [[attribute(5)]];\n"
+    "};\n"
+    "struct VU {\n"
+    "    float4x4 uModel;\n"
+    "    float4x4 uLightVP;\n"
+    "    float4x4 uPalette[64];\n"
+    "};\n"
+    "struct VOut { float4 pos [[position]]; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float4x4 skin = v.weights.x * u.uPalette[(int)v.joints.x]\n"
+    "                  + v.weights.y * u.uPalette[(int)v.joints.y]\n"
+    "                  + v.weights.z * u.uPalette[(int)v.joints.z]\n"
+    "                  + v.weights.w * u.uPalette[(int)v.joints.w];\n"
+    "    o.pos = u.uLightVP * (u.uModel * (skin * float4(v.pos, 1.0)));\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
+    "    return o;\n"
+    "}\n";
+#else /* GLSL */
 static const char *SKINNED_VERTEX_SRC =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
@@ -860,6 +1003,7 @@ static const char *SKINNED_SHADOW_VERTEX_SRC =
     "              + aWeights.w * uPalette[int(aJoints.w)];\n"
     "    gl_Position = uLightVP * (uModel * (skin * vec4(aPos, 1.0)));\n"
     "}\n";
+#endif /* SOL_RHI_METAL — the skinned twins */
 
 /* --- debug view (item 9b): show the shadow map full-screen as linearized
    grayscale (near=dark, far=white), so we can confirm the light's-eye depth

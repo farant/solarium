@@ -22,6 +22,24 @@ static struct {
    is single-threaded and blocks are drawn immediately */
 static float g_wt_verts[WT_MAX_GLYPHS * 6 * WT_VERT_FLOATS];
 
+#ifdef SOL_RHI_METAL
+
+static const char *WT_VERTEX_SRC =     /* item 10 stage (e): the MSL twin */
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn { float3 pos [[attribute(0)]]; float2 uv [[attribute(1)]]; };\n"
+    "struct VU { float4x4 uMVP; };\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    o.pos = u.uMVP * float4(v.pos, 1.0);\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
+    "    o.uv = v.uv;\n"
+    "    return o;\n"
+    "}\n";
+
+#else /* GLSL */
+
 static const char *WT_VERTEX_SRC =
     "#version 330 core\n"
     "layout(location = 0) in vec3 aPos;\n"
@@ -33,10 +51,31 @@ static const char *WT_VERTEX_SRC =
     "    vUV = aUV;\n"
     "}\n";
 
+#endif /* SOL_RHI_METAL — world-text VS */
+
 /* the same SDF decode as the UI text pipeline; fwidth here measures the
    PROJECTED derivative, so the edge band tracks perspective automatically.
    Fully transparent fragments discard so depth writes stay honest (an
    invisible glyph quad must not occlude ink drawn after it). */
+#ifdef SOL_RHI_METAL
+
+static const char *WT_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "struct FU { float3 uColor; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      texture2d<float> uTex [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float d = uTex.sample(s0, v.uv).r;\n"
+    "    float w = fwidth(d) * 0.5 + 0.0001;\n"
+    "    float edge = smoothstep(0.5 - w, 0.5 + w, d);\n"
+    "    if (edge < 0.004) discard_fragment();\n"
+    "    return float4(u.uColor, edge);\n"
+    "}\n";
+
+#else /* GLSL */
+
 static const char *WT_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vUV;\n"
@@ -50,6 +89,8 @@ static const char *WT_FRAGMENT_SRC =
     "    if (edge < 0.004) discard;\n"
     "    FragColor = vec4(uColor, edge);\n"
     "}\n";
+
+#endif /* SOL_RHI_METAL — world-text FS */
 
 sol_bool wtext_init(void) {
     RhiPipelineDesc desc = {0};
