@@ -155,14 +155,27 @@ sol_bool scene_save(Scene *s, const char *path) {
                 o->material.base_color.y != d.base_color.y ||
                 o->material.base_color.z != d.base_color.z ||
                 o->material.metallic  != d.metallic ||
-                o->material.roughness != d.roughness) {
+                o->material.roughness != d.roughness ||
+                o->material.emissive.x != 0.0f ||
+                o->material.emissive.y != 0.0f ||
+                o->material.emissive.z != 0.0f) {
                 fprintf(f, "    <mat r=\"%.9g\" g=\"%.9g\" b=\"%.9g\""
-                           " metal=\"%.9g\" rough=\"%.9g\" />\n",
+                           " metal=\"%.9g\" rough=\"%.9g\"",
                         (double)o->material.base_color.x,
                         (double)o->material.base_color.y,
                         (double)o->material.base_color.z,
                         (double)o->material.metallic,
                         (double)o->material.roughness);
+                /* emissive attrs only when something glows (P4 item 5):
+                   absent = zero, so old files stay byte-identical */
+                if (o->material.emissive.x != 0.0f ||
+                    o->material.emissive.y != 0.0f ||
+                    o->material.emissive.z != 0.0f)
+                    fprintf(f, " er=\"%.9g\" eg=\"%.9g\" eb=\"%.9g\"",
+                            (double)o->material.emissive.x,
+                            (double)o->material.emissive.y,
+                            (double)o->material.emissive.z);
+                fprintf(f, " />\n");
             }
         }
 
@@ -347,6 +360,9 @@ sol_bool scene_load(Scene *s, const char *path) {
                 mm.base_color.z = attr_f(mat, "b", mm.base_color.z);
                 mm.metallic     = attr_f(mat, "metal", mm.metallic);
                 mm.roughness    = attr_f(mat, "rough", mm.roughness);
+                mm.emissive.x   = attr_f(mat, "er", 0.0f);
+                mm.emissive.y   = attr_f(mat, "eg", 0.0f);
+                mm.emissive.z   = attr_f(mat, "eb", 0.0f);
                 scene_material_set(s, h, mm);
             }
         }

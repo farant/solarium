@@ -105,6 +105,7 @@ static const char *FRAGMENT_SRC =
     "uniform float uLightIntensity;\n"
     "uniform float uCosInner;\n"                             /* cos(inner half-angle) */
     "uniform float uCosOuter;\n"                             /* cos(outer half-angle) */
+    "uniform vec3  uEmissive;\n"                             /* emitted light (P4 item 5) */
     "uniform int   uPointCount;\n"                           /* point lights (P4 item 5) */
     "uniform vec3  uPointPos[8];\n"
     "uniform vec3  uPointColor[8];\n"                        /* color * intensity, premultiplied */
@@ -250,7 +251,10 @@ static const char *FRAGMENT_SRC =
     "    } else {\n"
     "        ambient = 0.03 * albedo * ao;\n"                  /* fallback if the .hdr didn't load */
     "    }\n"
-    "    vec3 color = ambient * uAmbientScale + Lo;\n"          /* sealed rooms dim the sky's ambient (item 7) */
+    "    vec3 color = ambient * uAmbientScale + Lo + uEmissive;\n"  /* emissive ADDS
+                                                                after lighting: seen by
+                                                                the camera, felt by nobody
+                                                                (P4 item 5) */
     "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* selection tint (linear) */
     "    FragColor = vec4(color, 1.0);\n"                     /* LINEAR -> the HDR buffer; 7c tonemaps + encodes */
     "}\n";
@@ -2895,6 +2899,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 if (lo) {
                     Material m = material_default();
                     m.base_color = vec3_make(0.95f, 0.78f, 0.50f);
+                    m.emissive   = vec3_make(1.60f, 0.95f, 0.45f);  /* the heart
+                                                       (P4 i5 p2): > 1.0 on
+                                                       purpose — bloom's first
+                                                       customer in piece 3 */
                     m.roughness  = 0.40f;
                     lo->material = m;
                 }
@@ -3898,6 +3906,7 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     rhi_set_uniform_mat4("uProj",         proj.m);
     rhi_set_uniform_mat3("uNormalMatrix", nrm.m);
     rhi_set_uniform_vec3("uViewPos",      eye.x, eye.y, eye.z);
+    rhi_set_uniform_vec3("uEmissive",     mat.emissive.x, mat.emissive.y, mat.emissive.z);
     rhi_set_uniform_float("uHighlight",   highlight);
     rhi_set_uniform_float("uTerrainBlend", state->terrain_blend ? 1.0f : 0.0f);
     rhi_set_uniform_float("uTerrainY0",    state->terrain_y0);

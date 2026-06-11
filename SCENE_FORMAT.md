@@ -144,7 +144,10 @@ empty with relations.
 
 **`<mat>`** (P3 6e) — scalar factors only, written when they differ from the
 default; texture handles are runtime (glb parts re-derive theirs on
-re-import, the page image rebinds by name at load).
+re-import, the page image rebinds by name at load). P4 item 5 grew it
+compatibly: `er eg eb` = the emissive color (linear; may exceed 1.0 — the
+HDR pipeline keeps the headroom and bloom spends it), written only when
+something glows, absent = zero.
 
 **Derived objects are never written** (P3 6e): a glb import's part children
 (meta `derived=1`) regenerate from the anchor's `glb` meta on every load —

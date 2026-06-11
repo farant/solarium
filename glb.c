@@ -213,6 +213,7 @@ static Material get_material(JsonValue *g, const unsigned char *bin, sol_u32 bin
     out.ao_tex.id     = 0;
     out.normal_tex.id = 0;
     out.base_color    = vec3_make(1.0f, 1.0f, 1.0f);
+    out.emissive      = vec3_make(0.0f, 0.0f, 0.0f);
     out.metallic      = 1.0f;     /* glTF spec defaults when a factor is absent */
     out.roughness     = 1.0f;
     out.ao_strength   = 1.0f;
@@ -230,6 +231,13 @@ static Material get_material(JsonValue *g, const unsigned char *bin, sol_u32 bin
         out.base_color = vec3_make((float)json_number(json_index(bcf, 0), 1.0),
                                    (float)json_number(json_index(bcf, 1), 1.0),
                                    (float)json_number(json_index(bcf, 2), 1.0));
+    }
+    {   /* emissiveFactor: material-level, linear RGB (P4 item 5) */
+        JsonValue *emf = json_member(mat, "emissiveFactor");
+        if (json_count(emf) >= 3)
+            out.emissive = vec3_make((float)json_number(json_index(emf, 0), 0.0),
+                                     (float)json_number(json_index(emf, 1), 0.0),
+                                     (float)json_number(json_index(emf, 2), 0.0));
     }
 
     out.albedo_tex = decode_texture(g, bin, bin_len,
