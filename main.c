@@ -444,6 +444,59 @@ static const char *SHADOW_FRAGMENT_SRC =
     "#version 330 core\n"
     "void main() {}\n";                                      /* depth written automatically */
 
+/* --- the skinned twins (P4 item 9): the standard VS plus the MATRIX
+   PALETTE. Each vertex blends up to four palette entries (linear blend
+   skinning); the palette returns vertices in mesh-local space, so uModel
+   — the OBJECT's transform — goes on top exactly like any prop's. The
+   shadow twin does the same blend into the light's clip space: a running
+   fox must not cast a T-posed shadow. uPalette[64] = GL 3.3's guaranteed
+   vertex-uniform budget, exactly. Same FRAGMENT_SRC as everything else —
+   a skinned surface is lit like any surface. */
+static const char *SKINNED_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 1) in vec3 aNormal;\n"
+    "layout (location = 2) in vec2 aUV;\n"
+    "layout (location = 3) in vec4 aTangent;\n"
+    "layout (location = 4) in vec4 aJoints;\n"               /* indices, as floats */
+    "layout (location = 5) in vec4 aWeights;\n"
+    "uniform mat4 uModel;\n"
+    "uniform mat4 uView;\n"
+    "uniform mat4 uProj;\n"
+    "uniform mat3 uNormalMatrix;\n"
+    "uniform mat4 uPalette[64];\n"
+    "out vec3 vNormal;\n"
+    "out vec3 vWorldPos;\n"
+    "out vec2 vUV;\n"
+    "out vec4 vTangent;\n"
+    "void main() {\n"
+    "    mat4 skin = aWeights.x * uPalette[int(aJoints.x)]\n"
+    "              + aWeights.y * uPalette[int(aJoints.y)]\n"
+    "              + aWeights.z * uPalette[int(aJoints.z)]\n"
+    "              + aWeights.w * uPalette[int(aJoints.w)];\n"
+    "    vec4 worldPos = uModel * (skin * vec4(aPos, 1.0));\n"
+    "    gl_Position = uProj * uView * worldPos;\n"
+    "    vNormal = uNormalMatrix * (mat3(skin) * aNormal);\n"
+    "    vWorldPos = worldPos.xyz;\n"
+    "    vUV = aUV;\n"
+    "    vTangent = vec4(mat3(uModel) * aTangent.xyz, aTangent.w);\n"
+    "}\n";
+static const char *SKINNED_SHADOW_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 4) in vec4 aJoints;\n"
+    "layout (location = 5) in vec4 aWeights;\n"
+    "uniform mat4 uModel;\n"
+    "uniform mat4 uLightVP;\n"
+    "uniform mat4 uPalette[64];\n"
+    "void main() {\n"
+    "    mat4 skin = aWeights.x * uPalette[int(aJoints.x)]\n"
+    "              + aWeights.y * uPalette[int(aJoints.y)]\n"
+    "              + aWeights.z * uPalette[int(aJoints.z)]\n"
+    "              + aWeights.w * uPalette[int(aJoints.w)];\n"
+    "    gl_Position = uLightVP * (uModel * (skin * vec4(aPos, 1.0)));\n"
+    "}\n";
+
 /* --- debug view (item 9b): show the shadow map full-screen as linearized
    grayscale (near=dark, far=white), so we can confirm the light's-eye depth
    render is correct before 9c samples it. Reuses the fullscreen-triangle VS. --- */
@@ -727,6 +780,8 @@ typedef struct {
     /* shadow map (item 9b): depth from the light's POV; fixed size, not resized */
     RhiRenderTarget shadow_rt;
     RhiPipeline shadow_pipeline;       /* the depth-only pass */
+    RhiPipeline skinned_pipeline;        /* item 9: palette-blending twins of */
+    RhiPipeline skinned_shadow_pipeline; /* the standard + shadow pipelines  */
     RhiPipeline shadow_debug_pipeline; /* fullscreen depth-map inspector */
     sol_bool    show_shadow_map;       /* 'M' toggles the inspector view */
     sol_bool    m_was_down;            /* edge-detect the inspector toggle */
@@ -791,6 +846,7 @@ typedef struct {
     RhiBuffer    part_vbuf, part_ibuf, part_inst;
     int          part_count;    /* live count last frame — the HUD's number */
     sol_bool     e_was_down;    /* 'E' mints a dust emitter */
+    sol_bool     y_was_down;    /* 'Y' mints a fox (item 9) */
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
@@ -1330,6 +1386,58 @@ static sol_u32 selection_root(Scene *s, sol_u32 handle) {
         return handle;            /* an edge is its own thing: select it, not
                                      the board group it hangs on (item 8) */
     return group_root(s, handle);
+}
+
+/* ---- skinned models (P4 item 9): loaded once per path, session-lived.
+   An object wears meta skin_glb="Fox.glb"; this registry turns the path
+   into mesh + material + skeleton on first sight. The POSE is view state
+   (§1.6 for skeletons): sampled fresh from absolute t every frame, never
+   stored, never saved — the file records which model, and (piece 3)
+   which clip at what speed. */
+#define SKINNED_MAX 4
+typedef struct {
+    char         path[128];
+    SkinnedModel model;
+    int          state;            /* 0 = empty, 1 = loaded, -1 = failed */
+} SkinnedSlot;
+static SkinnedSlot g_skinned[SKINNED_MAX];
+
+static SkinnedModel *skinned_get(const char *path) {
+    int i;
+    for (i = 0; i < SKINNED_MAX; i++) {
+        if (g_skinned[i].state != 0 && strcmp(g_skinned[i].path, path) == 0)
+            return g_skinned[i].state == 1 ? &g_skinned[i].model
+                                           : (SkinnedModel *)0;
+    }
+    for (i = 0; i < SKINNED_MAX; i++) {
+        if (g_skinned[i].state == 0) {
+            if (strlen(path) >= sizeof g_skinned[i].path)
+                return (SkinnedModel *)0;
+            strcpy(g_skinned[i].path, path);
+            if (glb_load_skinned(path, &g_skinned[i].model)) {
+                g_skinned[i].state = 1;
+                printf("skinned model: %s (%d joints, %d clips)\n", path,
+                       g_skinned[i].model.rig.skel.joint_count,
+                       g_skinned[i].model.rig.clip_count);
+                return &g_skinned[i].model;
+            }
+            g_skinned[i].state = -1;       /* remembered: fail once, quietly after */
+            fprintf(stderr, "skinned model failed: %s\n", path);
+            return (SkinnedModel *)0;
+        }
+    }
+    return (SkinnedModel *)0;
+}
+
+/* one pose at absolute t -> the palette (deterministic; looping) */
+static void skinned_palette_at(const SkinnedModel *sm, int clip, float t,
+                               mat4 *pal) {
+    vec3 lt[SKEL_MAX_JOINTS], ls[SKEL_MAX_JOINTS];
+    quat lr[SKEL_MAX_JOINTS];
+    const SkelClip *cl = (clip >= 0 && clip < sm->rig.clip_count)
+                       ? &sm->rig.clips[clip] : (const SkelClip *)0;
+    skel_pose(&sm->rig.skel, cl, t, SOL_TRUE, lt, lr, ls);
+    skel_palette(&sm->rig.skel, lt, lr, ls, pal);
 }
 
 /* ---- the palace's voice (P4 item 8 piece 2): minted buffers + the
@@ -3444,6 +3552,34 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->e_was_down = e_now;
     }
 
+    /* Y mints a FOX (P4 item 9): a rigged glb on an empty anchor — meta
+       skin_glb names the file, the skeleton poses it fresh every frame.
+       Scale 0.007 because the fox is authored in centimeters (~155 long).
+       Not pickable in v1 (an empty has no AABB); it stands where minted. */
+    {
+        sol_bool y_now = glfwGetKey(w, GLFW_KEY_Y) == GLFW_PRESS;
+        if (y_now && !st->y_was_down) {
+            Mesh    empty;
+            vec3    f, pos;
+            sol_u32 h;
+            f = camera_forward(&st->camera);
+            f.y = 0.0f;
+            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+            f   = vec3_normalize(f);
+            pos = vec3_add(st->camera.pos, vec3_scale(f, 2.5f));
+            pos.y = st->camera.pos.y - CAMERA_EYE_HEIGHT;     /* on the floor */
+            memset(&empty, 0, sizeof empty);
+            h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
+                          vec3_make(0.007f, 0.007f, 0.007f));
+            scene_meta_set(&st->scene, h, "name", "fox");
+            scene_meta_set(&st->scene, h, "skin_glb", "Fox.glb");
+            st->selected_handle = h;
+            scene_save(&st->scene, "scene.stml");
+            printf("a fox arrives — it is surveying the situation\n");
+        }
+        st->y_was_down = y_now;
+    }
+
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
        decision): the system never throws away the marker for you. Item 8
        extends it to ARROWS: deleting the edge object deletes the relation. */
@@ -4153,6 +4289,53 @@ static int init_scene(AppState *state) {
     desc.blend      = SOL_FALSE;
     state->pipeline = rhi_create_pipeline(&desc);
 
+    /* the skinned twins (item 9): the canonical 12 floats + joints4 +
+       weights4 = 20-float stride; same fragment shader (a skinned surface
+       is lit like any surface), and a palette-blending shadow twin so a
+       running fox never casts a T-posed shadow */
+    {
+        RhiShader       skin_sh, skin_sh_shadow;
+        RhiPipelineDesc skd  = {0};
+        RhiPipelineDesc skds = {0};
+        skin_sh = rhi_create_shader(SKINNED_VERTEX_SRC, FRAGMENT_SRC);
+        if (skin_sh.id) {
+            skd.shader = skin_sh;
+            skd.attrs[0].location = 0; skd.attrs[0].format = RHI_FORMAT_FLOAT3;
+            skd.attrs[0].offset   = 0;
+            skd.attrs[1].location = 1; skd.attrs[1].format = RHI_FORMAT_FLOAT3;
+            skd.attrs[1].offset   = 3 * sizeof(float);
+            skd.attrs[2].location = 2; skd.attrs[2].format = RHI_FORMAT_FLOAT2;
+            skd.attrs[2].offset   = 6 * sizeof(float);
+            skd.attrs[3].location = 3; skd.attrs[3].format = RHI_FORMAT_FLOAT4;
+            skd.attrs[3].offset   = 8 * sizeof(float);
+            skd.attrs[4].location = 4; skd.attrs[4].format = RHI_FORMAT_FLOAT4;
+            skd.attrs[4].offset   = 12 * sizeof(float);
+            skd.attrs[5].location = 5; skd.attrs[5].format = RHI_FORMAT_FLOAT4;
+            skd.attrs[5].offset   = 16 * sizeof(float);
+            skd.attr_count = 6;
+            skd.stride     = 20 * sizeof(float);
+            skd.depth_test = SOL_TRUE;
+            skd.blend      = SOL_FALSE;
+            state->skinned_pipeline = rhi_create_pipeline(&skd);
+        }
+        skin_sh_shadow = rhi_create_shader(SKINNED_SHADOW_VERTEX_SRC,
+                                           SHADOW_FRAGMENT_SRC);
+        if (skin_sh_shadow.id) {
+            skds.shader = skin_sh_shadow;
+            skds.attrs[0].location = 0; skds.attrs[0].format = RHI_FORMAT_FLOAT3;
+            skds.attrs[0].offset   = 0;
+            skds.attrs[1].location = 4; skds.attrs[1].format = RHI_FORMAT_FLOAT4;
+            skds.attrs[1].offset   = 12 * sizeof(float);
+            skds.attrs[2].location = 5; skds.attrs[2].format = RHI_FORMAT_FLOAT4;
+            skds.attrs[2].offset   = 16 * sizeof(float);
+            skds.attr_count = 3;
+            skds.stride     = 20 * sizeof(float);
+            skds.depth_test = SOL_TRUE;
+            skds.blend      = SOL_FALSE;
+            state->skinned_shadow_pipeline = rhi_create_pipeline(&skds);
+        }
+    }
+
     /* the fullscreen post pass: no vertex attributes (gl_VertexID builds the
        triangle), no depth test (it's a screen-space overlay) */
     {
@@ -4513,12 +4696,15 @@ static mat4 light_view_proj(const AppState *state) {
     return mat4_mul(lproj, lview);
 }
 
-static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
-                      mat4 view, mat4 proj, vec3 eye, float highlight,
-                      Material mat) {
+/* everything a lit surface needs, bound on the given pipeline — shared
+   verbatim by the standard draw and (item 9) the skinned one: a skinned
+   surface is lit like any surface, so the uniform vocabulary is ONE. */
+static void bind_scene_uniforms(const AppState *state, RhiPipeline pipeline,
+                                mat4 model, mat4 view, mat4 proj, vec3 eye,
+                                float highlight, Material mat) {
     mat3 nrm = mat3_normal_matrix(model);
 
-    rhi_set_pipeline(state->pipeline);
+    rhi_set_pipeline(pipeline);
     rhi_set_uniform_mat4("uModel",        model.m);
     rhi_set_uniform_mat4("uView",         view.m);
     rhi_set_uniform_mat4("uProj",         proj.m);
@@ -4591,10 +4777,32 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
         rhi_bind_texture(mat.normal_tex, 3);
         rhi_set_uniform_int("uNormalTex", 3);   /* sampler -> texture unit 3 */
     }
+}
 
+static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
+                      mat4 view, mat4 proj, vec3 eye, float highlight,
+                      Material mat) {
+    bind_scene_uniforms(state, state->pipeline, model, view, proj, eye,
+                        highlight, mat);
     rhi_bind_vertex_buffer(mesh.vbuffer);
     rhi_bind_index_buffer(mesh.ibuffer);
     rhi_draw_indexed(0, mesh.index_count);
+}
+
+/* item 9: the skinned draw — the same uniform vocabulary on the skinned
+   pipeline, plus the palette in one array upload */
+static void draw_skinned(const AppState *state, const SkinnedModel *sm,
+                         int clip, float t, mat4 model, mat4 view, mat4 proj,
+                         vec3 eye, float highlight) {
+    mat4 pal[SKEL_MAX_JOINTS];
+    skinned_palette_at(sm, clip, t, pal);
+    bind_scene_uniforms(state, state->skinned_pipeline, model, view, proj,
+                        eye, highlight, sm->material);
+    rhi_set_uniform_mat4_array("uPalette", (const float *)pal,
+                               sm->rig.skel.joint_count);
+    rhi_bind_vertex_buffer(sm->mesh.vbuffer);
+    rhi_bind_index_buffer(sm->mesh.ibuffer);
+    rhi_draw_indexed(0, sm->mesh.index_count);
 }
 
 /* Ensure the HDR target matches the window's framebuffer size, recreating it on
@@ -4751,6 +4959,31 @@ static void render(AppState *state) {
             rhi_bind_index_buffer(o->mesh.ibuffer);
             rhi_draw_indexed(0, o->mesh.index_count);
         }
+        /* skinned casters (item 9): same palette as the visible draw —
+           the shadow runs WITH the fox */
+        if (state->skinned_shadow_pipeline.id) {
+            sol_u32 sk;
+            for (sk = 0; sk < state->scene.count; sk++) {
+                const SceneObject *o  = &state->scene.objects[sk];
+                const char        *sg = scene_meta_get(&state->scene,
+                                            o->handle, "skin_glb");
+                SkinnedModel      *sm;
+                mat4               model, pal[SKEL_MAX_JOINTS];
+                if (!sg) continue;
+                sm = skinned_get(sg);
+                if (!sm) continue;
+                skinned_palette_at(sm, 0, (float)glfwGetTime(), pal);
+                rhi_set_pipeline(state->skinned_shadow_pipeline);
+                rhi_set_uniform_mat4("uLightVP", lvp.m);
+                model = scene_world_matrix(&state->scene, o);
+                rhi_set_uniform_mat4("uModel", model.m);
+                rhi_set_uniform_mat4_array("uPalette", (const float *)pal,
+                                           sm->rig.skel.joint_count);
+                rhi_bind_vertex_buffer(sm->mesh.vbuffer);
+                rhi_bind_index_buffer(sm->mesh.ibuffer);
+                rhi_draw_indexed(0, sm->mesh.index_count);
+            }
+        }
         rhi_end_pass();
     }
     rt1 = glfwGetTime();
@@ -4856,6 +5089,27 @@ static void render(AppState *state) {
         state->draws_done++;                      /* == total until culling (P4 i2 p4) */
     }
     state->terrain_blend = SOL_FALSE;              /* the reader rig is not land */
+
+    /* skinned models (item 9): objects wearing skin_glb meta. Drawn at the
+       ANIMATED pose — clip 0 at absolute time for now (piece 3 brings the
+       animate component) — with the object's own transform on top. */
+    if (state->skinned_pipeline.id) {
+        sol_u32 sk;
+        for (sk = 0; sk < state->scene.count; sk++) {
+            SceneObject  *o  = &state->scene.objects[sk];
+            const char   *sg = scene_meta_get(&state->scene, o->handle,
+                                              "skin_glb");
+            SkinnedModel *sm;
+            mat4          model;
+            if (!sg) continue;
+            sm = skinned_get(sg);
+            if (!sm) continue;
+            model = scene_world_matrix(&state->scene, o);
+            draw_skinned(state, sm, 0, (float)glfwGetTime(), model, view,
+                         proj, eye, o->handle == sel_root ? 1.0f : 0.0f);
+            state->draws_done++;
+        }
+    }
 
     /* the meadow (P4 item 3 piece 2): thousands of tufts, ONE draw per
        island — and an island culled by the frustum takes its grass with it

@@ -157,6 +157,10 @@ void rhi_bind_instance_buffer(RhiBuffer buffer);  /* stream 1: the pipeline's
 void rhi_bind_index_buffer(RhiBuffer buffer);
 void rhi_bind_texture(RhiTexture texture, int slot);            /* to texture unit `slot` */
 void rhi_set_uniform_mat4(const char *name, const float *m);     /* on the bound pipeline */
+void rhi_set_uniform_mat4_array(const char *name, const float *m, int count);
+                                 /* a contiguous mat4 array — item 9's joint
+                                    palette in ONE call. Metal: setVertexBytes
+                                    (§1.4: one trivial ledger entry). */
 void rhi_set_uniform_mat3(const char *name, const float *m);     /* e.g. the normal matrix */
 void rhi_set_uniform_vec3(const char *name, float x, float y, float z);
 void rhi_set_uniform_float(const char *name, float v);

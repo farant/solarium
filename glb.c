@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>                /* sqrtf — matrix-joint decomposition (item 9) */
 
 /* glTF is little-endian; read bytes explicitly so we don't depend on host order. */
 static sol_u32 read_u32(const unsigned char *p) {
@@ -262,6 +263,22 @@ static Material get_material(JsonValue *g, const unsigned char *bin, sol_u32 bin
 /* A node's local transform: a "matrix" (16 column-major floats, same order as
    our mat4) if present, else composed from translation/rotation/scale (defaults
    identity). */
+static void node_trs(JsonValue *node, vec3 *t, quat *q, vec3 *s) {
+    JsonValue *jt = json_member(node, "translation");
+    JsonValue *jr = json_member(node, "rotation");
+    JsonValue *js = json_member(node, "scale");
+    *t = vec3_make((float)json_number(json_index(jt, 0), 0.0),
+                   (float)json_number(json_index(jt, 1), 0.0),
+                   (float)json_number(json_index(jt, 2), 0.0));
+    q->x = (float)json_number(json_index(jr, 0), 0.0);
+    q->y = (float)json_number(json_index(jr, 1), 0.0);
+    q->z = (float)json_number(json_index(jr, 2), 0.0);
+    q->w = (float)json_number(json_index(jr, 3), 1.0);
+    *s = vec3_make((float)json_number(json_index(js, 0), 1.0),
+                   (float)json_number(json_index(js, 1), 1.0),
+                   (float)json_number(json_index(js, 2), 1.0));
+}
+
 static mat4 node_local(JsonValue *node) {
     JsonValue *jm = json_member(node, "matrix");
     if (jm && json_count(jm) == 16) {
@@ -271,23 +288,51 @@ static mat4 node_local(JsonValue *node) {
         return r;
     }
     {
-        JsonValue *jt = json_member(node, "translation");
-        JsonValue *jr = json_member(node, "rotation");
-        JsonValue *js = json_member(node, "scale");
         vec3 t, s;
         quat q;
-        t = vec3_make((float)json_number(json_index(jt, 0), 0.0),
-                      (float)json_number(json_index(jt, 1), 0.0),
-                      (float)json_number(json_index(jt, 2), 0.0));
-        q.x = (float)json_number(json_index(jr, 0), 0.0);
-        q.y = (float)json_number(json_index(jr, 1), 0.0);
-        q.z = (float)json_number(json_index(jr, 2), 0.0);
-        q.w = (float)json_number(json_index(jr, 3), 1.0);
-        s = vec3_make((float)json_number(json_index(js, 0), 1.0),
-                      (float)json_number(json_index(js, 1), 1.0),
-                      (float)json_number(json_index(js, 2), 1.0));
+        node_trs(node, &t, &q, &s);
         return mat4_from_trs(t, q, s);
     }
+}
+
+/* a node's local transform as TRS COMPONENTS: straight from the TRS
+   members, or a matrix decomposed — T = column 3, S = column lengths,
+   R = the normalized columns via quat_from_mat4 (the item-6d deferral,
+   cashed for item 9). */
+static void node_decompose(JsonValue *node, vec3 *t, quat *q, vec3 *s) {
+    JsonValue *jm = json_member(node, "matrix");
+    if (jm && json_count(jm) == 16) {
+        mat4  m  = node_local(node);
+        float sx = sqrtf(m.m[0]*m.m[0] + m.m[1]*m.m[1] + m.m[2]*m.m[2]);
+        float sy = sqrtf(m.m[4]*m.m[4] + m.m[5]*m.m[5] + m.m[6]*m.m[6]);
+        float sz = sqrtf(m.m[8]*m.m[8] + m.m[9]*m.m[9] + m.m[10]*m.m[10]);
+        int   c;
+        if (sx < 1e-8f || sy < 1e-8f || sz < 1e-8f) sx = sy = sz = 1.0f;
+        for (c = 0; c < 3; c++) {
+            m.m[c]     /= sx;
+            m.m[4 + c] /= sy;
+            m.m[8 + c] /= sz;
+        }
+        *t = vec3_make(m.m[12], m.m[13], m.m[14]);
+        *q = quat_from_mat4(m);
+        *s = vec3_make(sx, sy, sz);
+        return;
+    }
+    node_trs(node, t, q, s);
+}
+
+/* the inverse of one node's local: inv(T R S) = S^-1 R^-1 T^-1 —
+   composable up a chain, so no general matrix inverse is ever needed */
+static mat4 node_local_inv(JsonValue *node) {
+    vec3 t, s, si;
+    quat q;
+    node_decompose(node, &t, &q, &s);
+    si = vec3_make(s.x != 0.0f ? 1.0f / s.x : 0.0f,
+                   s.y != 0.0f ? 1.0f / s.y : 0.0f,
+                   s.z != 0.0f ? 1.0f / s.z : 0.0f);
+    return mat4_mul(mat4_scale(si),
+           mat4_mul(quat_to_mat4(quat_conjugate(q)),
+                    mat4_translate(vec3_make(-t.x, -t.y, -t.z))));
 }
 
 /* Traversal context: shared inputs + the growable output parts. */
@@ -329,6 +374,11 @@ static void process_node(GlbCtx *c, int node_idx, mat4 parent, int depth) {
     world = mat4_mul(parent, node_local(node));
 
     mesh_idx = (int)json_number(json_member(node, "mesh"), -1.0);
+    if (mesh_idx >= 0 && json_member(node, "skin") != (JsonValue *)0)
+        mesh_idx = -1;       /* THE IMPORT FORK (item 9): a skinned mesh must
+                                NOT be baked — its vertices stay in mesh-local
+                                bind space for the skeleton to pose at runtime
+                                (glb_load_skinned is its door) */
     if (mesh_idx >= 0) {
         JsonValue *prims = json_member(json_index(json_member(c->g, "meshes"), (sol_u32)mesh_idx),
                                        "primitives");
@@ -370,28 +420,30 @@ static unsigned char *slurp_file(const char *path, long *out_size) {
     return buf;
 }
 
-sol_bool glb_load(const char *path, GlbModel *out) {
-    unsigned char       *buf;
-    long                 size;
-    char                *json_str;
-    const unsigned char *bin;
-    sol_u32              bin_len;
-    size_t               off;
-    JsonValue           *g;
+/* open a GLB container: slurp, validate magic/version, locate the JSON +
+   BIN chunks, parse the JSON. Returns the raw file buffer (the BIN pointer
+   ALIASES into it — caller frees the buffer AND json_free's *out_g), or
+   NULL on any failure. Shared by glb_load and glb_load_skeleton. */
+static unsigned char *glb_open(const char *path, JsonValue **out_g,
+                               const unsigned char **out_bin,
+                               sol_u32 *out_bin_len) {
+    unsigned char *buf;
+    long           size;
+    char          *json_str;
+    size_t         off;
 
-    out->parts = (GlbPart *)0;
-    out->count = 0;
+    *out_g       = (JsonValue *)0;
+    *out_bin     = (const unsigned char *)0;
+    *out_bin_len = 0;
 
     buf = slurp_file(path, &size);
-    if (!buf) return SOL_FALSE;
+    if (!buf) return (unsigned char *)0;
     if (size < 12 || read_u32(buf) != 0x46546C67u || read_u32(buf + 4) != 2u) {  /* "glTF", v2 */
         free(buf);
-        return SOL_FALSE;
+        return (unsigned char *)0;
     }
 
     json_str = (char *)0;
-    bin = (const unsigned char *)0;
-    bin_len = 0;
     off = 12;
     while (off + 8 <= (size_t)size) {                  /* walk chunks */
         sol_u32              clen  = read_u32(buf + off);
@@ -401,17 +453,31 @@ sol_bool glb_load(const char *path, GlbModel *out) {
         if (ctype == 0x4E4F534Au && !json_str) {                     /* "JSON" */
             json_str = (char *)malloc((size_t)clen + 1);
             if (json_str) { memcpy(json_str, cdata, (size_t)clen); json_str[clen] = '\0'; }
-        } else if (ctype == 0x004E4942u && !bin) {                   /* "BIN\0" */
-            bin = cdata;
-            bin_len = clen;
+        } else if (ctype == 0x004E4942u && !*out_bin) {              /* "BIN\0" */
+            *out_bin     = cdata;
+            *out_bin_len = clen;
         }
         off += 8 + (size_t)clen;
     }
-    if (!json_str) { free(buf); return SOL_FALSE; }
+    if (!json_str) { free(buf); return (unsigned char *)0; }
 
-    g = json_parse(json_str);
+    *out_g = json_parse(json_str);
     free(json_str);
-    if (!g) { free(buf); return SOL_FALSE; }
+    if (!*out_g) { free(buf); return (unsigned char *)0; }
+    return buf;
+}
+
+sol_bool glb_load(const char *path, GlbModel *out) {
+    unsigned char       *buf;
+    const unsigned char *bin;
+    sol_u32              bin_len;
+    JsonValue           *g;
+
+    out->parts = (GlbPart *)0;
+    out->count = 0;
+
+    buf = glb_open(path, &g, &bin, &bin_len);
+    if (!buf) return SOL_FALSE;
 
     /* traverse the default scene's node tree, composing + baking transforms */
     {
@@ -450,4 +516,402 @@ void glb_free(GlbModel *out) {
     free(out->parts);
     out->parts = (GlbPart *)0;
     out->count = 0;
+}
+
+/* ---- skeletal animation (P4 item 9 piece 1): skins + animations ----
+   Parses skin 0 and every animation into compact SkelData. Channels
+   target NODES in the file; here they are remapped to JOINT indices
+   (channels aimed at non-joint nodes are skipped). Static non-joint
+   ANCESTOR transforms are folded into each root joint's root_pre, since
+   glTF joint worlds compose in scene space. All of it is accessor
+   surface — get_accessor/acc_float carry the load, as promised. */
+/* P4 item 9 piece 2: the skinned primitive itself — UNBAKED (vertices in
+   mesh-local bind space; the palette poses them, the object's transform
+   places them), interleaved into the 20-float layout, uploaded. Handles
+   the sample assets' quirks honestly: non-indexed primitives (the fox)
+   get indices synthesized; absent NORMAL (the fox again) gets per-face
+   normals computed; absent TEXCOORD reads zero; JOINTS_0 may be
+   ubyte/ushort/uint, WEIGHTS_0 must be float. One primitive in v1 (both
+   test assets have exactly one; more warns and takes the first). */
+sol_bool glb_load_skinned(const char *path, SkinnedModel *out) {
+    unsigned char       *buf;
+    const unsigned char *bin;
+    sol_u32              bin_len;
+    JsonValue           *g, *nodes, *prim;
+    float               *verts = (float *)0;
+    sol_u32             *idx   = (sol_u32 *)0;
+    sol_u32              vn, in_count, i;
+    sol_bool             ok = SOL_FALSE;
+
+    memset(out, 0, sizeof *out);
+    buf = glb_open(path, &g, &bin, &bin_len);
+    if (!buf) return SOL_FALSE;
+
+    nodes = json_member(g, "nodes");
+    prim  = (JsonValue *)0;
+    for (i = 0; i < json_count(nodes); i++) {
+        JsonValue *n = json_index(nodes, i);
+        if ((int)json_number(json_member(n, "skin"), -1.0) == 0 &&
+            json_member(n, "mesh") != (JsonValue *)0) {
+            JsonValue *prims = json_member(
+                json_index(json_member(g, "meshes"),
+                    (sol_u32)(int)json_number(json_member(n, "mesh"), -1.0)),
+                "primitives");
+            if (json_count(prims) > 1)
+                fprintf(stderr, "glb: %s has %u skinned primitives; "
+                        "taking the first\n", path, (unsigned)json_count(prims));
+            prim = json_index(prims, 0);
+            break;
+        }
+    }
+    if (prim == (JsonValue *)0) goto done;
+
+    {
+        JsonValue *attrs = json_member(prim, "attributes");
+        Accessor   apos  = get_accessor(g, bin, bin_len,
+            (int)json_number(json_member(attrs, "POSITION"), -1.0));
+        Accessor   anrm  = get_accessor(g, bin, bin_len,
+            (int)json_number(json_member(attrs, "NORMAL"), -1.0));
+        Accessor   auv   = get_accessor(g, bin, bin_len,
+            (int)json_number(json_member(attrs, "TEXCOORD_0"), -1.0));
+        Accessor   ajnt  = get_accessor(g, bin, bin_len,
+            (int)json_number(json_member(attrs, "JOINTS_0"), -1.0));
+        Accessor   awgt  = get_accessor(g, bin, bin_len,
+            (int)json_number(json_member(attrs, "WEIGHTS_0"), -1.0));
+        Accessor   aidx  = get_accessor(g, bin, bin_len,
+            (int)json_number(json_member(prim, "indices"), -1.0));
+        int        c;
+
+        if (!apos.ok || apos.comp != 5126 || !ajnt.ok || !awgt.ok ||
+            awgt.comp != 5126) {
+            fprintf(stderr, "glb: %s skinned attributes unsupported\n", path);
+            goto done;
+        }
+        vn = apos.count;
+        verts = (float *)calloc((size_t)vn * 20, sizeof(float));
+        if (!verts) goto done;
+        for (i = 0; i < vn; i++) {
+            float *v = verts + (size_t)i * 20;
+            for (c = 0; c < 3; c++) v[c] = acc_float(&apos, i, c);
+            if (anrm.ok && anrm.comp == 5126) {
+                for (c = 0; c < 3; c++) v[3 + c] = acc_float(&anrm, i, c);
+            }
+            if (auv.ok && auv.comp == 5126) {
+                v[6] = acc_float(&auv, i, 0);
+                v[7] = 1.0f - acc_float(&auv, i, 1);   /* the standing V flip */
+            }
+            /* tangents stay zero (no normal maps on the v1 menagerie) */
+            for (c = 0; c < 4; c++) {
+                v[12 + c] = (float)read_index(
+                    ajnt.base + (size_t)i * (size_t)ajnt.stride
+                              + (size_t)c * (size_t)comp_size(ajnt.comp),
+                    ajnt.comp);
+                v[16 + c] = acc_float(&awgt, i, c);
+            }
+        }
+
+        if (aidx.ok) {
+            in_count = aidx.count;
+            idx = (sol_u32 *)malloc((size_t)in_count * sizeof(sol_u32));
+            if (!idx) goto done;
+            for (i = 0; i < in_count; i++) idx[i] = acc_index(&aidx, i);
+        } else {                       /* non-indexed (the fox): 0,1,2,... */
+            in_count = vn;
+            idx = (sol_u32 *)malloc((size_t)in_count * sizeof(sol_u32));
+            if (!idx) goto done;
+            for (i = 0; i < in_count; i++) idx[i] = i;
+        }
+
+        if (!anrm.ok) {                /* no normals (the fox): per-face,
+                                          accumulated then normalized */
+            for (i = 0; i + 2 < in_count; i += 3) {
+                float *p0 = verts + (size_t)idx[i]     * 20;
+                float *p1 = verts + (size_t)idx[i + 1] * 20;
+                float *p2 = verts + (size_t)idx[i + 2] * 20;
+                float  e1x = p1[0]-p0[0], e1y = p1[1]-p0[1], e1z = p1[2]-p0[2];
+                float  e2x = p2[0]-p0[0], e2y = p2[1]-p0[1], e2z = p2[2]-p0[2];
+                float  nx = e1y*e2z - e1z*e2y;
+                float  ny = e1z*e2x - e1x*e2z;
+                float  nz = e1x*e2y - e1y*e2x;
+                int    k;
+                for (k = 0; k < 3; k++) {
+                    float *v = verts + (size_t)idx[i + k] * 20;
+                    v[3] += nx; v[4] += ny; v[5] += nz;
+                }
+            }
+            for (i = 0; i < vn; i++) {
+                float *v = verts + (size_t)i * 20;
+                float  l = sqrtf(v[3]*v[3] + v[4]*v[4] + v[5]*v[5]);
+                if (l > 1e-12f) { v[3] /= l; v[4] /= l; v[5] /= l; }
+                else            { v[4] = 1.0f; }
+            }
+        }
+
+        out->mesh = mesh_from_skinned(verts, vn, idx, in_count);
+
+        /* the material, through the same door as static parts */
+        {
+            sol_u32     img_count = json_count(json_member(g, "images"));
+            RhiTexture *cache     = img_count
+                ? (RhiTexture *)calloc(img_count, sizeof(RhiTexture))
+                : (RhiTexture *)0;
+            out->material = get_material(g, bin, bin_len,
+                (int)json_number(json_member(prim, "material"), -1.0),
+                cache, img_count);
+            free(cache);
+        }
+    }
+    ok = SOL_TRUE;
+
+done:
+    free(verts);
+    free(idx);
+    json_free(g);
+    free(buf);
+    if (ok)                             /* the skeleton, through its own door
+                                           (a second open of a small file,
+                                           once per session — honest cost) */
+        ok = glb_load_skeleton(path, &out->rig);
+    if (!ok) memset(&out->mesh, 0, sizeof out->mesh);
+    return ok;
+}
+
+sol_bool glb_load_skeleton(const char *path, SkelData *out) {
+    unsigned char       *buf;
+    const unsigned char *bin;
+    sol_u32              bin_len;
+    JsonValue           *g, *skin, *joints, *nodes, *anims;
+    int                 *node_parent = (int *)0;
+    int                 *node_joint  = (int *)0;
+    int                  nn, jn, i, j;
+    sol_bool             ok = SOL_FALSE;
+
+    memset(out, 0, sizeof *out);
+    buf = glb_open(path, &g, &bin, &bin_len);
+    if (!buf) return SOL_FALSE;
+
+    skin   = json_index(json_member(g, "skins"), 0);
+    joints = skin ? json_member(skin, "joints") : (JsonValue *)0;
+    nodes  = json_member(g, "nodes");
+    jn = (int)json_count(joints);
+    nn = (int)json_count(nodes);
+    if (skin == (JsonValue *)0 || jn <= 0 || nn <= 0) goto done;
+    if (jn > SKEL_MAX_JOINTS) {
+        fprintf(stderr, "glb: %s has %d joints (cap %d)\n",
+                path, jn, SKEL_MAX_JOINTS);
+        goto done;
+    }
+
+    /* node-space maps: who is whose parent, who is a joint */
+    node_parent = (int *)malloc((size_t)nn * sizeof(int));
+    node_joint  = (int *)malloc((size_t)nn * sizeof(int));
+    if (!node_parent || !node_joint) goto done;
+    for (i = 0; i < nn; i++) { node_parent[i] = -1; node_joint[i] = -1; }
+    for (i = 0; i < nn; i++) {
+        JsonValue *ch = json_member(json_index(nodes, (sol_u32)i), "children");
+        sol_u32    c;
+        for (c = 0; c < json_count(ch); c++) {
+            int id = (int)json_number(json_index(ch, c), -1.0);
+            if (id >= 0 && id < nn) node_parent[id] = i;
+        }
+    }
+    for (j = 0; j < jn; j++) {
+        int id = (int)json_number(json_index(joints, (sol_u32)j), -1.0);
+        if (id < 0 || id >= nn) goto done;
+        node_joint[id] = j;
+    }
+
+    /* the skeleton: rest TRS, joint-space parents, folded ancestors */
+    out->skel.joint_count = jn;
+    for (j = 0; j < jn; j++) {
+        int        id   = (int)json_number(json_index(joints, (sol_u32)j), -1.0);
+        JsonValue *node = json_index(nodes, (sol_u32)id);
+        int        p    = node_parent[id];
+        /* matrix-form joints are legal when un-animated (RiggedSimple's
+           root is one): node_decompose splits either form into TRS */
+        node_decompose(node, &out->skel.rest_t[j], &out->skel.rest_r[j],
+                       &out->skel.rest_s[j]);
+        out->skel.parent[j]   = (p >= 0 && node_joint[p] >= 0) ? node_joint[p]
+                                                               : -1;
+        out->skel.root_pre[j] = mat4_identity();
+        if (out->skel.parent[j] < 0) {
+            int a;
+            for (a = p; a >= 0; a = node_parent[a]) {
+                out->skel.root_pre[j] =
+                    mat4_mul(node_local(json_index(nodes, (sol_u32)a)),
+                             out->skel.root_pre[j]);
+            }
+        }
+    }
+
+    /* glTF's skinning equation carries inverse(global(meshNode)) on its
+       LEFT: skinned vertices are authored in the MESH NODE's local space,
+       and the palette must return them there — the renderer adds only the
+       object's own transform on top. Fold that inverse into every root's
+       prefix; with it, the bind pose yields identity palettes UNIVERSALLY
+       (RiggedSimple's cylinder hangs under two rotated parents — the
+       assets where the naive form "happens to work" just have this factor
+       at identity). */
+    {
+        int mesh_node = -1;
+        for (i = 0; i < nn; i++) {
+            JsonValue *n2 = json_index(nodes, (sol_u32)i);
+            if ((int)json_number(json_member(n2, "skin"), -1.0) == 0 &&
+                json_member(n2, "mesh") != (JsonValue *)0) {
+                mesh_node = i;
+                break;
+            }
+        }
+        if (mesh_node >= 0) {
+            mat4 inv = mat4_identity();
+            int  a;
+            for (a = mesh_node; a >= 0; a = node_parent[a])
+                inv = mat4_mul(inv,
+                               node_local_inv(json_index(nodes, (sol_u32)a)));
+            for (j = 0; j < jn; j++) {
+                if (out->skel.parent[j] < 0)
+                    out->skel.root_pre[j] =
+                        mat4_mul(inv, out->skel.root_pre[j]);
+            }
+        }
+    }
+
+    /* inverse binds: a MAT4 accessor, column-major like our mat4;
+       absent = identity (the spec's default) */
+    {
+        Accessor ib = get_accessor(g, bin, bin_len,
+            (int)json_number(json_member(skin, "inverseBindMatrices"), -1.0));
+        for (j = 0; j < jn; j++) {
+            int c;
+            if (ib.ok && ib.ncomp == 16 && ib.comp == 5126 &&
+                (int)ib.count >= jn) {
+                for (c = 0; c < 16; c++)
+                    out->skel.inverse_bind[j].m[c] =
+                        acc_float(&ib, (sol_u32)j, c);
+            } else {
+                out->skel.inverse_bind[j] = mat4_identity();
+            }
+        }
+    }
+
+    /* evaluation order: parents before children, computed once (the
+       bvh-refit lesson) — a cycle means a corrupt file */
+    {
+        int placed[SKEL_MAX_JOINTS];
+        int done_n = 0;
+        memset(placed, 0, sizeof placed);
+        while (done_n < jn) {
+            int progressed = 0;
+            for (j = 0; j < jn; j++) {
+                if (placed[j]) continue;
+                if (out->skel.parent[j] < 0 || placed[out->skel.parent[j]]) {
+                    out->skel.order[done_n++] = j;
+                    placed[j]  = 1;
+                    progressed = 1;
+                }
+            }
+            if (!progressed) goto done;
+        }
+    }
+
+    /* the clips: channels resolved, remapped, copied out of the blob */
+    anims = json_member(g, "animations");
+    {
+        sol_u32 an = json_count(anims), a;
+        if (an > 0) {
+            out->clips = (SkelClip *)calloc((size_t)an, sizeof(SkelClip));
+            if (!out->clips) goto done;
+            out->clip_count = (int)an;
+            for (a = 0; a < an; a++) {
+                JsonValue  *anim = json_index(anims, a);
+                JsonValue  *jch  = json_member(anim, "channels");
+                JsonValue  *jsm  = json_member(anim, "samplers");
+                const char *nm   = json_string(json_member(anim, "name"));
+                SkelClip   *cl   = &out->clips[a];
+                sol_u32     cn   = json_count(jch), c;
+                char        fallback[8];
+                if (!nm || !nm[0]) {                   /* unnamed: "clip0".. */
+                    strcpy(fallback, "clip");
+                    fallback[4] = (char)('0' + (int)(a % 10u));
+                    fallback[5] = '\0';
+                    nm = fallback;
+                }
+                cl->name = (char *)malloc(strlen(nm) + 1);
+                if (cl->name) strcpy(cl->name, nm);
+                cl->channels = (SkelChannel *)calloc(cn ? cn : 1,
+                                                     sizeof(SkelChannel));
+                if (!cl->channels) continue;
+                for (c = 0; c < cn; c++) {
+                    JsonValue   *chan  = json_index(jch, c);
+                    JsonValue   *tgt   = json_member(chan, "target");
+                    int          tnode = (int)json_number(json_member(tgt, "node"), -1.0);
+                    const char  *pth   = json_string(json_member(tgt, "path"));
+                    JsonValue   *smp   = json_index(jsm,
+                        (sol_u32)(int)json_number(json_member(chan, "sampler"), -1.0));
+                    const char  *itp   = smp ? json_string(json_member(smp, "interpolation"))
+                                             : (const char *)0;
+                    int          cpath, interp, nc, ki;
+                    Accessor     tin, tout;
+                    SkelChannel *sc;
+                    if (tnode < 0 || tnode >= nn || node_joint[tnode] < 0 ||
+                        pth == (const char *)0 || smp == (JsonValue *)0)
+                        continue;                      /* non-joint target etc. */
+                    if      (strcmp(pth, "translation") == 0) cpath = SKEL_PATH_T;
+                    else if (strcmp(pth, "rotation")    == 0) cpath = SKEL_PATH_R;
+                    else if (strcmp(pth, "scale")       == 0) cpath = SKEL_PATH_S;
+                    else continue;                     /* "weights": morphs, deferred */
+                    interp = SKEL_INTERP_LINEAR;
+                    if (itp && strcmp(itp, "STEP") == 0) {
+                        interp = SKEL_INTERP_STEP;
+                    } else if (itp && strcmp(itp, "LINEAR") != 0) {
+                        fprintf(stderr, "glb: %s channel skipped (%s)\n",
+                                path, itp);            /* CUBICSPLINE: deferred */
+                        continue;
+                    }
+                    tin  = get_accessor(g, bin, bin_len,
+                        (int)json_number(json_member(smp, "input"), -1.0));
+                    tout = get_accessor(g, bin, bin_len,
+                        (int)json_number(json_member(smp, "output"), -1.0));
+                    nc = (cpath == SKEL_PATH_R) ? 4 : 3;
+                    if (!tin.ok || !tout.ok || tin.comp != 5126 ||
+                        tout.comp != 5126 || tin.ncomp != 1 ||
+                        tout.ncomp != nc || tin.count == 0 ||
+                        tout.count < tin.count)
+                        continue;
+                    sc = &cl->channels[cl->channel_count];
+                    sc->joint     = node_joint[tnode];
+                    sc->path      = cpath;
+                    sc->interp    = interp;
+                    sc->key_count = (int)tin.count;
+                    sc->times  = (float *)malloc((size_t)tin.count * sizeof(float));
+                    sc->values = (float *)malloc((size_t)tin.count *
+                                                 (size_t)nc * sizeof(float));
+                    if (!sc->times || !sc->values) {
+                        free(sc->times);
+                        free(sc->values);
+                        continue;
+                    }
+                    for (ki = 0; ki < (int)tin.count; ki++) {
+                        int cc;
+                        sc->times[ki] = acc_float(&tin, (sol_u32)ki, 0);
+                        for (cc = 0; cc < nc; cc++)
+                            sc->values[ki * nc + cc] =
+                                acc_float(&tout, (sol_u32)ki, cc);
+                    }
+                    if (sc->times[sc->key_count - 1] > cl->duration)
+                        cl->duration = sc->times[sc->key_count - 1];
+                    cl->channel_count++;
+                }
+            }
+        }
+    }
+    ok = SOL_TRUE;
+
+done:
+    free(node_parent);
+    free(node_joint);
+    if (!ok) skel_data_free(out);
+    json_free(g);
+    free(buf);
+    return ok;
 }

@@ -133,6 +133,13 @@ Mesh    mesh_from_builder(MeshBuilder *b);
    Also drops the retained CPU geometry below. */
 void    mesh_destroy(Mesh *m);
 
+/* upload SKINNED vertex data (P4 item 9): 20 floats per vertex — the
+   canonical 12 (pos3+normal3+uv2+tangent4) plus joints4 (indices as
+   floats) + weights4. No retained CPU geometry: a deforming mesh has no
+   single triangle truth; picking sees the bind-pose AABB. */
+Mesh    mesh_from_skinned(const sol_f32 *verts, sol_u32 vert_count,
+                          const sol_u32 *indices, sol_u32 index_count);
+
 /* ---- retained CPU geometry (P4 item 2): triangles kept at upload ----
    Picking needs actual triangles (a doorway is a hole in the geometry but
    not in the AABB), so mesh_from_builder registers positions + indices
