@@ -21,6 +21,7 @@
 #include "wtext.h"               /* world-space SDF text — note cards (P3 item 8) */
 #include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
+#include "bvh.h"                 /* the spatial index (P4 item 2) */
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
@@ -574,6 +575,14 @@ typedef struct {
        culling and instancing claims point here, not at fps. All in ms. */
     float t_frame, t_cpu, t_update, t_shadow, t_hdr, t_post, t_swap;
     int   draws_done, draws_total;  /* scene objects drawn / with geometry */
+    /* the spatial index (P4 item 2): world AABBs of everything with
+       geometry, build-or-refit on demand (ids compared each refresh —
+       same set refits, changed set rebuilds). bvh_ids/boxes are the
+       scratch + identity arrays the tree is fed from. */
+    Bvh      bvh;
+    sol_u32 *bvh_ids;
+    Aabb    *bvh_boxes;
+    int      bvh_count, bvh_cap;
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
@@ -924,17 +933,79 @@ static sol_bool pick_skip_land(const Scene *s, const SceneObject *o, void *ctx) 
                                    strcmp(o->mesh_ref, "terrain") == 0);
 }
 
+/* Refresh the spatial index from the scene: collect (handle, world AABB)
+   for everything with geometry; the SAME set in the same order refits
+   (cheap, motion only), a changed set rebuilds (add/remove/load). Called
+   on demand by picking — clicks are rare — and per frame once culling
+   (piece 4) wants current boxes anyway. */
+static void bvh_refresh(AppState *st) {
+    Scene   *s = &st->scene;
+    int      n = 0;
+    sol_u32  i;
+    sol_bool same;
+    if ((int)s->count > st->bvh_cap) {
+        int      ncap = (int)s->count;
+        sol_u32 *ni = (sol_u32 *)realloc(st->bvh_ids,   (size_t)ncap * sizeof *ni);
+        Aabb    *nb = (Aabb *)realloc(st->bvh_boxes, (size_t)ncap * sizeof *nb);
+        if (ni) st->bvh_ids   = ni;
+        if (nb) st->bvh_boxes = nb;
+        if (!ni || !nb) return;             /* OOM: the stale tree still works */
+        st->bvh_cap = ncap;
+    }
+    same = SOL_TRUE;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        if (o->mesh.index_count == 0) continue;
+        if (n >= st->bvh_count || st->bvh_ids[n] != o->handle) same = SOL_FALSE;
+        st->bvh_ids[n]   = o->handle;
+        st->bvh_boxes[n] = aabb_transform(scene_world_matrix(s, o),
+                                          o->mesh.bounds);
+        n++;
+    }
+    if (n != st->bvh_count) same = SOL_FALSE;
+    if (same) {
+        bvh_refit(&st->bvh, st->bvh_boxes, n);
+    } else {
+        bvh_build(&st->bvh, st->bvh_boxes, st->bvh_ids, n);
+        st->bvh_count = n;
+    }
+}
+
+/* the leaf visit for picking: app policy first, then the shared narrow
+   phase; returns the (possibly sharpened) best t so the walk prunes harder */
+typedef struct {
+    AppState *st;
+    Ray       ray;
+    sol_u32   hit;
+} PalacePickCtx;
+
+static float palace_pick_leaf(sol_u32 handle, float best_t, void *ctx) {
+    PalacePickCtx *pc = (PalacePickCtx *)ctx;
+    SceneObject   *o  = scene_get(&pc->st->scene, handle);
+    if (o == NULL) return best_t;
+    if (pick_skip_land(&pc->st->scene, o, NULL)) return best_t;
+    if (scene_pick_object(&pc->st->scene, o, pc->ray, best_t, &best_t))
+        pc->hit = handle;
+    return best_t;
+}
+
 /* Side-effect-free pick through an NDC point: the nearest hit's handle (0 =
    none). do_pick adds the selection/focus behavior on top; the drag path
-   (item 4) needs just the hit. */
+   (item 4) needs just the hit. Broad phase = the BVH (P4 item 2 piece 3);
+   semantics identical to the linear scene_pick (pick_test proves it). */
 static sol_u32 pick_at(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y, float *t_out) {
-    int   ww, wh;
-    float aspect;
-    Ray   ray;
+    int           ww, wh;
+    float         aspect, best;
+    PalacePickCtx pc;
     glfwGetWindowSize(w, &ww, &wh);                 /* cursor is in window coords */
     aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
-    ray = camera_ray(&st->camera, ndc_x, ndc_y, aspect);
-    return scene_pick(&st->scene, ray, t_out, pick_skip_land, NULL);
+    pc.st  = st;
+    pc.ray = camera_ray(&st->camera, ndc_x, ndc_y, aspect);
+    pc.hit = 0;
+    bvh_refresh(st);                                /* current boxes, this exact frame */
+    best = bvh_ray_query(&st->bvh, pc.ray, 1e30f, palace_pick_leaf, &pc);
+    if (t_out) *t_out = (pc.hit != 0) ? best : 0.0f;
+    return pc.hit;
 }
 
 /* The selection UNIT's root, mirroring the drag rule (item 6): a card
@@ -4080,6 +4151,9 @@ int main(void) {
     ui_shutdown();
     scene_free(&state.scene);
     collide_set_free(&state.colliders);
+    bvh_free(&state.bvh);
+    free(state.bvh_ids);
+    free(state.bvh_boxes);
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
     if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);
     rhi_shutdown();

@@ -70,6 +70,10 @@ sol_u32      scene_pick(Scene *s, Ray ray, float *out_t,
                         ScenePickSkip skip, void *skip_ctx);  /* nearest hit's handle; 0 = none.
                         TRIANGLE-precise where CPU geometry is retained
                         (mesh_geom_get), AABB fallback elsewhere (P4 item 2) */
+sol_bool     scene_pick_object(Scene *s, SceneObject *o, Ray ray,
+                               float best_t, float *out_t);  /* one object's test:
+                        SOL_TRUE iff it beats best_t. The shared narrow phase —
+                        linear scene_pick and the BVH walk are both clients. */
 
 /* slot operations — handle-based (resolve internally, immune to stale pointers) */
 void        scene_meta_set(Scene *s, sol_u32 handle, const char *key, const char *value);

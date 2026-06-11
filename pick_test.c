@@ -8,6 +8,7 @@
 #include "sol_math.h"
 #include "scene.h"
 #include "mesh.h"
+#include "bvh.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -42,6 +43,65 @@ static Mesh geom_mesh(MeshBuilder *b, sol_u32 fake_id) {
 static sol_bool skip_wall_ref(const Scene *s, const SceneObject *o, void *ctx) {
     (void)s; (void)ctx;
     return o->mesh_ref != NULL && strcmp(o->mesh_ref, "wall") == 0;
+}
+
+/* deterministic LCG for the equivalence fuzz: same seed, same boxes, same
+   rays, forever — a pass today is a pass on every machine */
+static sol_u32 g_rng = 12345u;
+static float frnd(void) {
+    g_rng = g_rng * 1664525u + 1013904223u;
+    return (float)((g_rng >> 8) & 0xFFFFu) / 65535.0f;
+}
+static float frange(float lo, float hi) { return lo + (hi - lo) * frnd(); }
+
+/* BVH leaf visit for the PURE equivalence test: the precise test is just
+   the leaf's own AABB (ids are 1-based indices into the box array) */
+typedef struct {
+    Ray         ray;
+    const Aabb *boxes;
+    sol_u32     hit;
+} EqCtx;
+
+static float eq_leaf_aabb(sol_u32 id, float best, void *ctx) {
+    EqCtx *e = (EqCtx *)ctx;
+    float  t;
+    if (ray_vs_aabb(e->ray, e->boxes[id - 1], &t) && t < best) {
+        best   = t;
+        e->hit = id;
+    }
+    return best;
+}
+
+/* BVH leaf visit replicating the app's pick exactly: policy filter, then
+   the shared narrow phase — for the scene-level equivalence test */
+typedef struct {
+    Scene        *s;
+    Ray           ray;
+    ScenePickSkip skip;
+    sol_u32       hit;
+} SceneEqCtx;
+
+static float eq_leaf_scene(sol_u32 handle, float best, void *ctx) {
+    SceneEqCtx  *e = (SceneEqCtx *)ctx;
+    SceneObject *o = scene_get(e->s, handle);
+    if (o == NULL) return best;
+    if (e->skip && e->skip(e->s, o, NULL)) return best;
+    if (scene_pick_object(e->s, o, e->ray, best, &best)) e->hit = handle;
+    return best;
+}
+
+/* build a BVH over a scene's world AABBs, the way main.c's refresh does */
+static void scene_bvh_build(Bvh *b, Scene *s, Aabb *boxes, sol_u32 *ids) {
+    int     n = 0;
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        if (o->mesh.index_count == 0) continue;
+        ids[n]   = o->handle;
+        boxes[n] = aabb_transform(scene_world_matrix(s, o), o->mesh.bounds);
+        n++;
+    }
+    bvh_build(b, boxes, ids, n);
 }
 
 /* A pickable Mesh built by hand — scene_pick reads only bounds + index_count,
@@ -440,6 +500,160 @@ int main(void) {
             scene_free(&sc); return 1;
         }
         mb_free(&tb);
+        scene_free(&sc);
+    }
+
+    /* ---- BVH vs brute force (P4 item 2 piece 3): the equivalence proof.
+       100 random boxes, 300 random rays — the tree must give EXACTLY the
+       brute-force answer, every time; then every box moves, the tree REFITS
+       (topology untouched), and 300 more rays must still agree. ---- */
+    {
+        enum { NB = 100, NR = 300 };
+        static Aabb    boxes[NB];
+        static sol_u32 ids[NB];
+        Bvh  bvh;
+        int  i, k, pass;
+
+        for (i = 0; i < NB; i++) {
+            float cx = frange(-20.0f, 20.0f), cy = frange(-20.0f, 20.0f),
+                  cz = frange(-20.0f, 20.0f);
+            float hx = frange(0.1f, 2.0f), hy = frange(0.1f, 2.0f),
+                  hz = frange(0.1f, 2.0f);
+            boxes[i].min = vec3_make(cx - hx, cy - hy, cz - hz);
+            boxes[i].max = vec3_make(cx + hx, cy + hy, cz + hz);
+            ids[i] = (sol_u32)(i + 1);
+        }
+        bvh_init(&bvh);
+        bvh_build(&bvh, boxes, ids, NB);
+
+        for (pass = 0; pass < 2; pass++) {
+            for (k = 0; k < NR; k++) {
+                sol_u32 brute_hit = 0;
+                float   brute_t   = 1e30f;
+                EqCtx   ec;
+                float   bt;
+                r.origin = vec3_make(frange(-30.0f, 30.0f),
+                                     frange(-30.0f, 30.0f),
+                                     frange(-30.0f, 30.0f));
+                r.dir = vec3_normalize(vec3_make(frange(-1.0f, 1.0f),
+                                                 frange(-1.0f, 1.0f),
+                                                 frange(-1.0f, 1.0f) + 0.001f));
+                for (i = 0; i < NB; i++) {
+                    if (ray_vs_aabb(r, boxes[i], &t) && t < brute_t) {
+                        brute_t   = t;
+                        brute_hit = ids[i];
+                    }
+                }
+                ec.ray   = r;
+                ec.boxes = boxes;
+                ec.hit   = 0;
+                bt = bvh_ray_query(&bvh, r, 1e30f, eq_leaf_aabb, &ec);
+                if (ec.hit != brute_hit ||
+                    (brute_hit != 0 && !approx(bt, brute_t))) {
+                    printf("FAIL: BVH diverged from brute force (pass %d ray %d:"
+                           " bvh=%u t=%.4f brute=%u t=%.4f)\n",
+                           pass, k, (unsigned)ec.hit, bt,
+                           (unsigned)brute_hit, brute_t);
+                    return 1;
+                }
+            }
+            if (pass == 0) {                /* move EVERYTHING, refit, go again */
+                for (i = 0; i < NB; i++) {
+                    float dx = frange(-3.0f, 3.0f), dy = frange(-3.0f, 3.0f),
+                          dz = frange(-3.0f, 3.0f);
+                    boxes[i].min.x += dx;  boxes[i].max.x += dx;
+                    boxes[i].min.y += dy;  boxes[i].max.y += dy;
+                    boxes[i].min.z += dz;  boxes[i].max.z += dz;
+                }
+                bvh_refit(&bvh, boxes, NB);
+            }
+        }
+        printf("bvh == brute force: %d rays before and after refit: ok\n", NR * 2);
+
+        /* the empty tree constrains nothing and crashes nothing */
+        bvh_free(&bvh);
+        {
+            EqCtx ec;
+            ec.ray = r;  ec.boxes = boxes;  ec.hit = 0;
+            if (bvh_ray_query(&bvh, r, 1e30f, eq_leaf_aabb, &ec) != 1e30f ||
+                ec.hit != 0) {
+                printf("FAIL: empty BVH must return best_t untouched\n");
+                return 1;
+            }
+        }
+        printf("empty bvh: ok\n");
+    }
+
+    /* ---- scene-level equivalence: the BVH-driven pick (main.c's shape)
+       against the linear scene_pick, on a scene mixing retained-triangle
+       objects (the doorway wall + a box) and bare-AABB fallbacks — gap ray,
+       panel ray, fallback ray, inside-a-fallback ray, filtered ray. ---- */
+    {
+        Scene       sc;
+        MeshBuilder wb, bb;
+        sol_u32     wall;
+        Bvh         bvh;
+        Aabb        sboxes[8];
+        sol_u32     sids[8];
+        float       wprm[6];
+        int         k;
+        static const float RAYS[5][6] = {
+            {  0.0f, 1.0f, -3.0f,   0.0f, 0.0f, 1.0f },   /* through the gap   */
+            { -1.5f, 1.0f, -3.0f,   0.0f, 0.0f, 1.0f },   /* into the panel    */
+            {  5.0f, 0.5f, -3.0f,   0.0f, 0.0f, 1.0f },   /* fallback box      */
+            {  5.0f, 0.5f,  5.0f,   0.0f, 0.0f, -1.0f },  /* from INSIDE it    */
+            {  9.0f, 9.0f,  9.0f,   0.0f, 1.0f, 0.0f }    /* misses everything */
+        };
+        wprm[0] = 4.0f; wprm[1] = 3.0f; wprm[2] = 1.5f;
+        wprm[3] = 1.0f; wprm[4] = 2.2f; wprm[5] = 0.2f;
+
+        scene_init(&sc);
+        mb_init(&wb);
+        mesh_ref_build("wall", wprm, 6, &wb);
+        wall = scene_add(&sc, 0, geom_mesh(&wb, 201), vec3_make(0.0f, 0.0f, 0.0f),
+                         quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&sc, wall, "wall");
+        mb_init(&bb);
+        mesh_ref_build("box", NULL, 0, &bb);
+        scene_add(&sc, 0, geom_mesh(&bb, 202), vec3_make(0.0f, 1.0f, 3.0f),
+                  quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_add(&sc, 0, box_mesh(), vec3_make(5.0f, 0.5f, 2.0f),     /* fallback */
+                  quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_add(&sc, 0, box_mesh(), vec3_make(5.0f, 0.5f, 5.0f),     /* fallback */
+                  quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+
+        bvh_init(&bvh);
+        scene_bvh_build(&bvh, &sc, sboxes, sids);
+
+        for (k = 0; k < 5; k++) {
+            int           f;
+            r.origin = vec3_make(RAYS[k][0], RAYS[k][1], RAYS[k][2]);
+            r.dir    = vec3_make(RAYS[k][3], RAYS[k][4], RAYS[k][5]);
+            for (f = 0; f < 2; f++) {                    /* without + with filter */
+                ScenePickSkip skip = f ? skip_wall_ref : NULL;
+                SceneEqCtx    ec;
+                sol_u32       lin_hit;
+                float         lin_t, bvh_t;
+                lin_hit  = scene_pick(&sc, r, &lin_t, skip, NULL);
+                ec.s     = &sc;
+                ec.ray   = r;
+                ec.skip  = skip;
+                ec.hit   = 0;
+                bvh_t = bvh_ray_query(&bvh, r, 1e30f, eq_leaf_scene, &ec);
+                if (ec.hit != lin_hit ||
+                    (lin_hit != 0 && !approx(bvh_t, lin_t))) {
+                    printf("FAIL: scene equivalence ray %d filter %d:"
+                           " bvh=%u/%.4f linear=%u/%.4f\n",
+                           k, f, (unsigned)ec.hit, bvh_t,
+                           (unsigned)lin_hit, lin_t);
+                    return 1;
+                }
+            }
+        }
+        printf("bvh pick == linear pick: gap/panel/fallback/inside/miss x filter: ok\n");
+        mb_free(&wb);
+        mb_free(&bb);
+        bvh_free(&bvh);
         scene_free(&sc);
     }
 
