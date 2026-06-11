@@ -185,6 +185,16 @@ imports.
   matrix from real scale.
 - **`<mesh>`** — geometry by reference + schema-named parameters; always
   reconstructed, never serialized. **`<mat>`** — scalar factors only.
+- **`<component type="..." .../>`** (P4 item 6) — a behavior attachment,
+  repeatable: the type names an entry in the component registry (the
+  registry-as-schema pattern's third application — `spin`, `bob`, more to
+  come), and the named attrs are the file's own param PREFIX against that
+  schema (absent params take defaults, like mesh refs). Behaviors compute
+  TRANSIENT overlays on top of the persisted transform — the file records
+  the BASE the user placed and which dances are attached, never a frame of
+  the dance (TODO4 §1.6). An unknown type round-trips bare (its params have
+  no names a foreign loader could know); delete the element and the motion
+  is gone — the file IS the behavior.
 - **Overbuilt slots** (`<meta>`, `<rel>`, `<content>`) — present in the model and
   serialized though mostly empty this phase; they cannot be retrofitted onto a
   render-only scene (TODO2.md §1.4/§1.5).

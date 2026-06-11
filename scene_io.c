@@ -9,7 +9,8 @@
 
 #include "scene.h"
 #include "stml.h"
-#include "mesh.h"   /* mesh_ref_schema: the registry names the param attrs (item 5) */
+#include "mesh.h"      /* mesh_ref_schema: the registry names the param attrs (item 5) */
+#include "component.h" /* component_schema: behavior attrs by name (P4 item 6) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -177,6 +178,26 @@ sol_bool scene_save(Scene *s, const char *path) {
                             (double)o->material.emissive.z);
                 fprintf(f, " />\n");
             }
+        }
+
+        for (j = 0; j < o->comp_count; j++) {  /* components (P4 item 6): the
+                                                  behavior, as data — named
+                                                  attrs from the schema, the
+                                                  file's own param PREFIX only.
+                                                  An unknown type writes bare
+                                                  (its params have no names we
+                                                  know — the documented edge). */
+            const Component   *c = &o->components[j];
+            const char *const *names;
+            int n, k;
+            n = component_schema(c->type, &names, (const float **)0);
+            fprintf(f, "    <component");
+            write_attr(f, "type", c->type);
+            if (n > 0) {
+                for (k = 0; k < c->param_count && k < n; k++)
+                    fprintf(f, " %s=\"%.9g\"", names[k], (double)c->params[k]);
+            }
+            fprintf(f, " />\n");
         }
 
         for (j = 0; j < o->meta_count; j++) {
@@ -364,6 +385,32 @@ sol_bool scene_load(Scene *s, const char *path) {
                 mm.emissive.y   = attr_f(mat, "eg", 0.0f);
                 mm.emissive.z   = attr_f(mat, "eb", 0.0f);
                 scene_material_set(s, h, mm);
+            }
+        }
+
+        for (j = 0; j < on->child_count; j++) {        /* components (P4 item 6) */
+            StmlNode   *c = on->children[j];
+            const char *ty;
+            if (!c->tag || strcmp(c->tag, "component") != 0) continue;
+            ty = stml_attr(c, "type");
+            if (!ty) continue;
+            {
+                const char *const *names;
+                int   n = component_schema(ty, &names, (const float **)0);
+                float ps[COMPONENT_MAX_PARAMS];
+                int   k, cnt = 0;
+                if (n > 0) {
+                    for (k = 0; k < n; k++) {          /* the PREFIX rule: stop
+                                                          at the first absent
+                                                          attr, defaults fill
+                                                          the rest at update */
+                        const char *v = stml_attr(c, names[k]);
+                        if (!v) break;
+                        ps[k] = (float)atof(v);
+                        cnt = k + 1;
+                    }
+                }
+                scene_component_add(s, h, ty, ps, cnt);
             }
         }
     }

@@ -95,6 +95,15 @@ int main(void) {
         scene_material_set(&scene, box_h, bm);
     }
 
+    /* components (P4 item 6): a known type with a param prefix, and an
+       UNKNOWN type that must survive the trip intact (forward compat) */
+    {
+        float sp[4];
+        sp[0] = 0.0f; sp[1] = 1.0f; sp[2] = 0.0f; sp[3] = 1.2f;
+        scene_component_add(&scene, box_h, "spin", sp, 4);
+        scene_component_add(&scene, box_h, "wibble", (const float *)0, 0);
+    }
+
     scene_meta_set(&scene, box_h, "title",  "Test Box");
     scene_meta_set(&scene, box_h, "author", "Solarium");
     scene_rel_add(&scene, box_h, "orbits", anchor_h);
@@ -224,6 +233,16 @@ int main(void) {
                 return 1;
             }
             printf("material factors (color + roughness + emissive) round-trip: ok\n");
+            if (bb->comp_count != 2 ||
+                strcmp(bb->components[0].type, "spin") != 0 ||
+                bb->components[0].param_count != 4 ||
+                bb->components[0].params[3] != 1.2f ||
+                strcmp(bb->components[1].type, "wibble") != 0) {
+                printf("FAIL: components did not round-trip\n");
+                scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            printf("components (known params + unknown type) round-trip: ok\n");
         }
 
         /* the emitters themselves are headless now (mesh.c is pure CPU since

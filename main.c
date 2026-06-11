@@ -668,7 +668,6 @@ typedef struct {
     sol_u32     page_handle;    /* the readable parchment surface (item 5d) */
     sol_u32     sword_handle;   /* the showcase sword: stood upright, spun in update() */
     sol_u32     sword_precess_handle;  /* invisible anchor the sword orbits (precession) */
-    float       angle;
     Camera      camera;
     /* offscreen HDR pass (item 7) */
     RhiRenderTarget hdr_rt;          /* scene renders here, then to the window */
@@ -1593,6 +1592,7 @@ static void scene_resolve_meshes(Scene *s);    /* defined with init_scene below 
 static void apply_kind_materials(Scene *s);    /* likewise */
 static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
+static void adopt_legacy_motion(AppState *st); /* P4 item 6: motion becomes data */
 static void note_edit_end(AppState *st);       /* defined with on_key below */
 
 /* The codex mint's tiny LCG (item 9): varied-but-PERSISTENT books — the
@@ -3446,6 +3446,7 @@ static sol_bool load_palace(AppState *st) {
     meadow_rebuild(st);                           /* and the grass */
     apply_kind_materials(&st->scene);
     bind_runtime_handles(st);
+    adopt_legacy_motion(st);         /* pre-component saves get their dance back */
     {
         SceneObject *p = scene_get(&st->scene, st->page_handle);
         if (p) p->material.albedo_tex = st->albedo_tex;
@@ -3881,6 +3882,7 @@ static int init_scene(AppState *state) {
         populate_default_scene(state);
         collide_rebuild(&state->colliders, &state->scene);
         meadow_rebuild(state);
+        adopt_legacy_motion(state);   /* the default scene's movers, as data */
     }
 
     /* spawn standing at the south edge of the scene, facing -Z at eye height
@@ -3938,53 +3940,72 @@ static int init_scene(AppState *state) {
     return 1;
 }
 
+/* update(): per-frame DERIVED state only, since P4 item 6 — every hardcoded
+   animation block this function carried for four phases now lives as
+   component DATA attached in the scene file (see adopt_legacy_motion). */
 static void update(AppState *state, double dt) {
-    SceneObject *box, *anchor, *sword;
-    quat qy, qx;
-
-    state->angle += (float)dt * 0.8f;
-
     /* item 7: containment is DERIVED state, recomputed each frame — walking
        through a doorway "transitions" only in the sense that this query's
        answer changes. The ambient eases toward the room's level (an
        exponential glide; no pop at the threshold). */
-    {
-        float target;
-        state->current_room = room_containing(&state->scene, state->camera.pos);
-        target = state->current_room
-               ? room_ambient(&state->scene, state->current_room) : 1.0f;
-        state->ambient_scale += (target - state->ambient_scale)
-                              * (1.0f - (float)exp(-dt * 5.0));
+    float target;
+    state->current_room = room_containing(&state->scene, state->camera.pos);
+    target = state->current_room
+           ? room_ambient(&state->scene, state->current_room) : 1.0f;
+    state->ambient_scale += (target - state->ambient_scale)
+                          * (1.0f - (float)exp(-dt * 5.0));
+}
+
+/* MIGRATION (P4 item 6 piece 2): scenes saved before components carried
+   their motion in update()'s hardcoded blocks — and their saved rotations
+   are a BAKED FRAME of that dance, the very hazard §1.6 names. One-time
+   adoption: if a legacy mover exists and carries no components, RESET its
+   base to the placed pose and attach the motion as data. The box's tumble
+   is literally two spins composed; the sword spins about its own blade
+   (local Z) over a static stand-up-and-lean base. Idempotent: components
+   present = nothing to do. */
+static void adopt_legacy_motion(AppState *st) {
+    SceneObject *o;
+    float        p[4];
+    int          adopted = 0;
+
+    o = scene_get(&st->scene, st->anchor_handle);      /* the box's orbit */
+    if (o && o->comp_count == 0) {
+        o->rot = quat_identity();
+        p[0] = 0.0f; p[1] = 1.0f; p[2] = 0.0f; p[3] = 0.8f;
+        scene_component_add(&st->scene, st->anchor_handle, "spin", p, 4);
+        adopted++;
     }
-
-    /* spin the anchor -> its child (the box) orbits the origin */
-    anchor = scene_get(&state->scene, state->anchor_handle);
-    if (anchor) anchor->rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle);
-
-    /* the box's OWN tumble (local rotation), faster than the orbit */
-    box = scene_get(&state->scene, state->box_handle);
-    if (box) {
-        qy = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle * 1.5f);
-        qx = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), state->angle * 0.75f);
-        box->rot = quat_normalize(quat_mul(qy, qx));
+    o = scene_get(&st->scene, st->box_handle);         /* the tumble: two spins */
+    if (o && o->comp_count == 0) {
+        o->rot = quat_identity();
+        p[0] = 0.0f; p[1] = 1.0f; p[2] = 0.0f; p[3] = 1.2f;
+        scene_component_add(&st->scene, st->box_handle, "spin", p, 4);
+        p[0] = 1.0f; p[1] = 0.0f; p[2] = 0.0f; p[3] = 0.6f;
+        scene_component_add(&st->scene, st->box_handle, "spin", p, 4);
+        adopted++;
     }
-
-    /* the sword's precession: orbit the invisible point (tight radius) */
-    {
-        SceneObject *precess = scene_get(&state->scene, state->sword_precess_handle);
-        if (precess) precess->rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
-                                                         state->angle * 0.5f);
+    o = scene_get(&st->scene, st->sword_precess_handle); /* the precession */
+    if (o && o->comp_count == 0) {
+        o->rot = quat_identity();
+        p[0] = 0.0f; p[1] = 1.0f; p[2] = 0.0f; p[3] = 0.4f;
+        scene_component_add(&st->scene, st->sword_precess_handle, "spin", p, 4);
+        adopted++;
     }
-
-    /* the sword itself: stand upright (blade +Z -> world +Y), spin on that long
-       axis, then lean 15deg out (toward +X = radially outward as the parent
-       precesses). Compose tilt * spin * standup (applied standup -> spin -> tilt). */
-    sword = scene_get(&state->scene, state->sword_handle);
-    if (sword) {
+    o = scene_get(&st->scene, st->sword_handle);       /* the sword: spin the blade */
+    if (o && o->comp_count == 0) {
         quat standup = quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), sol_radians(-90.0f));
-        quat spin    = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), state->angle * 0.8f);
         quat tilt    = quat_from_axis_angle(vec3_make(0.0f, 0.0f, 1.0f), sol_radians(-15.0f));
-        sword->rot = quat_normalize(quat_mul(quat_mul(tilt, spin), standup));
+        o->rot = quat_normalize(quat_mul(tilt, standup));   /* the POSE persists;
+                                                               the spin is overlay */
+        p[0] = 0.0f; p[1] = 0.0f; p[2] = 1.0f; p[3] = 0.64f;
+        scene_component_add(&st->scene, st->sword_handle, "spin", p, 4);
+        adopted++;
+    }
+    if (adopted > 0) {
+        scene_save(&st->scene, "scene.stml");
+        printf("adopted legacy motion: %d object(s) now carry their dance as data\n",
+               adopted);
     }
 }
 
