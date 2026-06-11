@@ -67,10 +67,14 @@ typedef struct {
        walk every frame, composed into the world walks below — NEVER
        serialized. The file records the BASE the user placed, not a frame
        of the dance. overlay_glow multiplies light intensity + emissive at
-       their points of use. */
+       their points of use. overlay_clip/speed are a behavior's CURRENT
+       animation choice (the wander brain's gait): -1 = unset, the skinned
+       renderer falls through to the persisted animate component. */
     vec3  overlay_pos;
     quat  overlay_rot;
     float overlay_glow;
+    int   overlay_clip;
+    float overlay_speed;
 } SceneObject;
 
 typedef struct {

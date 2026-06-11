@@ -1436,6 +1436,13 @@ static void skin_anim_of(const SceneObject *o, int *clip, float *speed) {
     sol_u32 c;
     *clip  = -1;
     *speed = 1.0f;
+    if (o->overlay_clip >= 0) {        /* a behavior's CURRENT gait (§1.6):
+                                          the wander brain outranks the
+                                          persisted rule, never the file */
+        *clip  = o->overlay_clip;
+        *speed = o->overlay_speed;
+        return;
+    }
     for (c = 0; c < o->comp_count; c++) {
         const Component *cp = &o->components[c];
         const float     *def;
@@ -2404,6 +2411,12 @@ static float ground_under(AppState *st, vec3 p, sol_u32 *out_plot) {
     }
     if (out_plot) *out_plot = best_plot;
     return best;
+}
+
+/* the wander component's outlet: ground_under behind a void* — creatures'
+   feet ride the same ground law the camera walks by */
+static float wander_ground(void *ctx, vec3 p, sol_u32 *plot) {
+    return ground_under((AppState *)ctx, p, plot);
 }
 
 /* ---- the reader (item 9 piece 3) ----
@@ -3574,10 +3587,11 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->e_was_down = e_now;
     }
 
-    /* Y mints a FOX (P4 item 9): a rigged glb on an empty anchor — meta
-       skin_glb names the file, the skeleton poses it fresh every frame.
+    /* Y mints a FOX (P4 item 9 + the wander sidequest): a rigged glb on an
+       empty anchor — meta skin_glb names the file, the skeleton poses it
+       fresh every frame, and the wander brain gives it somewhere to be.
        Scale 0.007 because the fox is authored in centimeters (~155 long).
-       Not pickable in v1 (an empty has no AABB); it stands where minted. */
+       Not pickable in v1 (an empty has no AABB). */
     {
         sol_bool y_now = glfwGetKey(w, GLFW_KEY_Y) == GLFW_PRESS;
         if (y_now && !st->y_was_down) {
@@ -3596,11 +3610,15 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             scene_meta_set(&st->scene, h, "name", "fox");
             scene_meta_set(&st->scene, h, "skin_glb", "Fox.glb");
             scene_component_add(&st->scene, h, "animate", (const float *)0, 0);
-                                       /* bare = clip 0 speed 1; edit the
-                                          line in the file + L to switch */
+                                       /* the persisted rule: clip 0 if it
+                                          ever stops wandering */
+            scene_component_add(&st->scene, h, "wander", (const float *)0, 0);
+                                       /* bare = a gentle meanderer; delete
+                                          the line + L and it stands its
+                                          ground */
             st->selected_handle = h;
             scene_save(&st->scene, "scene.stml");
-            printf("a fox arrives — it is surveying the situation\n");
+            printf("a fox arrives — it has somewhere to be\n");
         }
         st->y_was_down = y_now;
     }
@@ -4546,6 +4564,7 @@ static int init_scene(AppState *state) {
         RhiPipelineDesc pdesc = {0};
         particles_init(&state->particles);
         component_set_particle_pool(&state->particles);   /* the emit outlet */
+        component_set_ground_fn(wander_ground, state);    /* the wander outlet */
         psh = rhi_create_shader(PARTICLE_VERTEX_SRC, PARTICLE_FRAGMENT_SRC);
         if (psh.id) {
             pdesc.shader = psh;

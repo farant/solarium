@@ -45,4 +45,12 @@ void components_update(Scene *s, float t, float dt);
    tests, iotest) makes every emitter a silent no-op */
 void component_set_particle_pool(ParticlePool *pool);
 
+/* the wander component's outlet (the fox sidequest): a ground query —
+   world point in, ground height out, *plot = the terrain plot that
+   claimed it (0 = the world floor). The app wires ground_under here, the
+   SAME law the camera walks by; NULL (headless tests) = a flat world
+   where everything is standing room. */
+typedef float (*ComponentGroundFn)(void *ctx, vec3 p, sol_u32 *plot);
+void component_set_ground_fn(ComponentGroundFn fn, void *ctx);
+
 #endif /* COMPONENT_H */

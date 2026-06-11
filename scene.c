@@ -75,6 +75,8 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     o->overlay_pos  = vec3_make(0.0f, 0.0f, 0.0f);  /* overlays start as identity */
     o->overlay_rot  = quat_identity();
     o->overlay_glow = 1.0f;
+    o->overlay_clip  = -1;                          /* -1 = no animation override */
+    o->overlay_speed = 1.0f;
     return o->handle;
 }
 

@@ -218,6 +218,19 @@ imports.
     view state, sampled from absolute time — the file records the choice
     of dance, never a frame of it; absent component = the rest pose.
     Pairs with the `skin_glb` meta (below).
+  - `wander` (the fox sidequest) sends a creature on errands around the
+    spot it was placed: stand and survey, then walk (sometimes run) to a
+    random point nearby, turn-rate-limited so it arcs like a thing with
+    intent. Schema, in prefix order: `radius` (the errand disc, 6m)
+    `speed run` (walk/run m/s) `dwell` (mean survey seconds) `runchance`
+    `cidle cwalk crun` (clip indices for the gaits — the Fox's 0/1/2 are
+    the defaults). The position is WEATHER (the emit rule): the file
+    records the den the user placed and the wander rule, never where the
+    creature happens to stand — reload sends it home. Its feet ride the
+    same ground law the camera walks by, and it refuses steps off its
+    ground plot (an island's rim) or past the disc. Its current gait
+    overrides `animate` while attached; delete the line and the creature
+    stands its ground, animating by the persisted rule.
 - **Overbuilt slots** (`<meta>`, `<rel>`, `<content>`) — present in the model and
   serialized though mostly empty this phase; they cannot be retrofitted onto a
   render-only scene (TODO2.md §1.4/§1.5).

@@ -943,10 +943,68 @@ int main(void) {
             printf("emit: no-op without a pool, exact accumulator, baked newborns: ok\n");
         }
 
+        /* wander (the fox sidequest): the errand is WEATHER — the den
+           never moves, the offset and gait live in overlays, the disc
+           leash holds, and with no ground fn the world is flat (y never
+           written). Two foxes desync (rng seeded from the handle). */
+        {
+            sol_u32      wh, wh2;
+            SceneObject *wo, *wo2;
+            float        r2max = 0.0f;
+            int          saw_survey = 0, saw_walk = 0, saw_move = 0;
+            int          i;
+            wh  = scene_add(&cs, 0, m0, v3(40.0f, 0.0f, -7.0f),
+                            q_identity(), v3(1, 1, 1));
+            wh2 = scene_add(&cs, 0, m0, v3(40.0f, 0.0f, -7.0f),
+                            q_identity(), v3(1, 1, 1));
+            scene_component_add(&cs, wh,  "wander", NULL, 0);
+            scene_component_add(&cs, wh2, "wander", NULL, 0);
+            for (i = 0; i < 2400; i++) {            /* 120 simulated seconds */
+                float r2;
+                components_update(&cs, 5.0f + 0.05f * (float)i, 0.05f);
+                wo = scene_get(&cs, wh);
+                r2 = wo->overlay_pos.x * wo->overlay_pos.x
+                   + wo->overlay_pos.z * wo->overlay_pos.z;
+                if (r2 > r2max) r2max = r2;
+                if (r2 > 0.25f) saw_move = 1;
+                if (wo->overlay_clip == 0) saw_survey = 1;
+                if (wo->overlay_clip == 1) saw_walk   = 1;
+                if (wo->overlay_pos.y != 0.0f) {
+                    printf("FAIL: with no ground fn, wander stays flat\n");
+                    return 1;
+                }
+                if (wo->pos.x != 40.0f || wo->pos.z != -7.0f) {
+                    printf("FAIL: the den (base) must never move\n");
+                    return 1;
+                }
+            }
+            if (!saw_move || !saw_survey || !saw_walk) {
+                printf("FAIL: a wanderer must move, survey, and switch "
+                       "clips (move %d survey %d walk %d)\n",
+                       saw_move, saw_survey, saw_walk);
+                return 1;
+            }
+            if (r2max > 7.0f * 7.0f) {     /* radius 6, leash 1.1x + arcs */
+                printf("FAIL: the disc leash broke (r %f)\n",
+                       (double)sqrtf(r2max));
+                return 1;
+            }
+            wo  = scene_get(&cs, wh);
+            wo2 = scene_get(&cs, wh2);
+            if (wo->overlay_pos.x == wo2->overlay_pos.x &&
+                wo->overlay_pos.z == wo2->overlay_pos.z) {
+                printf("FAIL: two wanderers must desync\n");
+                return 1;
+            }
+            printf("wander: den fixed, leash holds, gait switches, "
+                   "flat without ground, desync: ok\n");
+        }
+
         /* the schema is queryable (the io layer's door, piece 2) */
         if (component_schema("spin", (const char *const **)0, (const float **)0) != 4 ||
             component_schema("emit", (const char *const **)0, (const float **)0) != 24 ||
             component_schema("animate", (const char *const **)0, (const float **)0) != 2 ||
+            component_schema("wander", (const char *const **)0, (const float **)0) != 8 ||
             component_schema("nope", (const char *const **)0, (const float **)0) != -1) {
             printf("FAIL: component_schema counts\n");
             return 1;
