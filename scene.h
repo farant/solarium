@@ -13,7 +13,10 @@ typedef struct { char *type; sol_u32 target; } Relation;
    own param PREFIX (defaults fill the rest at update time, the mesh-params
    rule). `state` is runtime scratch — lazily allocated by the component
    walk, freed with the object, NEVER serialized. */
-enum { COMPONENT_MAX_PARAMS = 8 };
+enum { COMPONENT_MAX_PARAMS = 24 };  /* item 7's emit is the high-water
+                                        mark: rate, life, velocity+spread,
+                                        position spread, sizes, two RGBA
+                                        endpoints, acceleration = 24 */
 typedef struct {
     char  *type;
     float  params[COMPONENT_MAX_PARAMS];

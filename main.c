@@ -24,6 +24,7 @@
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
 #include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
 #include "component.h"           /* behavior as data — the overlay doctrine (P4 item 6) */
+#include "particles.h"           /* the pool: runtime-only ephemera (P4 item 7) */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -297,6 +298,44 @@ static const char *MEADOW_FRAGMENT_SRC =
     "out vec4 FragColor;\n"
     "void main() {\n"
     "    FragColor = vec4(vTint * (0.35 + 0.65 * vRoot), 1.0);\n"
+    "}\n";
+
+/* --- the particle shader (P4 item 7): BILLBOARDS — one shared unit quad,
+   expanded in the vertex shader along the camera's own right/up so every
+   quad faces the eye exactly. Those axes are FREE: the view matrix is the
+   camera's inverse, the inverse of a rotation is its transpose, so the
+   camera's world-space basis sits in uView's ROWS. The fragment is a soft
+   disc computed from the quad's UVs ((1-d^2)^2, clamped — beyond d=1 the
+   parabola climbs again) — no texture, no sampler. Additive output
+   premultiplies rgb by alpha*falloff; the written alpha is never read
+   (GL_ONE/GL_ONE). Drawn in the HDR pass: rgb > 1 sails into bloom. */
+static const char *PARTICLE_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec2 aCorner;\n"     /* the unit quad, +-0.5 */
+    "layout (location = 1) in vec4 aInst;\n"       /* xyz = world pos, w = size */
+    "layout (location = 2) in vec4 aColor;\n"      /* rgba; envelope already in a */
+    "uniform mat4 uView;\n"
+    "uniform mat4 uProj;\n"
+    "out vec2 vUV;\n"
+    "out vec4 vColor;\n"
+    "void main() {\n"
+    "    vec3 right = vec3(uView[0][0], uView[1][0], uView[2][0]);\n"  /* row 0 */
+    "    vec3 up    = vec3(uView[0][1], uView[1][1], uView[2][1]);\n"  /* row 1 */
+    "    vec3 world = aInst.xyz + right * (aCorner.x * aInst.w)\n"
+    "                           + up    * (aCorner.y * aInst.w);\n"
+    "    vUV    = aCorner * 2.0;\n"                /* -1..1 across the quad */
+    "    vColor = aColor;\n"
+    "    gl_Position = uProj * uView * vec4(world, 1.0);\n"
+    "}\n";
+static const char *PARTICLE_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "in vec4 vColor;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    float f = max(1.0 - dot(vUV, vUV), 0.0);\n"
+    "    f = f * f;\n"
+    "    FragColor = vec4(vColor.rgb * (vColor.a * f), 1.0);\n"
     "}\n";
 
 static const char *POST_VERTEX_SRC =
@@ -739,6 +778,15 @@ typedef struct {
     RhiBuffer   meadow_vbuf, meadow_ibuf;   /* the one shared tuft */
     MeadowPatch meadow[32];
     int         meadow_count;
+    /* particles (P4 item 7): the pool is VIEW STATE (the reader-rig
+       doctrine) — emitters persist as components, the weather never does.
+       One shared unit quad, one instance buffer re-uploaded per frame,
+       one additive draw for everything airborne. */
+    ParticlePool particles;
+    RhiPipeline  part_pipeline;
+    RhiBuffer    part_vbuf, part_ibuf, part_inst;
+    int          part_count;    /* live count last frame — the HUD's number */
+    sol_bool     e_was_down;    /* 'E' mints a dust emitter */
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
@@ -2996,6 +3044,46 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->o_was_down = o_now;
     }
 
+    /* E mints a DUST EMITTER (P4 item 7): a small dim marker block whose
+       emit component fills the air around it with drifting motes. The
+       component is attached BARE — the schema defaults ARE dust, so the
+       file gets a single <component type="emit"/> line. The marker is an
+       ordinary prop: pick it, drag it, the shaft of dust moves along. */
+    {
+        sol_bool e_now = glfwGetKey(w, GLFW_KEY_E) == GLFW_PRESS;
+        if (e_now && !st->e_was_down) {
+            Mesh    empty;
+            vec3    f, pos;
+            sol_u32 h;
+            f = camera_forward(&st->camera);
+            f.y = 0.0f;
+            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+            f   = vec3_normalize(f);
+            pos = vec3_add(st->camera.pos, vec3_scale(f, 2.0f));
+            pos.y = st->camera.pos.y - 0.25f;     /* the shaft's heart, chest-high */
+            memset(&empty, 0, sizeof empty);
+            h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
+                          vec3_make(0.05f, 0.05f, 0.05f));
+            scene_mesh_ref_set(&st->scene, h, "box");
+            scene_meta_set(&st->scene, h, "name", "dust");
+            scene_component_add(&st->scene, h, "emit", (const float *)0, 0);
+            {
+                SceneObject *eo = scene_get(&st->scene, h);
+                if (eo) {
+                    Material m = material_default();
+                    m.base_color = vec3_make(0.35f, 0.33f, 0.30f);
+                    m.roughness  = 0.9f;
+                    eo->material = m;
+                }
+            }
+            scene_resolve_meshes(&st->scene);
+            st->selected_handle = h;
+            scene_save(&st->scene, "scene.stml");
+            printf("dust hangs in the air — drag the little block to move the shaft\n");
+        }
+        st->e_was_down = e_now;
+    }
+
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
        decision): the system never throws away the marker for you. Item 8
        extends it to ARROWS: deleting the edge object deletes the relation. */
@@ -3870,6 +3958,42 @@ static int init_scene(AppState *state) {
         }
     }
 
+    /* the particle machinery (P4 item 7 piece 2): one shared unit quad
+       (stream 0), one pool-sized instance buffer re-uploaded per frame
+       (stream 1 — the meadow's exact 8-float layout, but ALIVE), additive,
+       depth-tested but write-off: hidden by walls, occluding nothing. */
+    {
+        static const float QUAD[8] = {
+            -0.5f, -0.5f,   0.5f, -0.5f,   0.5f, 0.5f,   -0.5f, 0.5f
+        };
+        static const sol_u32 QIDX[6] = { 0, 1, 2, 0, 2, 3 };
+        RhiShader       psh;
+        RhiPipelineDesc pdesc = {0};
+        particles_init(&state->particles);
+        component_set_particle_pool(&state->particles);   /* the emit outlet */
+        psh = rhi_create_shader(PARTICLE_VERTEX_SRC, PARTICLE_FRAGMENT_SRC);
+        if (psh.id) {
+            pdesc.shader = psh;
+            pdesc.attr_count = 3;
+            pdesc.attrs[0].location = 0;  pdesc.attrs[0].format = RHI_FORMAT_FLOAT2;
+            pdesc.attrs[0].offset   = 0;  pdesc.attrs[0].per_instance = 0;
+            pdesc.attrs[1].location = 1;  pdesc.attrs[1].format = RHI_FORMAT_FLOAT4;
+            pdesc.attrs[1].offset   = 0;  pdesc.attrs[1].per_instance = 1;
+            pdesc.attrs[2].location = 2;  pdesc.attrs[2].format = RHI_FORMAT_FLOAT4;
+            pdesc.attrs[2].offset   = 16; pdesc.attrs[2].per_instance = 1;
+            pdesc.stride          = 2 * sizeof(float);
+            pdesc.instance_stride = PARTICLE_INST_FLOATS * sizeof(float);
+            pdesc.depth_test      = SOL_TRUE;
+            pdesc.depth_write_off = SOL_TRUE;
+            pdesc.blend           = RHI_BLEND_ADD;
+            state->part_pipeline = rhi_create_pipeline(&pdesc);
+            state->part_vbuf = rhi_create_buffer(RHI_BUFFER_VERTEX, QUAD, sizeof QUAD);
+            state->part_ibuf = rhi_create_buffer(RHI_BUFFER_INDEX,  QIDX, sizeof QIDX);
+            state->part_inst = rhi_create_buffer(RHI_BUFFER_VERTEX, (const void *)0,
+                                  PARTICLE_CAP * PARTICLE_INST_FLOATS * sizeof(float));
+        }
+    }
+
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
@@ -4555,6 +4679,28 @@ static void render(AppState *state) {
         }
     }
 
+    /* particles (P4 item 7): LAST in the HDR pass — additive over whatever
+       the frame built, depth-tested against it, writing no depth of their
+       own. The whole pool is one instanced draw; the fill is arithmetic
+       (particles.c), the upload is an orphaning stream write. rgb > 1 on a
+       spark feeds the bloom extract exactly like an emissive surface. */
+    {
+        static float part_data[PARTICLE_CAP * PARTICLE_INST_FLOATS];
+        int n = particles_fill(&state->particles, part_data, PARTICLE_CAP);
+        state->part_count = n;
+        if (n > 0 && state->part_pipeline.id) {
+            rhi_set_pipeline(state->part_pipeline);
+            rhi_set_uniform_mat4("uView", view.m);
+            rhi_set_uniform_mat4("uProj", proj.m);
+            rhi_update_buffer(state->part_inst, part_data,
+                              (size_t)n * PARTICLE_INST_FLOATS * sizeof(float));
+            rhi_bind_vertex_buffer(state->part_vbuf);
+            rhi_bind_index_buffer(state->part_ibuf);
+            rhi_bind_instance_buffer(state->part_inst);
+            rhi_draw_indexed_instanced(0, 6, n);
+        }
+    }
+
     rhi_end_pass();
 
     /* ---- pass 2: fullscreen pass to the window — sample the HDR buffer, encode
@@ -5125,6 +5271,10 @@ int main(void) {
         components_update(&state.scene, (float)now, (float)dt);  /* overlays
                                                          rewrite BEFORE the tree
                                                          and render read poses */
+        particles_update(&state.particles, (float)dt); /* spawn-then-step: the
+                                                         emitters above deposited
+                                                         newborns; one Euler step
+                                                         ages everything (item 7) */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */
         if (now - g_watch_last >= 0.5) {              /* the watcher (P4 item 4):
                                                          a handful of stats twice

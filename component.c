@@ -59,6 +59,68 @@ static void comp_flicker(Scene *s, SceneObject *o, const float *p,
     o->overlay_glow *= 1.0f + p[0] * n * 0.5f;
 }
 
+/* emit: the component that spawns instead of moving (item 7) — its update
+   writes NOTHING on its object; it deposits newborns into the injected
+   pool, at the object's WORLD position (effective pose: a bobbing lantern
+   emits from its bobbed position). This is the dt-integrating component
+   the ComponentFn signature reserved a clock for: weather, not
+   choreography — nothing persists, so determinism buys nothing here.
+   Params are baked into each particle at birth; after that the particle
+   never consults its emitter again. */
+typedef struct {
+    float   acc;    /* fractional spawns carried between frames */
+    sol_u32 rng;    /* per-attachment stream; 0 = not yet seeded */
+} EmitState;
+
+static ParticlePool *g_emit_pool = (ParticlePool *)0;
+
+void component_set_particle_pool(ParticlePool *pool) {
+    g_emit_pool = pool;
+}
+
+/* schema order = prefix order (most-customized first): 0 rate, 1 life,
+   2-4 velocity, 5-7 velocity spread, 8-10 position spread (a world-axis
+   box: dust wants a VOLUME, not a fountain), 11-12 size endpoints,
+   13-16 / 17-20 RGBA endpoints (rgb may exceed 1 — bloom's food),
+   21-23 acceleration. The DEFAULTS ARE DUST: a bare
+   <component type="emit"/> fills the air with drifting motes. */
+static void comp_emit(Scene *s, SceneObject *o, const float *p,
+                      void *st, float t, float dt) {
+    EmitState *es = (EmitState *)st;
+    mat4       w;
+    vec3       origin;
+    int        n, i;
+    (void)t;
+    if (es == NULL || g_emit_pool == NULL) return;
+    if (es->rng == 0u)                       /* seed once, from identity */
+        es->rng = (sol_u32)o->handle * 2654435761u + 1u;
+    es->acc += p[0] * dt;
+    if (es->acc > 64.0f) es->acc = 64.0f;    /* a stall never bursts */
+    n = (int)es->acc;
+    es->acc -= (float)n;
+    if (n <= 0) return;
+    w = scene_world_matrix(s, o);
+    origin = vec3_make(w.m[12], w.m[13], w.m[14]);
+    for (i = 0; i < n; i++) {
+        Particle q;
+        float    sj;
+        q.pos  = particles_jitter(&es->rng, origin,
+                                  vec3_make(p[8], p[9], p[10]));
+        q.vel  = particles_jitter(&es->rng, vec3_make(p[2], p[3], p[4]),
+                                  vec3_make(p[5], p[6], p[7]));
+        q.acc  = vec3_make(p[21], p[22], p[23]);
+        q.age  = 0.0f;
+        q.life = p[1] * (0.75f + 0.5f * particles_rand01(&es->rng));
+        sj     = 0.75f + 0.5f * particles_rand01(&es->rng);
+        q.size0 = p[11] * sj;                /* one jitter scales BOTH ends:
+                                                a small mote stays small */
+        q.size1 = p[12] * sj;
+        q.col0.x = p[13]; q.col0.y = p[14]; q.col0.z = p[15]; q.col0.w = p[16];
+        q.col1.x = p[17]; q.col1.y = p[18]; q.col1.z = p[19]; q.col1.w = p[20];
+        particles_spawn(g_emit_pool, &q);
+    }
+}
+
 /* THE single source of truth for what each component type means — the
    third registry (P3's mesh emitters, P4i4's assets, now behavior). New
    behaviors are one entry + one function. */
@@ -68,7 +130,15 @@ static const ComponentDef C_REGISTRY[] = {
     { "bob",  2, { "amp", "speed" },
                  { 0.15f, 1.0f }, 0, comp_bob },
     { "flicker", 2, { "depth", "speed" },
-                 { 0.30f, 9.0f }, sizeof(FlickerState), comp_flicker }
+                 { 0.30f, 9.0f }, sizeof(FlickerState), comp_flicker },
+    { "emit", 24, { "rate", "life", "vx", "vy", "vz", "sx", "sy", "sz",
+                    "px", "py", "pz", "size0", "size1",
+                    "r0", "g0", "b0", "a0", "r1", "g1", "b1", "a1",
+                    "ax", "ay", "az" },
+                  { 40.0f, 5.0f,  0.0f, 0.03f, 0.0f,  0.04f, 0.02f, 0.04f,
+                    1.0f, 0.8f, 1.0f,  0.015f, 0.015f,
+                    1.0f, 0.97f, 0.90f, 0.35f,  1.0f, 0.97f, 0.90f, 0.10f,
+                    0.0f, 0.0f, 0.0f }, sizeof(EmitState), comp_emit }
 };
 #define C_COUNT ((int)(sizeof C_REGISTRY / sizeof C_REGISTRY[0]))
 

@@ -20,6 +20,7 @@
 #define COMPONENT_H
 
 #include "scene.h"
+#include "particles.h"
 
 /* an update receives EFFECTIVE params — the attachment's prefix merged
    with the schema defaults, the mesh-registry rule — plus its lazily
@@ -38,5 +39,10 @@ int component_schema(const char *type, const char *const **names,
    merge params, run each update. Unknown types are skipped INTACT —
    forward compatibility, the format's standing rule. */
 void components_update(Scene *s, float t, float dt);
+
+/* the emit component's outlet (item 7): the pool is VIEW STATE owned by
+   the app, so it is injected, never embedded — and a NULL pool (headless
+   tests, iotest) makes every emitter a silent no-op */
+void component_set_particle_pool(ParticlePool *pool);
 
 #endif /* COMPONENT_H */

@@ -34,6 +34,7 @@ typedef struct {
     GLsizei       stride;
     GLsizei       instance_stride;  /* stream 1 (P4 item 3); 0 = no instance stream */
     sol_bool      depth_test;
+    sol_bool      depth_write_off;
     int           blend;        /* RhiBlend: none / alpha-over / additive */
 } GlPipeline;
 
@@ -244,8 +245,9 @@ RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc) {
     for (i = 0; i < desc->attr_count; i++) p->attrs[i] = desc->attrs[i];
     p->stride          = (GLsizei)desc->stride;
     p->instance_stride = (GLsizei)desc->instance_stride;
-    p->depth_test = desc->depth_test;
-    p->blend      = desc->blend;
+    p->depth_test      = desc->depth_test;
+    p->depth_write_off = desc->depth_write_off;
+    p->blend           = desc->blend;
 
     glGenVertexArrays(1, &p->vao);   /* attribs are bound when a buffer is set */
 
@@ -576,7 +578,12 @@ void rhi_begin_pass(RhiRenderTarget target, int clear_flags, float r, float g, f
         glClearColor(r, g, b, a);
         mask |= GL_COLOR_BUFFER_BIT;
     }
-    if (clear_flags & RHI_CLEAR_DEPTH) mask |= GL_DEPTH_BUFFER_BIT;
+    if (clear_flags & RHI_CLEAR_DEPTH) {
+        mask |= GL_DEPTH_BUFFER_BIT;
+        glDepthMask(GL_TRUE);    /* glClear obeys the mask — a write-off
+                                    pipeline left bound must not eat the
+                                    next frame's depth clear */
+    }
     if (mask) glClear(mask);                         /* RHI_CLEAR_NONE = a load pass */
 }
 
@@ -592,6 +599,7 @@ void rhi_set_pipeline(RhiPipeline pipeline) {
     glBindVertexArray(p->vao);
     if (p->depth_test) glEnable(GL_DEPTH_TEST);
     else               glDisable(GL_DEPTH_TEST);
+    glDepthMask(p->depth_write_off ? GL_FALSE : GL_TRUE);
     if (p->blend == RHI_BLEND_ALPHA) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   /* straight-alpha "over" */

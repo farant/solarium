@@ -53,6 +53,14 @@ typedef struct {
     size_t        stride;          /* bytes per vertex (stream 0) */
     size_t        instance_stride; /* bytes per instance (stream 1); 0 = none */
     sol_bool      depth_test;    /* render state, bundled into the pipeline */
+    sol_bool      depth_write_off; /* with depth_test on: COMPARE against the
+                                    opaque world but leave no footprint — the
+                                    transparency contract (item 7's particles:
+                                    hidden by walls, never occluding each
+                                    other). Zero = write-when-testing, so
+                                    every existing desc reads unchanged.
+                                    Metal: depthWriteEnabled on the
+                                    depth-stencil descriptor. */
     int           blend;         /* an RhiBlend. VALUE-compatible with the old
                                     sol_bool: SOL_FALSE = none, SOL_TRUE =
                                     alpha — old desc sites read unchanged.

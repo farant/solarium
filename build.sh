@@ -47,7 +47,7 @@ if [ "$MODE" = "iotest" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        scene.c material.c scene_io.c mesh.c mirror.c platform_fs.c component.c nid.c stml.c sol_math.c scene_io_test.c \
+        scene.c material.c scene_io.c mesh.c mirror.c platform_fs.c component.c particles.c nid.c stml.c sol_math.c scene_io_test.c \
         -o scene_io_test
     echo "built ./scene_io_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
