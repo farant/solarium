@@ -568,6 +568,12 @@ typedef struct {
     sol_bool    r_was_down;     /* edge-detect the mirror-rescan key (P3 item 6c) */
     sol_bool    bs_was_down;    /* edge-detect tombstone dismissal (Backspace) */
     sol_bool    g_was_down;     /* edge-detect gather-to-workspace (P3 item 6d) */
+    /* the yardstick (P4 item 2): smoothed CPU-side timings + draw counts.
+       Wall clock is vsync-pinned (the documented swap cadence), so the
+       numbers that can MOVE are encode/update cost and the draw counts —
+       culling and instancing claims point here, not at fps. All in ms. */
+    float t_frame, t_cpu, t_update, t_shadow, t_hdr, t_post, t_swap;
+    int   draws_done, draws_total;  /* scene objects drawn / with geometry */
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
@@ -3250,6 +3256,12 @@ static void ensure_render_target(AppState *state, int w, int h) {
     state->rt_height = h;
 }
 
+/* fold a per-frame sample (seconds) into a readable ms readout. Fixed blend:
+   a readout wants steadiness to be legible, not framerate-exact response. */
+static void yardstick_ms(float *acc, double seconds) {
+    *acc += ((float)(seconds * 1000.0) - *acc) * 0.08f;
+}
+
 static void render(AppState *state) {
     float   aspect;
     float   us;        /* UI scale: sizes track the framebuffer (see pass 3) */
@@ -3257,8 +3269,12 @@ static void render(AppState *state) {
     mat4    view, proj;
     sol_u32 i;
     sol_u32 sel_root;
+    double  rt0, rt1, rt2;
 
     ensure_render_target(state, state->fb_width, state->fb_height);
+    rt0 = glfwGetTime();
+    state->draws_total = 0;
+    state->draws_done  = 0;
 
     sel_root = selection_root(&state->scene, state->selected_handle);  /* 0 if nothing selected */
 
@@ -3280,6 +3296,8 @@ static void render(AppState *state) {
         }
         rhi_end_pass();
     }
+    rt1 = glfwGetTime();
+    yardstick_ms(&state->t_shadow, rt1 - rt0);
 
     /* ---- pass 1: render the scene into the offscreen HDR target ---- */
     rhi_begin_pass(state->hdr_rt, RHI_CLEAR_ALL, 0.10f, 0.12f, 0.15f, 1.0f);
@@ -3325,6 +3343,7 @@ static void render(AppState *state) {
         mat4  model;
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
+        state->draws_total++;                     /* the yardstick: would draw */
         if (state->reader_source != 0 &&
             group_root(&state->scene, o->handle) == state->reader_source)
             continue;                             /* its book is aloft (item 9) */
@@ -3340,6 +3359,7 @@ static void render(AppState *state) {
                                                 o->mesh_param_count, "amp");
         }
         draw_mesh(state, o->mesh, model, view, proj, eye, hl, o->material);
+        state->draws_done++;                      /* == total until culling (P4 i2 p4) */
     }
     state->terrain_blend = SOL_FALSE;              /* the reader rig is not land */
 
@@ -3516,6 +3536,8 @@ static void render(AppState *state) {
        linear->sRGB (7c adds the tonemap). One triangle, no vertex buffer. ---- */
     {
         RhiRenderTarget screen = {0};   /* {0} = default framebuffer (declaration init, not a compound literal) */
+        rt2 = glfwGetTime();
+        yardstick_ms(&state->t_hdr, rt2 - rt1);
         rhi_begin_pass(screen, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);
         if (state->show_shadow_map) {
             /* inspector: the shadow map as linearized grayscale (item 9b debug) */
@@ -3546,8 +3568,8 @@ static void render(AppState *state) {
 
     /* the debug readout panel — live state, monospace-aligned (3c; this
        retired the window-title sprintf hack). ui_text positions BASELINES. */
-    ui_quad(8.0f * us, 8.0f * us, 300.0f * us, 124.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
-    ui_quad_outline(8.0f * us, 8.0f * us, 300.0f * us, 124.0f * us,
+    ui_quad(8.0f * us, 8.0f * us, 340.0f * us, 170.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
+    ui_quad_outline(8.0f * us, 8.0f * us, 340.0f * us, 170.0f * us,
                     1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
     if (state->ui_font) {
         float ts   = 0.45f * us;
@@ -3594,10 +3616,30 @@ static void render(AppState *state) {
             } else {
                 sprintf(line, "sel none");
             }
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 1.0f, 1.0f, 1.0f, 0.85f);
+            mb += font_line_height(state->mono_font) * ms;
+
+            /* the yardstick (P4 item 2): frame = true period (vsync-pinned,
+               the documented swap cadence); cpu = everything we control;
+               the sub-times are per-pass ENCODE cost, where culling and
+               instancing wins will actually show. */
+            sprintf(line, "frame %4.1f cpu %4.2f swap %4.1f",
+                    (double)state->t_frame, (double)state->t_cpu,
+                    (double)state->t_swap);
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
+            mb += font_line_height(state->mono_font) * ms;
+            sprintf(line, "up %4.2f shadow %4.2f hdr %4.2f",
+                    (double)state->t_update, (double)state->t_shadow,
+                    (double)state->t_hdr);
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
+            mb += font_line_height(state->mono_font) * ms;
+            sprintf(line, "post %4.2f  draws %d/%d",
+                    (double)state->t_post,
+                    state->draws_done, state->draws_total);
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
-            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 1.0f, 1.0f, 1.0f, 0.85f);
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
         }
     }
 
@@ -3713,6 +3755,7 @@ static void render(AppState *state) {
         }
     }
     ui_end();
+    yardstick_ms(&state->t_post, glfwGetTime() - rt2);
 }
 
 /* ---- note editing (item 8 piece 5) ---- */
@@ -3960,13 +4003,14 @@ int main(void) {
     last = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
-        double      now, dt;
+        double      now, dt, y1, y2;
         CameraInput in;
         glfwPollEvents();
 
         now = glfwGetTime();
         dt  = now - last;
         last = now;
+        yardstick_ms(&state.t_frame, dt);         /* the true frame period */
         if (dt > 0.1) dt = 0.1;   /* clamp: a long stall pauses motion, never lurches */
 
         glfwGetFramebufferSize(window, &state.fb_width, &state.fb_height);
@@ -4001,11 +4045,16 @@ int main(void) {
                 state.camera.pos.y += CAMERA_EYE_HEIGHT;
             }
         }
+        y1 = glfwGetTime();
         update(&state, dt);                           /* animate the scene */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */
+        yardstick_ms(&state.t_update, glfwGetTime() - y1);
         render(&state);
 
+        y2 = glfwGetTime();
+        yardstick_ms(&state.t_cpu, y2 - now);         /* all the work we control */
         rhi_present();
+        yardstick_ms(&state.t_swap, glfwGetTime() - y2);  /* the vsync block */
     }
 
     font_destroy(state.mono_font);
