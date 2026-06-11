@@ -29,6 +29,11 @@ void     fs_listing_free(FsListing *l);
 /* Does the path exist (file or directory)? Stale-alias detection. */
 sol_bool fs_exists(const char *path);
 
+/* Modification time as a plain long (seconds since the epoch) — the hot-
+   reload watcher's change signal (P4 item 4). 0 = unstatable (missing, or
+   racing an editor's save). */
+long fs_mtime(const char *path);
+
 /* Read a whole file (binary), heap-allocated and NUL-terminated, capped at
    `cap` bytes — a capped read is an HONEST partial: *out_truncated says so
    (the reader appends its own marker). NULL on failure. *out_len excludes

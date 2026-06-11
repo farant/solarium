@@ -1529,6 +1529,38 @@ static void tex_asset_key(const char *path, sol_bool srgb, char *buf) {
 #endif
 }
 
+/* ---- the watcher (P4 item 4 piece 3c): hot reload by mtime ----
+   A small watch list polled every half second. Textures re-decode through
+   rhi_update_texture — same handle, new pixels, nobody rebinds; a changed
+   glb re-imports its anchors through the registry; the .hdr re-runs the
+   IBL bakes. FAIL-OPEN: a torn mid-save read keeps the old contents and
+   retries next poll (the mtime is recorded only after a good reload). */
+typedef enum { WATCH_TEX_SRGB = 0, WATCH_GLB, WATCH_HDR } WatchKind;
+typedef struct {
+    char       path[200];
+    long       mtime;
+    int        kind;
+    RhiTexture tex;          /* WATCH_TEX_*: the in-place handle */
+} WatchEntry;
+#define WATCH_MAX 32
+static WatchEntry g_watch[WATCH_MAX];
+static int        g_watch_count;
+static double     g_watch_last;
+
+static void watch_add(const char *path, int kind, RhiTexture tex) {
+    WatchEntry *w;
+    int         i;
+    if (g_watch_count >= WATCH_MAX) return;
+    if (strlen(path) >= sizeof g_watch[0].path) return;
+    for (i = 0; i < g_watch_count; i++)
+        if (strcmp(g_watch[i].path, path) == 0) return;   /* already watched */
+    w = &g_watch[g_watch_count++];
+    strcpy(w->path, path);
+    w->kind  = kind;
+    w->tex   = tex;
+    w->mtime = fs_mtime(path);
+}
+
 /* ---- glb models through the registry (P4 item 4 piece 3) ----
    Parts are keyed "g|<path>|<i>" with whole GlbPart payloads — mesh AND
    material, so a memo hit reconstructs the model without the file: the
@@ -1548,6 +1580,16 @@ static void glb_part_destroy(void *payload, void *user) {
 typedef struct { char path[200]; int parts; } GlbMemo;
 static GlbMemo g_glb_memo[GLB_MEMO_MAX];
 static int     g_glb_memo_count;
+
+static void glb_memo_remove(const char *path) {
+    int i;
+    for (i = 0; i < g_glb_memo_count; i++) {
+        if (strcmp(g_glb_memo[i].path, path) == 0) {
+            g_glb_memo[i] = g_glb_memo[--g_glb_memo_count];
+            return;
+        }
+    }
+}
 
 static void glb_part_key(const char *path, int index, char *buf) {
 #ifdef __clang__
@@ -1631,6 +1673,11 @@ static sol_bool glb_acquire_model(const char *path, GlbModel *out) {
         strcpy(g_glb_memo[g_glb_memo_count].path, path);
         g_glb_memo[g_glb_memo_count].parts = (int)out->count;
         g_glb_memo_count++;
+    }
+    {
+        RhiTexture none;
+        none.id = 0;
+        watch_add(path, WATCH_GLB, none);      /* edits to the file re-import */
     }
     return SOL_TRUE;
 }
@@ -2846,8 +2893,10 @@ static RhiTexture load_texture(const char *path) {
     if (image_load(path, &img)) {
         tex = rhi_create_texture(img.pixels, img.w, img.h, RHI_TEX_SRGB8);
         image_free(&img);
-        if (tex.id)
+        if (tex.id) {
             asset_store_add(&g_tex_assets, key, &tex, sizeof tex);
+            watch_add(path, WATCH_TEX_SRGB, tex);   /* edits land in place */
+        }
     } else {
         fprintf(stderr, "image load failed: %s\n", path);
     }
@@ -2955,6 +3004,95 @@ static void build_brdf_lut(AppState *state) {
     rhi_set_pipeline(state->brdf_lut_pipeline);
     rhi_draw(0, 3);
     rhi_end_pass();
+}
+
+/* A changed .glb (the watcher): tear down everything derived from it and
+   re-import. Every part's borrow ticket releases (refcounts hit zero, old
+   meshes die), the part objects are removed, the embedded textures purge
+   (registered at ref 1, never acquired — one release each kills them), the
+   memo forgets the path, and the import runs again: the ANCHORS survive
+   (they are the durable identity), the bodies rebuild from the fresh file.
+   A torn read shows up as "anchor kept, body missing" and heals on the
+   editor's next save. */
+static void glb_reload(AppState *st, const char *path) {
+    sol_u32 doomed[256];
+    int     nd = 0, n;
+    sol_u32 i;
+    char    prefix[320];
+    size_t  plen;
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    sprintf(prefix, "g|%s|", path);
+    plen = strlen(prefix);
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o  = &st->scene.objects[i];
+        const char  *ak = scene_meta_get(&st->scene, o->handle, "akey");
+        if (!ak || strncmp(ak, prefix, plen) != 0) continue;
+        if (nd < 256) doomed[nd++] = o->handle;
+    }
+    for (n = 0; n < nd; n++) {
+        SceneObject *o  = scene_get(&st->scene, doomed[n]);
+        const char  *ak = o ? scene_meta_get(&st->scene, doomed[n], "akey")
+                            : (const char *)0;
+        if (ak) asset_release(&g_glbpart_assets, ak);
+        if (o) memset(&o->mesh, 0, sizeof o->mesh);
+        scene_remove(&st->scene, doomed[n]);
+    }
+    for (n = 0; ; n++) {
+        char tkey[320];
+        sprintf(tkey, "t|%s#%d|g", path, n);
+        if (!asset_release(&g_tex_assets, tkey)) break;
+    }
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+    glb_memo_remove(path);
+    scene_reimport_glbs(st);
+    printf("glb hot-reloaded: %s\n", path);
+}
+
+/* A changed .hdr: reload the sky and re-run the bakes (between frames,
+   nothing is sampling the old ones). The BRDF LUT is hdr-independent and
+   stays. The whole lighting mood of the palace changes in one save. */
+static void hdr_reload(AppState *st, const char *path) {
+    HdrImage sky;
+    if (!image_load_hdr(path, &sky)) return;          /* fail-open */
+    if (st->skybox_tex.id)         rhi_destroy_texture(st->skybox_tex);
+    if (st->env_cubemap.id)        rhi_destroy_texture(st->env_cubemap);
+    if (st->irradiance_cubemap.id) rhi_destroy_texture(st->irradiance_cubemap);
+    if (st->prefilter_cubemap.id)  rhi_destroy_texture(st->prefilter_cubemap);
+    st->skybox_tex = rhi_create_texture_hdr(sky.pixels, sky.w, sky.h);
+    image_hdr_free(&sky);
+    build_env_cubemap(st);
+    build_irradiance_map(st);
+    build_prefilter_map(st);
+    printf("environment hot-reloaded: %s\n", path);
+}
+
+static void watch_poll(AppState *st) {
+    int i;
+    for (i = 0; i < g_watch_count; i++) {
+        WatchEntry *w = &g_watch[i];
+        long        m = fs_mtime(w->path);
+        if (m == 0 || m == w->mtime) continue;
+        if (w->kind == WATCH_TEX_SRGB) {
+            Image img;
+            if (image_load(w->path, &img)) {
+                rhi_update_texture(w->tex, img.pixels, img.w, img.h, RHI_TEX_SRGB8);
+                image_free(&img);
+                w->mtime = m;
+                printf("texture hot-reloaded: %s\n", w->path);
+            }                          /* decode failed: keep old, retry next poll */
+        } else if (w->kind == WATCH_GLB) {
+            glb_reload(st, w->path);
+            w->mtime = m;
+        } else {
+            hdr_reload(st, w->path);
+            w->mtime = m;
+        }
+    }
 }
 
 /* The mesh-ref resolver, GPU half (P3 item 1): realize geometry for every
@@ -3589,6 +3727,11 @@ static int init_scene(AppState *state) {
             build_irradiance_map(state);  /* convolve -> irradiance cubemap (B2) */
             build_prefilter_map(state);   /* GGX prefilter -> roughness mips (C1) */
             build_brdf_lut(state);        /* BRDF integration LUT (C2) */
+            {
+                RhiTexture none;
+                none.id = 0;
+                watch_add("horn-koppe_spring_4k.hdr", WATCH_HDR, none);
+            }
         } else {
             printf("skybox HDR: load failed (skybox disabled)\n");
         }
@@ -4626,6 +4769,12 @@ int main(void) {
         y1 = glfwGetTime();
         update(&state, dt);                           /* animate the scene */
         reader_update(&state, (float)dt);             /* the book's flight (item 9) */
+        if (now - g_watch_last >= 0.5) {              /* the watcher (P4 item 4):
+                                                         a handful of stats twice
+                                                         a second, reloads in place */
+            g_watch_last = now;
+            watch_poll(&state);
+        }
         bvh_refresh(&state);                          /* boxes current AFTER the
                                                          animations move things —
                                                          culling reads them next */

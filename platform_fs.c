@@ -95,3 +95,9 @@ char *fs_read_file(const char *path, long cap, long *out_len, int *out_truncated
     if (out_truncated) *out_truncated = (len > cap);
     return buf;
 }
+
+long fs_mtime(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return (long)st.st_mtime;
+}
