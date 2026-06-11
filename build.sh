@@ -163,6 +163,43 @@ if [ "$MODE" = "jsontest" ]; then
     exit 0
 fi
 
+# The Metal smoke test (P4 item 10 stage a): a cleared window and one
+# triangle through the UNCHANGED rhi.h — no GL linked. rhi_metal.m is
+# Objective-C (the SIXTH quarantine, ARC) and sits outside c89check
+# exactly as platform_audio.c does; the smoke test itself is plain C
+# against the seam.
+if [ "$MODE" = "metalsmoke" ]; then
+    clang -fobjc-arc -g -O0 -Wall -Wextra \
+        -c rhi_metal.m $(pkg-config --cflags glfw3) -o rhi_metal.o
+    clang -std=c11 -g -O0 -Wall -Wextra \
+        -c metal_smoke.c $(pkg-config --cflags glfw3) -o metal_smoke.o
+    clang metal_smoke.o rhi_metal.o $(pkg-config --libs glfw3) \
+        -framework Metal -framework QuartzCore -framework Cocoa -framework IOKit \
+        -o metal_smoke
+    rm -f metal_smoke.o rhi_metal.o
+    echo "built ./metal_smoke — cleared window + triangle, zero GL (ESC quits)"
+    exit 0
+fi
+
+# The Metal palace (item 10): the SAME app, rhi_metal.m linked in place of
+# rhi_gl.c — rhi.h untouched by the switch (that untouchedness is the
+# proof). Stage (a) proves the LINK: it builds with zero GL. It exits at
+# init until stage (b) lands the core MSL twin (init_scene rightly treats
+# a failed core shader as fatal — that diagnostic protects the GL build
+# and we keep it). Stages b-e light the palace up.
+if [ "$MODE" = "metal" ]; then
+    clang -fobjc-arc -g -O0 -Wall -Wextra \
+        -c rhi_metal.m $(pkg-config --cflags glfw3) -o rhi_metal.o
+    clang -std=c11 -g -O0 -Wall -Wextra \
+        main.c rhi_metal.o mesh.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c \
+        $(pkg-config --cflags --libs glfw3) \
+        -framework Metal -framework QuartzCore -framework Cocoa -framework IOKit -framework AudioToolbox \
+        -o solarium-metal
+    rm -f rhi_metal.o
+    echo "built ./solarium-metal (stage a: links clean, zero GL; runs from stage b)"
+    exit 0
+fi
+
 # Build with AddressSanitizer + UndefinedBehaviorSanitizer for the §1.7
 # definition-of-done. Debug-only; ~2x slower. Run ./solarium-asan; the
 # sanitizers report any memory/UB error on stderr and abort.

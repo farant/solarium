@@ -1,6 +1,8 @@
 # Build artifacts
 /solarium
 /solarium-asan
+/solarium-metal
+/metal_smoke
 /stml_test
 /nid_test
 /scene_io_test
