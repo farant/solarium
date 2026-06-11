@@ -105,6 +105,10 @@ static const char *FRAGMENT_SRC =
     "uniform float uLightIntensity;\n"
     "uniform float uCosInner;\n"                             /* cos(inner half-angle) */
     "uniform float uCosOuter;\n"                             /* cos(outer half-angle) */
+    "uniform int   uPointCount;\n"                           /* point lights (P4 item 5) */
+    "uniform vec3  uPointPos[8];\n"
+    "uniform vec3  uPointColor[8];\n"                        /* color * intensity, premultiplied */
+    "uniform float uPointRadius[8];\n"                       /* the falloff WINDOW's edge */
     "uniform mat4  uLightVP;\n"                              /* light proj*view (item 9c); == the shadow pass's */
     "uniform sampler2D uShadowMap;\n"                        /* depth from the light's POV (item 9b) */
     "uniform samplerCube uIrradianceMap;\n"                  /* diffuse IBL (B3) */
@@ -129,6 +133,23 @@ static const char *FRAGMENT_SRC =
     "}\n"
     "vec3 fresnelSchlick(float HoV, vec3 F0) {\n"            /* F: grazing reflectance */
     "    return F0 + (1.0 - F0) * pow(1.0 - HoV, 5.0);\n"
+    "}\n"
+    "vec3 brdfDirect(vec3 N, vec3 V, vec3 L, vec3 albedo, float metallic,\n"
+    "                float roughness, vec3 F0) {\n"          /* ONE BRDF, every light (P4 item 5):
+                                                                the spot and the point loop both
+                                                                come through here, so a material
+                                                                responds identically to each */
+    "    vec3  H   = normalize(L + V);\n"
+    "    float NoV = max(dot(N, V), 0.0001);\n"
+    "    float NoL = max(dot(N, L), 0.0);\n"
+    "    float NoH = max(dot(N, H), 0.0);\n"
+    "    float HoV = max(dot(H, V), 0.0);\n"
+    "    float D = distributionGGX(NoH, roughness);\n"
+    "    float G = geometrySmith(NoV, NoL, roughness);\n"
+    "    vec3  F = fresnelSchlick(HoV, F0);\n"
+    "    vec3  specular = (D * G) * F / (4.0 * NoV * NoL + 0.0001);\n"
+    "    vec3  kD = (vec3(1.0) - F) * (1.0 - metallic);\n"
+    "    return (kD * albedo / PI + specular) * NoL;\n"
     "}\n"
     "vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float rough) {\n"  /* ambient F (no half-vector): view angle + roughness (B3) */
     "    return F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - cosTheta, 5.0);\n"
@@ -186,30 +207,32 @@ static const char *FRAGMENT_SRC =
     "        N = normalize(mat3(T, B, N) * n);\n"              /* tangent space -> world */
     "    }\n"
     "    vec3 V = normalize(uViewPos - vWorldPos);\n"          /* direction TO the camera */
-    "    vec3 toLight = uLightPos - vWorldPos;\n"
-    "    float dist = length(toLight);\n"
-    "    vec3 L = toLight / dist;\n"                            /* spot: direction TO light */
-    "    vec3 H = normalize(L + V);\n"
-    "    float NoV = max(dot(N, V), 0.0001);\n"
-    "    float NoL = max(dot(N, L), 0.0);\n"
-    "    float NoH = max(dot(N, H), 0.0);\n"
-    "    float HoV = max(dot(H, V), 0.0);\n"
-    "\n"
+    "    float NoV = max(dot(N, V), 0.0001);\n"                /* the ambient terms reuse this */
     "    vec3 F0 = mix(vec3(0.04), albedo, metallic);\n"      /* dielectric 4% vs metal-tinted */
-    "    float D = distributionGGX(NoH, roughness);\n"
-    "    float G = geometrySmith(NoV, NoL, roughness);\n"
-    "    vec3  F = fresnelSchlick(HoV, F0);\n"
-    "    vec3  specular = (D * G) * F / (4.0 * NoV * NoL + 0.0001);\n"
     "\n"
-    "    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);\n"     /* energy: no diffuse where it reflected / for metals */
-    "    vec3 diffuse = kD * albedo / PI;\n"
-    "\n"
+    "    vec3 toLight = uLightPos - vWorldPos;\n"              /* the spot (item 9a) */
+    "    float dist = length(toLight);\n"
+    "    vec3 L = toLight / dist;\n"
     "    float atten = 1.0 / (dist * dist);\n"                 /* inverse-square falloff */
     "    float theta = dot(-L, uLightDir);\n"                  /* cos angle off the spot axis */
     "    float cone  = smoothstep(uCosOuter, uCosInner, theta);\n"  /* 1 inside, 0 past outer */
     "    vec3 radiance = uLightColor * uLightIntensity * atten * cone;\n"
-    "    float shadow = shadowFactor(vWorldPos, NoL);\n"      /* item 9c: only direct light is shadowed */
-    "    vec3 Lo = (diffuse + specular) * radiance * NoL * (1.0 - shadow);\n"
+    "    float shadow = shadowFactor(vWorldPos, max(dot(N, L), 0.0));\n"  /* 9c: spot only */
+    "    vec3 Lo = brdfDirect(N, V, L, albedo, metallic, roughness, F0)\n"
+    "            * radiance * (1.0 - shadow);\n"
+    "\n"
+    "    for (int pi = 0; pi < uPointCount; pi++) {\n"         /* point lights (P4 item 5) */
+    "        vec3  pl = uPointPos[pi] - vWorldPos;\n"
+    "        float d2 = dot(pl, pl);\n"
+    "        float d  = sqrt(d2);\n"
+    "        vec3  Lp = pl / max(d, 0.0001);\n"
+    "        float wf = clamp(1.0 - pow(d / uPointRadius[pi], 4.0), 0.0, 1.0);\n"
+    "        vec3  rp = uPointColor[pi] * (wf * wf / (d2 + 1.0));\n"  /* WINDOWED inverse-
+                                                                square: physics inside,
+                                                                exactly zero at the radius
+                                                                — no pop at the boundary */
+    "        Lo += brdfDirect(N, V, Lp, albedo, metallic, roughness, F0) * rp;\n"
+    "    }\n"
     "\n"
     "    float ao = 1.0;\n"
     "    if (uUseAOTex > 0.5) ao = 1.0 + uAOStrength * (texture(uAOTex, vUV).r - 1.0);\n"
@@ -677,6 +700,11 @@ typedef struct {
     vec3        drag_prev_pos;     /*   is refused (a FILE card snaps home and */
     quat        drag_prev_rot;     /*   pins an ALIAS instead)                 */
     sol_u32     drag_ground_parent;/* parent while off-board (never a board)   */
+    float       drag_plane_y;      /* ground-mode constraint height (P4 item 5
+                                      fix): the GRAB height, so an elevated
+                                      object tracks the cursor at its own
+                                      depth — the floor plane under a raised
+                                      lantern exaggerated every move */
     sol_u32     drag_board;        /* board hosting the carry; 0 = ground mode */
     float       drag_board_ox;     /* grab offset in board-local XY            */
     float       drag_board_oy;
@@ -733,6 +761,7 @@ typedef struct {
     float       terrain_y0, terrain_amp;
     sol_u32     current_terrain;   /* plot underfoot; 0 = none (HUD naming) */
     sol_bool    h_was_down;        /* edge-detect mint-island (H) */
+    sol_bool    o_was_down;        /* edge-detect mint-lantern (O, P4 item 5) */
 } AppState;
 
 #define READER_IDLE      0
@@ -1458,10 +1487,17 @@ static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
         /* edge grab beside the face: fall through to the ground plane */
     }
     wpos = object_world_pos(&st->scene, target);
-    if (!ray_vs_plane(r, vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 1.0f, 0.0f), &t) ||
+    /* the constraint plane sits at the OBJECT's height (not the floor): the
+       object then stays under the cursor at its own depth — dragging the
+       floor plane under a raised object amplified every move by the depth
+       ratio. The old eye-height pathology (a near-parallel plane racing to
+       the horizon) is fenced by DRAG_MAX_DIST: an edge-on drag refuses
+       instead of racing. */
+    st->drag_plane_y = wpos.y;
+    if (!ray_vs_plane(r, vec3_make(0.0f, wpos.y, 0.0f), vec3_make(0.0f, 1.0f, 0.0f), &t) ||
         t > DRAG_MAX_DIST)
-        return;                                  /* no floor under the cursor: look
-                                                    down a little to start a drag */
+        return;                                  /* plane edge-on or out of reach:
+                                                    look up/down a little to drag */
     st->drag_handle    = target;
     st->drag_offset    = vec3_sub(wpos, vec3_add(r.origin, vec3_scale(r.dir, t)));
     st->drag_start_pos = wpos;                   /* world, throughout */
@@ -2395,10 +2431,12 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                             o->rot          = st->drag_prev_rot;
                             o->pos          = scene_world_to_local(&st->scene,
                                                                    o->parent, woff);
-                            st->drag_offset = vec3_make(0.0f, 0.0f, 0.0f);
+                            st->drag_offset  = vec3_make(0.0f, 0.0f, 0.0f);
+                            st->drag_plane_y = 0.0f;   /* off a board, a card
+                                                          lands ON THE FLOOR */
                             arrows_rebuild(st);        /* its edges go dormant */
                         }
-                        if (ray_vs_plane(r, vec3_make(0.0f, 0.0f, 0.0f),
+                        if (ray_vs_plane(r, vec3_make(0.0f, st->drag_plane_y, 0.0f),
                                          vec3_make(0.0f, 1.0f, 0.0f), &t) &&
                             t <= DRAG_MAX_DIST) {
                             vec3 new_world = vec3_add(vec3_add(r.origin, vec3_scale(r.dir, t)),
@@ -2825,6 +2863,48 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                    (int)p[4], pos.y > 0.05f ? " (floating)" : "");
         }
         st->h_was_down = h_now;
+    }
+
+    /* O mints a LANTERN (P4 item 5): an ordinary draggable prop whose light
+       is META — the light rides the object's transform, so carrying the
+       lantern carries its pool of warmth. The body is the shared unit box
+       (one more borrower of "m|box"); piece 2 gives it an emissive heart. */
+    {
+        sol_bool o_now = glfwGetKey(w, GLFW_KEY_O) == GLFW_PRESS;
+        if (o_now && !st->o_was_down) {
+            Mesh    empty;
+            vec3    f, pos;
+            sol_u32 h;
+            f = camera_forward(&st->camera);
+            f.y = 0.0f;
+            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+            f   = vec3_normalize(f);
+            pos = vec3_add(st->camera.pos, vec3_scale(f, 1.5f));
+            pos.y = st->camera.pos.y - 0.45f;     /* held at hand height */
+            memset(&empty, 0, sizeof empty);
+            h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
+                          vec3_make(0.16f, 0.16f, 0.16f));
+            scene_mesh_ref_set(&st->scene, h, "box");
+            scene_meta_set(&st->scene, h, "name", "lantern");
+            scene_meta_set(&st->scene, h, "light", "point");
+            scene_meta_set(&st->scene, h, "light_color", "1.0 0.72 0.42");
+            scene_meta_set(&st->scene, h, "light_intensity", "14");
+            scene_meta_set(&st->scene, h, "light_radius", "9");
+            {
+                SceneObject *lo = scene_get(&st->scene, h);
+                if (lo) {
+                    Material m = material_default();
+                    m.base_color = vec3_make(0.95f, 0.78f, 0.50f);
+                    m.roughness  = 0.40f;
+                    lo->material = m;
+                }
+            }
+            scene_resolve_meshes(&st->scene);
+            st->selected_handle = h;
+            scene_save(&st->scene, "scene.stml");
+            printf("a lantern is lit — drag it; the light goes along\n");
+        }
+        st->o_was_down = o_now;
     }
 
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
@@ -3911,6 +3991,58 @@ static void yardstick_ms(float *acc, double seconds) {
     *acc += ((float)(seconds * 1000.0) - *acc) * 0.08f;
 }
 
+/* Collect up to 8 point lights (P4 item 5): a light is META on an ordinary
+   object ("light"="point" + light_color/intensity/radius), so it parents,
+   persists through the existing meta round-trip, and DRAGS — the carried
+   lantern is the proof. Color premultiplies intensity; past the cap the
+   nearest-to-camera win. Read fresh each frame: the world matrix is the
+   light's position, so motion is free. */
+#define MAX_POINT_LIGHTS 8
+static int collect_point_lights(AppState *st, vec3 *pos, vec3 *col, float *rad) {
+    vec3    cpos[32], ccol[32];
+    float   crad[32], cd2[32];
+    int     n = 0, i, j, count;
+    sol_u32 k;
+    for (k = 0; k < st->scene.count && n < 32; k++) {
+        SceneObject *o  = &st->scene.objects[k];
+        const char  *lt = scene_meta_get(&st->scene, o->handle, "light");
+        const char  *s;
+        float        r = 1.0f, g = 1.0f, b = 1.0f, inten = 10.0f, radius = 8.0f;
+        mat4         wm;
+        vec3         p, dd;
+        if (!lt || strcmp(lt, "point") != 0) continue;
+        wm = scene_world_matrix(&st->scene, o);
+        p  = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
+        s = scene_meta_get(&st->scene, o->handle, "light_color");
+        if (s) sscanf(s, "%f %f %f", &r, &g, &b);
+        s = scene_meta_get(&st->scene, o->handle, "light_intensity");
+        if (s) inten = (float)atof(s);
+        s = scene_meta_get(&st->scene, o->handle, "light_radius");
+        if (s) radius = (float)atof(s);
+        cpos[n] = p;
+        ccol[n] = vec3_make(r * inten, g * inten, b * inten);
+        crad[n] = radius;
+        dd      = vec3_sub(p, st->camera.pos);
+        cd2[n]  = vec3_dot(dd, dd);
+        n++;
+    }
+    count = (n < MAX_POINT_LIGHTS) ? n : MAX_POINT_LIGHTS;
+    for (i = 0; i < count; i++) {              /* nearest first (n is tiny) */
+        int best = i;
+        vec3 tv; float tf;
+        for (j = i + 1; j < n; j++)
+            if (cd2[j] < cd2[best]) best = j;
+        tv = cpos[i]; cpos[i] = cpos[best]; cpos[best] = tv;
+        tv = ccol[i]; ccol[i] = ccol[best]; ccol[best] = tv;
+        tf = crad[i]; crad[i] = crad[best]; crad[best] = tf;
+        tf = cd2[i];  cd2[i]  = cd2[best];  cd2[best]  = tf;
+        pos[i] = cpos[i];
+        col[i] = ccol[i];
+        rad[i] = crad[i];
+    }
+    return count;
+}
+
 /* mark one candidate visible — the BVH walk already tested its box exactly */
 static void cull_mark(sol_u32 id, void *ctx) {
     ((unsigned char *)ctx)[id] = 1;
@@ -3990,6 +4122,31 @@ static void render(AppState *state) {
     view = camera_view(&state->camera);
     proj = camera_proj(&state->camera, aspect);
     vis  = vis_fill(state, mat4_mul(proj, view));   /* the CAMERA's view volume */
+
+    /* point lights (P4 item 5): collect once per frame, upload once — the
+       arrays are program state, so they survive draw_mesh's re-binds of the
+       same pipeline through the whole object loop */
+    {
+        static const char *PN[8] = {
+            "uPointPos[0]", "uPointPos[1]", "uPointPos[2]", "uPointPos[3]",
+            "uPointPos[4]", "uPointPos[5]", "uPointPos[6]", "uPointPos[7]" };
+        static const char *CN[8] = {
+            "uPointColor[0]", "uPointColor[1]", "uPointColor[2]", "uPointColor[3]",
+            "uPointColor[4]", "uPointColor[5]", "uPointColor[6]", "uPointColor[7]" };
+        static const char *RN[8] = {
+            "uPointRadius[0]", "uPointRadius[1]", "uPointRadius[2]", "uPointRadius[3]",
+            "uPointRadius[4]", "uPointRadius[5]", "uPointRadius[6]", "uPointRadius[7]" };
+        vec3  lp[MAX_POINT_LIGHTS], lc[MAX_POINT_LIGHTS];
+        float lr[MAX_POINT_LIGHTS];
+        int   ln = collect_point_lights(state, lp, lc, lr), li;
+        rhi_set_pipeline(state->pipeline);
+        rhi_set_uniform_int("uPointCount", ln);
+        for (li = 0; li < ln; li++) {
+            rhi_set_uniform_vec3 (PN[li], lp[li].x, lp[li].y, lp[li].z);
+            rhi_set_uniform_vec3 (CN[li], lc[li].x, lc[li].y, lc[li].z);
+            rhi_set_uniform_float(RN[li], lr[li]);
+        }
+    }
 
     /* skybox first (Phase A2): fills the background by sampling the equirect HDR
        per-pixel via the world view ray. Depth off -> writes color, not depth, so

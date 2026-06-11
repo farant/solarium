@@ -164,6 +164,13 @@ imports.
 - `glb` — an import anchor's source file; `derived` — its regenerated parts
 - `text` — a NOTE card's body, typed in-app (item 8); multiline values ride
   the raw-block form below — the escaping ladder's first real customer
+- `light` (`point`) + `light_color` ("r g b"), `light_intensity`,
+  `light_radius` — the object IS a lamp (P4 item 5): collected per frame
+  into the shader's point-light array. The light rides the object's
+  transform — a carried lantern moves its pool of light — and persists
+  through the ordinary meta round-trip, so lamps needed zero new format
+  machinery. The radius is the falloff window's edge (an optimization
+  boundary, not physics; inside it the falloff is true inverse-square).
 
 - **`<scene version>`** — format version, for future migration.
 - **`<object>`** — `nid` (required, persistent ID), `parent` (a `nid`; absent or
