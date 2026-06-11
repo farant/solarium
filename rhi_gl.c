@@ -34,7 +34,7 @@ typedef struct {
     GLsizei       stride;
     GLsizei       instance_stride;  /* stream 1 (P4 item 3); 0 = no instance stream */
     sol_bool      depth_test;
-    sol_bool      blend;        /* straight-alpha "over" */
+    int           blend;        /* RhiBlend: none / alpha-over / additive */
 } GlPipeline;
 
 typedef struct {
@@ -592,9 +592,12 @@ void rhi_set_pipeline(RhiPipeline pipeline) {
     glBindVertexArray(p->vao);
     if (p->depth_test) glEnable(GL_DEPTH_TEST);
     else               glDisable(GL_DEPTH_TEST);
-    if (p->blend) {
+    if (p->blend == RHI_BLEND_ALPHA) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   /* straight-alpha "over" */
+    } else if (p->blend == RHI_BLEND_ADD) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);                         /* pure accumulation */
     } else {
         glDisable(GL_BLEND);
     }

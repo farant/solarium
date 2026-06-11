@@ -53,11 +53,22 @@ typedef struct {
     size_t        stride;          /* bytes per vertex (stream 0) */
     size_t        instance_stride; /* bytes per instance (stream 1); 0 = none */
     sol_bool      depth_test;    /* render state, bundled into the pipeline */
-    sol_bool      blend;         /* straight-alpha "over": src*a + dst*(1-a).
+    int           blend;         /* an RhiBlend. VALUE-compatible with the old
+                                    sol_bool: SOL_FALSE = none, SOL_TRUE =
+                                    alpha — old desc sites read unchanged.
                                     Set EXPLICITLY at every desc site (a stack
                                     desc's unset field is garbage, silently
                                     enabling blend on an opaque pass). */
 } RhiPipelineDesc;
+
+/* Blend modes (P4 item 5): ALPHA = straight-alpha "over"; ADD = pure
+   accumulation (src + dst — bloom's upsample chain sums into its targets).
+   Metal: the colorBlendOperation/factors on the pipeline descriptor. */
+typedef enum {
+    RHI_BLEND_NONE  = 0,
+    RHI_BLEND_ALPHA = 1,
+    RHI_BLEND_ADD   = 2
+} RhiBlend;
 
 /* What rhi_begin_pass clears before drawing. RHI_CLEAR_NONE is a "load" pass
    (Vulkan/Metal loadOp=LOAD): draw OVER what the previous pass produced —

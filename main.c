@@ -311,16 +311,77 @@ static const char *POST_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vUV;\n"
     "uniform sampler2D uHdr;\n"
+    "uniform sampler2D uBloom;\n"                            /* the chain's top level (P4 i5) */
+    "uniform float uBloomStrength;\n"
     "uniform float uExposure;\n"
     "out vec4 FragColor;\n"
     "vec3 aces(vec3 x) {\n"                                  /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
     "}\n"
     "void main() {\n"
-    "    vec3 hdr    = texture(uHdr, vUV).rgb * uExposure;\n"  /* linear radiance * exposure */
+    "    vec3 hdr    = texture(uHdr, vUV).rgb\n"
+    "                + texture(uBloom, vUV).rgb * uBloomStrength;\n"  /* the glow is
+                                                                radiance too: add BEFORE
+                                                                exposure + tonemap so ACES
+                                                                rolls it off naturally */
+    "    hdr        *= uExposure;\n"
     "    vec3 mapped = aces(hdr);\n"                           /* tonemap: roll off HDR -> [0,1] */
     "    vec3 ldr    = pow(mapped, vec3(1.0 / 2.2));\n"        /* linear -> sRGB for display */
     "    FragColor   = vec4(ldr, 1.0);\n"
+    "}\n";
+
+/* --- the bloom chain (P4 item 5 piece 3): how a screen says "brighter than
+   white". Extract what exceeds the threshold (with a SOFT KNEE — a hard
+   cut flickers as pixels cross it), walk DOWN a half-res chain (each level
+   blurs a little; small blurs at low res compose into one huge cheap blur),
+   then walk back UP with a 3x3 tent, ACCUMULATING additively into each
+   level. The combine lives in the tonemap above. All fullscreen triangles
+   through POST_VERTEX_SRC. --- */
+static const char *BLOOM_EXTRACT_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uSrc;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"                                        /* Karis soft threshold, T=1 K=0.5 */
+    "    vec3  c    = texture(uSrc, vUV).rgb;\n"
+    "    float b    = max(c.r, max(c.g, c.b));\n"
+    "    float soft = clamp(b - 1.0 + 0.5, 0.0, 1.0);\n"     /* inside the knee... */
+    "    soft       = soft * soft / 2.0;\n"                  /* ...rises smoothly */
+    "    float w    = max(b - 1.0, soft) / max(b, 1e-4);\n"
+    "    FragColor  = vec4(c * w, 1.0);\n"
+    "}\n";
+static const char *BLOOM_DOWN_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uSrc;\n"
+    "uniform vec3 uTexel;\n"                                 /* 1/src size in xy */
+    "out vec4 FragColor;\n"
+    "void main() {\n"                                        /* 4 bilinear taps = 4x4 box */
+    "    vec2 t = uTexel.xy;\n"
+    "    vec3 c = texture(uSrc, vUV + vec2(-t.x, -t.y)).rgb\n"
+    "           + texture(uSrc, vUV + vec2( t.x, -t.y)).rgb\n"
+    "           + texture(uSrc, vUV + vec2(-t.x,  t.y)).rgb\n"
+    "           + texture(uSrc, vUV + vec2( t.x,  t.y)).rgb;\n"
+    "    FragColor = vec4(c * 0.25, 1.0);\n"
+    "}\n";
+static const char *BLOOM_UP_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uSrc;\n"
+    "uniform vec3 uTexel;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"                                        /* 3x3 tent; ADDS via blend */
+    "    vec2 t = uTexel.xy;\n"
+    "    vec3 c = texture(uSrc, vUV + vec2(-t.x, -t.y)).rgb * 1.0\n"
+    "           + texture(uSrc, vUV + vec2( 0.0, -t.y)).rgb * 2.0\n"
+    "           + texture(uSrc, vUV + vec2( t.x, -t.y)).rgb * 1.0\n"
+    "           + texture(uSrc, vUV + vec2(-t.x,  0.0)).rgb * 2.0\n"
+    "           + texture(uSrc, vUV).rgb                    * 4.0\n"
+    "           + texture(uSrc, vUV + vec2( t.x,  0.0)).rgb * 2.0\n"
+    "           + texture(uSrc, vUV + vec2(-t.x,  t.y)).rgb * 1.0\n"
+    "           + texture(uSrc, vUV + vec2( 0.0,  t.y)).rgb * 2.0\n"
+    "           + texture(uSrc, vUV + vec2( t.x,  t.y)).rgb * 1.0;\n"
+    "    FragColor = vec4(c / 16.0, 1.0);\n"
     "}\n";
 
 /* --- the shadow (depth-only) pass (item 9b): render the scene from the light's
@@ -663,6 +724,14 @@ typedef struct {
     int      bvh_count, bvh_cap;
     unsigned char *vis;          /* per-pass visibility, handle-indexed (piece 4) */
     sol_u32        vis_cap;
+    /* bloom (P4 item 5): the half-res chain — level 0 is half the frame,
+       each level half again; recreated with the HDR target on resize */
+#define BLOOM_LEVELS 5
+    RhiRenderTarget bloom_rt[BLOOM_LEVELS];
+    int             bloom_w[BLOOM_LEVELS], bloom_h[BLOOM_LEVELS];
+    RhiPipeline     bloom_extract_pipeline, bloom_down_pipeline, bloom_up_pipeline;
+    sol_bool        bloom_on;      /* 'K' toggles, for honest A/B */
+    sol_bool        k_was_down;
     /* the meadow (P4 item 3): per-island instanced grass — DERIVED data
        (the arrows pattern at landscape scale), rebuilt on load and mint,
        never serialized */
@@ -2550,6 +2619,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     }
     st->x_was_down = x_now;
 
+    /* K toggles bloom (P4 item 5) — the honest A/B for the glow */
+    {
+        sol_bool k_now = glfwGetKey(w, GLFW_KEY_K) == GLFW_PRESS;
+        if (k_now && !st->k_was_down) {
+            st->bloom_on = !st->bloom_on;
+            printf("bloom %s\n", st->bloom_on ? "on" : "off");
+        }
+        st->k_was_down = k_now;
+    }
+
     /* M toggles the shadow-map inspector (item 9b, edge) */
     m_now = glfwGetKey(w, GLFW_KEY_M) == GLFW_PRESS;
     if (m_now && !st->m_was_down)
@@ -3730,6 +3809,31 @@ static int init_scene(AppState *state) {
         state->brdf_lut_pipeline = rhi_create_pipeline(&brdf_desc);
     }
 
+    /* the bloom pipelines (P4 item 5 piece 3): three fullscreen-triangle
+       passes sharing POST_VERTEX_SRC; the upsample blends ADDITIVELY into
+       targets that already hold their own level's content */
+    {
+        RhiShader       es, ds, us2;
+        RhiPipelineDesc bd = {0};
+        es = rhi_create_shader(POST_VERTEX_SRC, BLOOM_EXTRACT_FRAGMENT_SRC);
+        ds = rhi_create_shader(POST_VERTEX_SRC, BLOOM_DOWN_FRAGMENT_SRC);
+        us2 = rhi_create_shader(POST_VERTEX_SRC, BLOOM_UP_FRAGMENT_SRC);
+        if (es.id && ds.id && us2.id) {
+            bd.attr_count = 0;
+            bd.stride     = 0;
+            bd.depth_test = SOL_FALSE;
+            bd.blend      = RHI_BLEND_NONE;
+            bd.shader     = es;
+            state->bloom_extract_pipeline = rhi_create_pipeline(&bd);
+            bd.shader     = ds;
+            state->bloom_down_pipeline    = rhi_create_pipeline(&bd);
+            bd.shader     = us2;
+            bd.blend      = RHI_BLEND_ADD;          /* the accumulating walk up */
+            state->bloom_up_pipeline      = rhi_create_pipeline(&bd);
+        }
+        state->bloom_on = SOL_TRUE;
+    }
+
     /* the meadow's machinery (P4 item 3 piece 2): ONE crossed-tapered-quad
        tuft (stream 0) shared by every island; the per-island instance
        buffers come from meadow_rebuild after the palace loads */
@@ -3983,6 +4087,7 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
    resize (the one path that both first-creates and resizes it). A minimized
    window reports 0 — clamp so we never make a zero-size framebuffer. */
 static void ensure_render_target(AppState *state, int w, int h) {
+    int lv, bw, bh;
     if (w < 1) w = 1;
     if (h < 1) h = 1;
     if (state->hdr_rt.id != 0 && state->rt_width == w && state->rt_height == h)
@@ -3992,6 +4097,18 @@ static void ensure_render_target(AppState *state, int w, int h) {
     state->hdr_rt    = rhi_create_render_target(w, h, RHI_TEX_RGBA16F);
     state->rt_width  = w;
     state->rt_height = h;
+
+    /* the bloom chain follows the frame (P4 item 5): half, quarter, ... */
+    bw = w; bh = h;
+    for (lv = 0; lv < BLOOM_LEVELS; lv++) {
+        bw = bw / 2; if (bw < 8) bw = 8;
+        bh = bh / 2; if (bh < 8) bh = 8;
+        if (state->bloom_rt[lv].id != 0)
+            rhi_destroy_render_target(state->bloom_rt[lv]);
+        state->bloom_rt[lv] = rhi_create_render_target(bw, bh, RHI_TEX_RGBA16F);
+        state->bloom_w[lv]  = bw;
+        state->bloom_h[lv]  = bh;
+    }
 }
 
 /* fold a per-frame sample (seconds) into a readable ms readout. Fixed blend:
@@ -4411,6 +4528,38 @@ static void render(AppState *state) {
         RhiRenderTarget screen = {0};   /* {0} = default framebuffer (declaration init, not a compound literal) */
         rt2 = glfwGetTime();
         yardstick_ms(&state->t_hdr, rt2 - rt1);
+
+        /* ---- the bloom chain (P4 item 5): extract, walk down, walk up ---- */
+        if (state->bloom_on && state->bloom_up_pipeline.id) {
+            int lv;
+            rhi_begin_pass(state->bloom_rt[0], RHI_CLEAR_COLOR, 0.0f, 0.0f, 0.0f, 1.0f);
+            rhi_set_pipeline(state->bloom_extract_pipeline);
+            rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
+            rhi_set_uniform_int("uSrc", 0);
+            rhi_draw(0, 3);
+            rhi_end_pass();
+            for (lv = 1; lv < BLOOM_LEVELS; lv++) {
+                rhi_begin_pass(state->bloom_rt[lv], RHI_CLEAR_COLOR, 0.0f, 0.0f, 0.0f, 1.0f);
+                rhi_set_pipeline(state->bloom_down_pipeline);
+                rhi_bind_texture(rhi_render_target_texture(state->bloom_rt[lv - 1]), 0);
+                rhi_set_uniform_int("uSrc", 0);
+                rhi_set_uniform_vec3("uTexel", 1.0f / (float)state->bloom_w[lv - 1],
+                                               1.0f / (float)state->bloom_h[lv - 1], 0.0f);
+                rhi_draw(0, 3);
+                rhi_end_pass();
+            }
+            for (lv = BLOOM_LEVELS - 2; lv >= 0; lv--) {
+                rhi_begin_pass(state->bloom_rt[lv], RHI_CLEAR_NONE, 0.0f, 0.0f, 0.0f, 1.0f);
+                rhi_set_pipeline(state->bloom_up_pipeline);    /* blend = ADD */
+                rhi_bind_texture(rhi_render_target_texture(state->bloom_rt[lv + 1]), 0);
+                rhi_set_uniform_int("uSrc", 0);
+                rhi_set_uniform_vec3("uTexel", 1.0f / (float)state->bloom_w[lv + 1],
+                                               1.0f / (float)state->bloom_h[lv + 1], 0.0f);
+                rhi_draw(0, 3);
+                rhi_end_pass();
+            }
+        }
+
         rhi_begin_pass(screen, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);
         if (state->show_shadow_map) {
             /* inspector: the shadow map as linearized grayscale (item 9b debug) */
@@ -4422,7 +4571,11 @@ static void render(AppState *state) {
         } else {
             rhi_set_pipeline(state->post_pipeline);
             rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
+            rhi_bind_texture(rhi_render_target_texture(state->bloom_rt[0]), 1);
             rhi_set_uniform_int("uHdr", 0);             /* sampler -> texture unit 0 */
+            rhi_set_uniform_int("uBloom", 1);
+            rhi_set_uniform_float("uBloomStrength",
+                                  state->bloom_on ? 0.06f : 0.0f);
             rhi_set_uniform_float("uExposure", state->exposure);
         }
         rhi_draw(0, 3);
