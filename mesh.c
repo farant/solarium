@@ -2,6 +2,7 @@
    to rhi.h for upload, never to GL. */
 
 #include "mesh.h"
+#include "gothic.h"     /* the kit's emitters — registry rows compose them */
 #include "sol_math.h"   /* SOL_PI + sol_smoothstep (the codex emitters) */
 
 #include <stdlib.h>
@@ -710,6 +711,47 @@ static void emit_terrain(MeshBuilder *b, const float *p) {
     make_terrain(b, p[0], p[1], (int)(p[2] + 0.5f), p[3], (unsigned)p[4]);
 }
 
+/* ---- molding (P6 item 1): the gothic kit's first registry row ----
+   A section from the molding table swept along a run of `len` meters:
+   straight, or bent `bend` degrees along a circular arc. vert=0 runs in
+   the ground plane (origin, heading +X, curving toward +Z — a string
+   course following a plan); vert=1 runs in a vertical plane (origin,
+   heading +Y, curving toward +X — a standing shaft, or at bend=180 a
+   semicircular band; profile o faces radially outward). Free ends are
+   capped; placement is main.c composition (TODO6 §1.7). */
+#define MOLDING_MAX_PTS 128
+static void emit_molding(MeshBuilder *b, const float *p) {
+    vec3  path[MOLDING_MAX_PTS];
+    int   pn, n, i;
+    int   vert  = p[4] > 0.5f;
+    float len   = p[1], scale = p[2];
+    float bend  = p[3] * (SOL_PI / 180.0f);
+    const ProfilePt *prof = gothic_profile((int)(p[0] + 0.5f), &pn);
+    vec3  plane = vert ? vec3_make(0.0f, 0.0f, 1.0f)
+                       : vec3_make(0.0f, 1.0f, 0.0f);
+
+    if (!prof || len <= 0.0f || scale <= 0.0f) return;
+    if (bend < 0.0f) bend = -bend;
+    if (bend < 1e-4f) {                                    /* straight */
+        path[0] = vec3_make(0.0f, 0.0f, 0.0f);
+        path[1] = vert ? vec3_make(0.0f, len, 0.0f)
+                       : vec3_make(len, 0.0f, 0.0f);
+        gothic_sweep(b, prof, pn, path, 2, plane, scale, 1, 1);
+        return;
+    }
+    n = gothic_arc_segments(len, bend);                    /* the two caps */
+    if (n > MOLDING_MAX_PTS - 1) n = MOLDING_MAX_PTS - 1;
+    {
+        float r = len / bend;                              /* arc radius */
+        for (i = 0; i <= n; i++) {
+            float t = bend * (float)i / (float)n;
+            if (vert) path[i] = vec3_make(r - r * cosf(t), r * sinf(t), 0.0f);
+            else      path[i] = vec3_make(r * sinf(t), 0.0f, r - r * cosf(t));
+        }
+        gothic_sweep(b, prof, pn, path, n + 1, plane, scale, 1, 1);
+    }
+}
+
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
     { "grid", 0, { 0 }, { 0.0f }, emit_grid },
@@ -741,7 +783,11 @@ static const MeshRefEntry REGISTRY[] = {
        minted island keeps its hills forever (the codex pattern at
        landscape scale) */
     { "terrain", 5, { "w", "d", "sub", "amp", "seed" },
-      { 32.0f, 32.0f, 48.0f, 2.5f, 7.0f }, emit_terrain }
+      { 32.0f, 32.0f, 48.0f, 2.5f, 7.0f }, emit_terrain },
+    /* molding (P6 item 1): prof indexes gothic.h's append-only table —
+       RIB 0, MULLION 1, STRING 2, BASE 3, HOOD 4, SHAFT_OCT 5 */
+    { "molding", 5, { "prof", "len", "scale", "bend", "vert" },
+      { 0.0f, 2.0f, 1.0f, 0.0f, 0.0f }, emit_molding }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 
