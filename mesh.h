@@ -70,6 +70,18 @@ void    make_book_open_cover(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
 void    make_book_open_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
                              sol_f32 board, sol_f32 sq);
 
+/* Terrain (item 10): a floating plot — seeded-fBm heightfield top, masked
+   to a ZERO RIM at the border (an island, not a world), over a skirt and
+   base slab. Centered: local x in [-w/2,w/2], z in [-d/2,d/2]. */
+void    make_terrain(MeshBuilder *b, sol_f32 w, sol_f32 d, int sub,
+                     sol_f32 amp, unsigned seed);
+
+/* THE height function — the one source of truth the emitter's vertices,
+   their finite-difference normals, AND the standing/placement queries all
+   evaluate (geometry and physics agree by construction). Params follow
+   the registry's prefix+defaults merge; outside the plot returns 0. */
+float   terrain_height(const float *params, int count, float lx, float lz);
+
 /* Board ink (item 8): a flat arrow in the XY plane (z=0), single-sided
    facing +Z. DERIVED geometry — endpoints come from two cards' positions,
    so it is rebuilt as they move, never serialized. Emits nothing when the

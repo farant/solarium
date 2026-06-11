@@ -337,6 +337,123 @@ static void emit_room(MeshBuilder *b, const float *p) {
 }
 static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
 static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1], p[2]); }
+/* ---- terrain (item 10): the floating plot ----
+   A heightfield top over a skirt and base slab — an ISLAND, not a world:
+   heights come from seeded fBm value noise, masked to a ZERO RIM at the
+   plot border, so every island rises out of its own edge. The SEED is the
+   island's identity (the codex-mint pattern): same seed, same hills,
+   forever. terrain_height below is THE one source of truth — emitter
+   vertices, their finite-difference normals, and the standing query all
+   evaluate it, so geometry and physics agree by construction. */
+
+/* integer lattice -> stable [0,1): the noise's randomness */
+static sol_f32 noise_hash(int x, int z, unsigned seed) {
+    unsigned h = (unsigned)x * 374761393u + (unsigned)z * 668265263u
+               + seed * 2246822519u;
+    h  = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return (sol_f32)(h & 0xFFFFFFu) / (sol_f32)0x1000000u;
+}
+
+static sol_f32 noise_mix(sol_f32 a, sol_f32 b, sol_f32 t) {
+    return a + (b - a) * t;
+}
+
+/* value noise: lattice hashes, smoothstep-blended between them */
+static sol_f32 value_noise(sol_f32 x, sol_f32 z, unsigned seed) {
+    int     ix = (int)x, iz = (int)z;
+    sol_f32 sx, sz, a, b, c, d;
+    if (x < (sol_f32)ix) ix--;                 /* portable floor */
+    if (z < (sol_f32)iz) iz--;
+    sx = sol_smoothstep(x - (sol_f32)ix);
+    sz = sol_smoothstep(z - (sol_f32)iz);
+    a = noise_hash(ix,     iz,     seed);
+    b = noise_hash(ix + 1, iz,     seed);
+    c = noise_hash(ix,     iz + 1, seed);
+    d = noise_hash(ix + 1, iz + 1, seed);
+    return noise_mix(noise_mix(a, b, sx), noise_mix(c, d, sx), sz);
+}
+
+/* fBm: octaves at doubling frequency, halving amplitude — one octave is
+   a swell, the sum is terrain (large forms with detail riding them) */
+#define TERRAIN_FEATURE_M 8.0f   /* base feature size, meters */
+static sol_f32 terrain_fbm(sol_f32 x, sol_f32 z, unsigned seed) {
+    sol_f32 sum = 0.0f, amp = 0.5f, freq = 1.0f;
+    int     o;
+    for (o = 0; o < 5; o++) {
+        sum  += amp * value_noise(x * freq, z * freq, seed + (unsigned)o * 101u);
+        freq *= 2.0f;
+        amp  *= 0.5f;
+    }
+    return sum;                                /* ~[0, 0.97) */
+}
+
+float terrain_height(const float *params, int count, float lx, float lz) {
+    float w    = mesh_ref_param("terrain", params, count, "w");
+    float d    = mesh_ref_param("terrain", params, count, "d");
+    float amp  = mesh_ref_param("terrain", params, count, "amp");
+    unsigned seed = (unsigned)mesh_ref_param("terrain", params, count, "seed");
+    float hw = w * 0.5f, hd = d * 0.5f, edge, ez, margin, mask;
+    if (lx < -hw || lx > hw || lz < -hd || lz > hd) return 0.0f;
+    edge = hw - (lx < 0.0f ? -lx : lx);        /* distance to the border */
+    ez   = hd - (lz < 0.0f ? -lz : lz);
+    if (ez < edge) edge = ez;
+    margin = (w < d ? w : d) * 0.18f;
+    mask   = sol_smoothstep(edge / margin);    /* the island fade: rim = 0 */
+    return amp * mask * terrain_fbm(lx / TERRAIN_FEATURE_M,
+                                    lz / TERRAIN_FEATURE_M, seed);
+}
+
+void make_terrain(MeshBuilder *b, sol_f32 w, sol_f32 d, int sub,
+                  sol_f32 amp, unsigned seed) {
+    float   p[5];
+    sol_f32 hw = w * 0.5f, hd = d * 0.5f, bt;
+    int     i, j;
+    if (sub < 2)  sub = 2;
+    if (sub > 96) sub = 96;
+    p[0] = w; p[1] = d; p[2] = (float)sub; p[3] = amp; p[4] = (float)seed;
+    bt = 0.4f + amp * 0.2f;                    /* base slab depth */
+
+    /* the top: a shared-vertex grid; per-vertex normals are CENTRAL
+       DIFFERENCES of the same height function — under IBL this is the
+       difference between a hillside that catches sky light from the
+       direction it faces and painted-flat ground */
+    for (j = 0; j <= sub; j++) {
+        for (i = 0; i <= sub; i++) {
+            sol_f32 x = -hw + w * (sol_f32)i / (sol_f32)sub;
+            sol_f32 z = -hd + d * (sol_f32)j / (sol_f32)sub;
+            sol_f32 e = w / (sol_f32)sub;
+            sol_f32 h  = terrain_height(p, 5, x, z);
+            sol_f32 nx = terrain_height(p, 5, x - e, z)
+                       - terrain_height(p, 5, x + e, z);
+            sol_f32 nz = terrain_height(p, 5, x, z - e)
+                       - terrain_height(p, 5, x, z + e);
+            sol_f32 ny = 2.0f * e;
+            sol_f32 nl = sqrtf(nx * nx + ny * ny + nz * nz);
+            mb_push_vertex(b, x, h, z, nx / nl, ny / nl, nz / nl, x, z);
+        }
+    }
+    for (j = 0; j < sub; j++) {
+        for (i = 0; i < sub; i++) {
+            sol_u32 v0 = (sol_u32)(j * (sub + 1) + i);
+            sol_u32 v1 = v0 + 1;
+            sol_u32 v2 = v0 + (sol_u32)(sub + 1);
+            sol_u32 v3 = v2 + 1;
+            mb_push_triangle(b, v0, v2, v3);
+            mb_push_triangle(b, v0, v3, v1);
+        }
+    }
+
+    /* the rim is masked to zero, so the skirt is four flat walls + a base:
+       a deliberate PLATFORM edge, kin to the path slabs (the torn-earth
+       underside is future sculpting) */
+    face_x(b, -hw, -bt, 0.0f, -hd, hd, -1);
+    face_x(b,  hw, -bt, 0.0f, -hd, hd,  1);
+    face_z(b, -hw, hw, -bt, 0.0f, -hd, -1);
+    face_z(b, -hw, hw, -bt, 0.0f,  hd,  1);
+    face_y(b, -hw, hw, -bt, -hd, hd, -1);
+}
+
 /* ---- the codex (item 9): geometry from real bookbinding ----
    A bound book parameterized by its CONSTRUCTION, not by guesswork: sewn
    signatures form the text BLOCK; the sewing cords show through the leather
@@ -589,6 +706,9 @@ static void emit_book_open_cover(MeshBuilder *b, const float *p) {
 static void emit_book_open_block(MeshBuilder *b, const float *p) {
     make_book_open_block(b, p[0], p[1], p[2], p[3], p[4]);
 }
+static void emit_terrain(MeshBuilder *b, const float *p) {
+    make_terrain(b, p[0], p[1], (int)(p[2] + 0.5f), p[3], (unsigned)p[4]);
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -616,7 +736,12 @@ static const MeshRefEntry REGISTRY[] = {
     { "book_open_cover", 5, { "w", "h", "t", "board", "sq" },
       { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f }, emit_book_open_cover },
     { "book_open_block", 5, { "w", "h", "t", "board", "sq" },
-      { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f }, emit_book_open_block }
+      { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f }, emit_book_open_block },
+    /* terrain (item 10): a floating plot — the SEED is its identity, so a
+       minted island keeps its hills forever (the codex pattern at
+       landscape scale) */
+    { "terrain", 5, { "w", "d", "sub", "amp", "seed" },
+      { 32.0f, 32.0f, 48.0f, 2.5f, 7.0f }, emit_terrain }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 

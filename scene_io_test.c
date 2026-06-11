@@ -377,7 +377,40 @@ int main(void) {
                 return 1;
             }
             mb_free(&mb);
-            printf("room + wall + path + board + arrow + codex emitters: ok\n");
+            /* item 10: terrain — counts, DETERMINISM (the seed is the
+               island's identity), the zero rim, and outside-the-plot */
+            {
+                float tp[5];
+                float h1, h1b, h2;
+                tp[0] = 24.0f; tp[1] = 24.0f; tp[2] = 16.0f;
+                tp[3] = 2.0f;  tp[4] = 5.0f;
+                mb_init(&mb);
+                if (!mesh_ref_build("terrain", tp, 5, &mb) ||
+                    mb.vertex_count != 17 * 17 + 20 ||
+                    mb.index_count  != 16 * 16 * 6 + 30) {
+                    printf("FAIL: terrain wants 309v/1566i, got %uv/%ui\n",
+                           (unsigned)mb.vertex_count, (unsigned)mb.index_count);
+                    mb_free(&mb); scene_free(&b); scene_free(&scene);
+                    return 1;
+                }
+                mb_free(&mb);
+                h1  = terrain_height(tp, 5, 3.2f, -4.1f);
+                h1b = terrain_height(tp, 5, 3.2f, -4.1f);
+                tp[4] = 6.0f;
+                h2  = terrain_height(tp, 5, 3.2f, -4.1f);
+                if (h1 != h1b || h1 == h2 || h1 <= 0.0f) {
+                    printf("FAIL: terrain determinism/seed identity\n");
+                    scene_free(&b); scene_free(&scene);
+                    return 1;
+                }
+                if (terrain_height(tp, 5, 12.0f, 0.0f) != 0.0f ||
+                    terrain_height(tp, 5, 13.0f, 0.0f) != 0.0f) {
+                    printf("FAIL: the rim and beyond must be height 0\n");
+                    scene_free(&b); scene_free(&scene);
+                    return 1;
+                }
+            }
+            printf("room + wall + path + board + arrow + codex + terrain emitters: ok\n");
         }
 
         /* identity + hierarchy survived: B's box (found by A's nid) must have a
