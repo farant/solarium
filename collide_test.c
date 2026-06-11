@@ -1,0 +1,274 @@
+/* collide_test.c — headless checks for the collision math (P4 item 1 piece 1):
+   the slide preserves tangential motion, corners stop you, doorways admit and
+   funnel, the step-up/headroom gates work, yawed boxes resolve in their own
+   frame, the inside-the-box degenerate pushes out the nearest face, a huge
+   clamped-dt move cannot tunnel a thin wall, and fly's vertical clamp catches
+   undersides and tops. Links collide.c only — no scene, no GL. Built by
+   `build.sh coltest`. */
+
+#include "collide.h"
+
+#include <stdio.h>
+#include <math.h>
+
+static int approx(float a, float b, float tol) { return fabsf(a - b) < tol; }
+
+static vec3 v3(float x, float y, float z) {
+    vec3 v;
+    v.x = x; v.y = y; v.z = z;
+    return v;
+}
+
+/* press the same move N times, like holding a key for N frames */
+static vec3 press(const ColliderSet *cs, vec3 p, vec3 move, int n) {
+    int i;
+    for (i = 0; i < n; i++)
+        p = collide_slide(cs, p, move, COLLIDE_RADIUS, COLLIDE_HEIGHT);
+    return p;
+}
+
+int main(void) {
+    const float R = COLLIDE_RADIUS;
+
+    /* ---- a wall along X at z=2 (hz=0.1): head-on stops, diagonal slides */
+    {
+        ColliderSet cs;
+        vec3        p;
+        float       face = 2.0f - 0.1f - R;          /* where the circle rests */
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 2.0f, 0.0f, 5.0f, 0.1f, 0.0f, 3.0f, 0);
+
+        p = press(&cs, v3(0, 0, 1.0f), v3(0, 0, 0.1f), 20);
+        printf("head-on:  p=(%.3f, %.3f)  face=%.3f\n", p.x, p.z, face);
+        if (!approx(p.z, face, 0.01f) || !approx(p.x, 0.0f, 0.001f)) {
+            printf("FAIL: head-on should pin z at the face, x untouched\n");
+            return 1;
+        }
+
+        p = press(&cs, v3(0, 0, 1.0f), v3(0.1f, 0, 0.1f), 10);
+        printf("diagonal: p=(%.3f, %.3f)\n", p.x, p.z);
+        if (!approx(p.x, 1.0f, 0.001f)) {
+            printf("FAIL: tangential motion must survive the slide whole\n");
+            return 1;
+        }
+        if (!approx(p.z, face, 0.01f)) {
+            printf("FAIL: diagonal should still ride the face\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    /* ---- an inside corner (walls at z=2 and x=2): motion dies there */
+    {
+        ColliderSet cs;
+        vec3        p;
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 2.0f, 0.0f, 5.0f, 0.1f, 0.0f, 3.0f, 0);
+        collide_set_add(&cs, 2.0f, 0.0f, 0.0f, 0.1f, 5.0f, 0.0f, 3.0f, 0);
+        p = press(&cs, v3(1.0f, 0, 1.0f), v3(0.1f, 0, 0.1f), 20);
+        printf("corner:   p=(%.3f, %.3f)\n", p.x, p.z);
+        if (p.x > 1.62f || p.z > 1.62f) {
+            printf("FAIL: the corner should pin both axes at the faces\n");
+            return 1;
+        }
+        if (!approx(p.x, 1.6f, 0.02f) || !approx(p.z, 1.6f, 0.02f)) {
+            printf("FAIL: corner rest position should touch both walls\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    /* ---- a doorway (two pieces, gap x in [-0.5, 0.5]): admits dead-center,
+       and FUNNELS you through when you aim slightly off the jamb */
+    {
+        ColliderSet cs;
+        vec3        p;
+        collide_set_init(&cs);
+        collide_set_add(&cs, -3.0f, 2.0f, 0.0f, 2.5f, 0.1f, 0.0f, 3.0f, 0);
+        collide_set_add(&cs,  3.0f, 2.0f, 0.0f, 2.5f, 0.1f, 0.0f, 3.0f, 0);
+
+        p = press(&cs, v3(0, 0, 0.5f), v3(0, 0, 0.1f), 30);
+        printf("doorway centered: p=(%.3f, %.3f)\n", p.x, p.z);
+        if (p.z < 2.5f) {
+            printf("FAIL: a centered walk must pass the 1m gap\n");
+            return 1;
+        }
+
+        p = press(&cs, v3(-0.4f, 0, 0.5f), v3(0, 0, 0.1f), 60);
+        printf("doorway funnel:   p=(%.3f, %.3f)\n", p.x, p.z);
+        if (p.z < 2.5f) {
+            printf("FAIL: the rounded jamb should funnel an off-center walk through\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    /* ---- the treaty gates: a curb under STEP_UP is ignored (ground's job),
+       the same footprint as a real wall blocks, a beam above the crown is
+       clear headroom, a beam below it is not */
+    {
+        ColliderSet cs;
+        vec3        p;
+
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 2.0f, 0.0f, 5.0f, 0.3f, 0.0f, 0.4f, 0);
+        p = press(&cs, v3(0, 0, 0.5f), v3(0, 0, 0.1f), 30);
+        printf("curb 0.4:  z=%.3f\n", p.z);
+        if (p.z < 3.0f) { printf("FAIL: a step is not a wall\n"); return 1; }
+        collide_set_free(&cs);
+
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 2.0f, 0.0f, 5.0f, 0.3f, 0.0f, 0.8f, 0);
+        p = press(&cs, v3(0, 0, 0.5f), v3(0, 0, 0.1f), 30);
+        printf("wall 0.8:  z=%.3f\n", p.z);
+        if (!approx(p.z, 2.0f - 0.3f - R, 0.01f)) {
+            printf("FAIL: over the step-up it IS a wall\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 2.0f, 0.0f, 5.0f, 0.3f, 2.0f, 2.4f, 0);
+        p = press(&cs, v3(0, 0, 0.5f), v3(0, 0, 0.1f), 30);
+        printf("beam 2.0:  z=%.3f\n", p.z);
+        if (p.z < 3.0f) { printf("FAIL: headroom above the crown is clear\n"); return 1; }
+        collide_set_free(&cs);
+
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 2.0f, 0.0f, 5.0f, 0.3f, 1.5f, 2.4f, 0);
+        p = press(&cs, v3(0, 0, 0.5f), v3(0, 0, 0.1f), 30);
+        printf("beam 1.5:  z=%.3f\n", p.z);
+        if (p.z > 1.7f) { printf("FAIL: a beam below the crown blocks\n"); return 1; }
+        collide_set_free(&cs);
+    }
+
+    /* ---- yaw 90 degrees: a long-X box turned to lie along world Z. At
+       z=1.5 the UNROTATED footprint is nowhere near the path — only correct
+       frame handling blocks the walk. */
+    {
+        ColliderSet cs;
+        vec3        p;
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 0.0f, (float)(3.14159265358979 * 0.5),
+                        3.0f, 0.1f, 0.0f, 3.0f, 0);
+        p = press(&cs, v3(-1.0f, 0, 1.5f), v3(0.1f, 0, 0), 20);
+        printf("yaw 90:   p=(%.3f, %.3f)\n", p.x, p.z);
+        if (!approx(p.x, -(0.1f + R), 0.01f)) {
+            printf("FAIL: the rotated box must block in its own frame\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    /* ---- yaw 45 degrees: pressing straight -x against the diagonal wall
+       slides you +z, and the whole ride stays ON the face: the normal
+       distance (px+pz)/sqrt(2) holds at hz+R. */
+    {
+        ColliderSet cs;
+        vec3        p;
+        float       ndist;
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 0.0f, (float)(3.14159265358979 * 0.25),
+                        4.0f, 0.1f, 0.0f, 3.0f, 0);
+        p = press(&cs, v3(1.0f, 0, 1.0f), v3(-0.1f, 0, 0), 30);
+        ndist = (p.x + p.z) * 0.70710678f;
+        printf("yaw 45:   p=(%.3f, %.3f)  ndist=%.3f (want %.3f)\n",
+               p.x, p.z, ndist, 0.1f + R);
+        if (p.z < 1.4f) {
+            printf("FAIL: the diagonal wall should shed you sideways (+z)\n");
+            return 1;
+        }
+        if (!approx(ndist, 0.1f + R, 0.02f)) {
+            printf("FAIL: sliding must ride the rotated face, not drift off it\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    /* ---- inside-the-box degenerate: a center inside the rectangle pushes
+       out the NEAREST face, clearing it by the radius */
+    {
+        ColliderSet cs;
+        vec3        p;
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 3.0f, 0);
+        p = collide_slide(&cs, v3(0.7f, 0, 0.0f), v3(0.001f, 0, 0),
+                          COLLIDE_RADIUS, COLLIDE_HEIGHT);
+        printf("inside:   p=(%.3f, %.3f)\n", p.x, p.z);
+        if (!approx(p.x, 1.0f + R, 0.02f) || !approx(p.z, 0.0f, 0.02f)) {
+            printf("FAIL: embedded center must eject out the nearest face\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    /* ---- tunneling: one huge move (the 0.1s clamped-dt frame) across a
+       thin wall would jump the whole contact zone without substepping */
+    {
+        ColliderSet cs;
+        vec3        p;
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 2.0f, 0.0f, 5.0f, 0.05f, 0.0f, 3.0f, 0);
+        p = collide_slide(&cs, v3(0, 0, 1.0f), v3(0, 0, 1.5f),
+                          COLLIDE_RADIUS, COLLIDE_HEIGHT);
+        printf("tunnel:   z=%.3f\n", p.z);
+        if (p.z > 1.7f) {
+            printf("FAIL: substepping must catch a one-frame wall crossing\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    /* ---- fly clamp: rising stops the crown at an underside (only when the
+       plan circle overlaps the footprint); sinking lands the feet on a top */
+    {
+        ColliderSet cs;
+        float       dy;
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 0.0f, 0.0f, 2.0f, 2.0f, 2.5f, 2.7f, 0);
+
+        dy = collide_clamp_y(&cs, v3(0, 0, 0), 1.0f, COLLIDE_RADIUS, COLLIDE_HEIGHT);
+        printf("clamp up:   dy=%.3f (want ~%.3f)\n", dy, 2.5f - COLLIDE_HEIGHT);
+        if (!approx(dy, 2.5f - COLLIDE_HEIGHT, 0.01f)) {
+            printf("FAIL: rising crown must stop at the underside\n");
+            return 1;
+        }
+
+        dy = collide_clamp_y(&cs, v3(5.0f, 0, 0), 1.0f, COLLIDE_RADIUS, COLLIDE_HEIGHT);
+        printf("clamp miss: dy=%.3f\n", dy);
+        if (!approx(dy, 1.0f, 0.0001f)) {
+            printf("FAIL: a box you are not under must not clamp\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+
+        collide_set_init(&cs);
+        collide_set_add(&cs, 0.0f, 0.0f, 0.0f, 2.0f, 2.0f, 0.5f, 1.0f, 0);
+        dy = collide_clamp_y(&cs, v3(0, 1.5f, 0), -1.0f, COLLIDE_RADIUS, COLLIDE_HEIGHT);
+        printf("clamp down: dy=%.3f (want ~-0.5)\n", dy);
+        if (!approx(dy, -0.5f, 0.01f)) {
+            printf("FAIL: sinking feet must land on the top\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    /* ---- empty set: motion passes through unchanged, y included */
+    {
+        ColliderSet cs;
+        vec3        p;
+        collide_set_init(&cs);
+        p = collide_slide(&cs, v3(1, 2, 3), v3(0.5f, 0.25f, -0.5f),
+                          COLLIDE_RADIUS, COLLIDE_HEIGHT);
+        printf("empty:    p=(%.3f, %.3f, %.3f)\n", p.x, p.y, p.z);
+        if (!approx(p.x, 1.5f, 0.0001f) || !approx(p.y, 2.25f, 0.0001f) ||
+            !approx(p.z, 2.5f, 0.0001f)) {
+            printf("FAIL: an empty world constrains nothing\n");
+            return 1;
+        }
+        collide_set_free(&cs);
+    }
+
+    printf("collide_test: OK\n");
+    return 0;
+}
