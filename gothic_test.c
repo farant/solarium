@@ -464,6 +464,24 @@ static void check_one_plan(const ChurchPlan *p, float pl_in, float pw_in) {
             p->clerest_h1 - 0.3f + 1e-3f)
             { fail("plan: clerestory crown out of its band"); return; }
     }
+    {   /* the LEVEL-CROWN law (item 5's headline): the round diagonal
+           sets H = q/2 and every other rib's acuteness solves to meet
+           it — one assertion validating the whole arch stack */
+        float q = 0.5f * sqrtf(p->nave_w * p->nave_w + p->bay_l * p->bay_l);
+        float at = gothic_arch_acuteness_for(p->nave_w, q);
+        float al = gothic_arch_acuteness_for(p->bay_l, q);
+        if (fabsf(gothic_arch_y(p->nave_w, at, 0.0f) - q) > 1e-4f ||
+            fabsf(gothic_arch_y(p->bay_l, al, 0.0f) - q) > 1e-4f)
+            { fail("plan: nave rib crowns do not meet the diagonal's"); return; }
+        if (p->aisles) {
+            q  = 0.5f * sqrtf(p->aisle_w * p->aisle_w + p->bay_l * p->bay_l);
+            at = gothic_arch_acuteness_for(p->aisle_w, q);
+            al = gothic_arch_acuteness_for(p->bay_l, q);
+            if (fabsf(gothic_arch_y(p->aisle_w, at, 0.0f) - q) > 1e-4f ||
+                fabsf(gothic_arch_y(p->bay_l, al, 0.0f) - q) > 1e-4f)
+                { fail("plan: aisle rib crowns do not meet the diagonal's"); return; }
+        }
+    }
     {   /* the portal admits the capsule, the great window fits above */
         GothicOpening o;
         plan_opening(p, WALL_WEST, 0, &o);
@@ -614,6 +632,16 @@ static void audit_coplanar(const MeshBuilder *b, const char *who) {
             for (c = a + 1; c < i1 && !bad; c++) {
                 float A[3][2], B[3][2];
                 vec3 n = tri_gnormal(b, ents[a].tri);
+                {   /* hinged neighbors land in one bucket: demand TRUE
+                       coplanarity (unquantized) before convicting */
+                    float d = vec3_dot(n, vpos(b, b->indices[ents[a].tri * 3]));
+                    int   q, off = 0;
+                    for (q = 0; q < 3; q++) {
+                        vec3 pv = vpos(b, b->indices[ents[c].tri * 3 + q]);
+                        if (fabsf(vec3_dot(n, pv) - d) > 2e-3f) off = 1;
+                    }
+                    if (off) continue;
+                }
                 audit_project(b, ents[a].tri, n, A);
                 audit_project(b, ents[c].tri, n, B);
                 if (!sat_separated(A, B) && !sat_separated(B, A)) {
@@ -662,13 +690,15 @@ static void test_church_stone(void) {
             if (g_fail) return;
         }
 
-    {   /* the budget: a long basilica shell within ~60k triangles */
+    {   /* the budget: the shell's 60k (item 4) plus the vaults' ride
+           (item 5) — a long VAULTED basilica within 100k; item 10's
+           400k demo-island cap is the governing number */
         float params[8] = { 26.0f, 58.0f, 3.0f, 2.0f, 0.0f, 1.0f, 1.0f, 0.0f };
         MeshBuilder b;
         mb_init(&b);
         church_stone(&b, params, 8);
-        if (b.index_count / 3 >= 60000)
-            fail("church_stone: basilica shell over the 60k budget");
+        if (b.index_count / 3 >= 100000)
+            fail("church_stone: vaulted basilica over the 100k budget");
         if (b.index_count / 3 < 1000)
             fail("church_stone: basilica suspiciously empty");
         printf("church_stone: basilica shell %u tris\n",

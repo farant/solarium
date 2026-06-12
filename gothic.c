@@ -834,6 +834,10 @@ void church_plan(ChurchPlan *p, const float *params, int count) {
         float r7 = gothic_hash01(p->seed, LANE_ELEV, 7, 0);
         float arc_span = 0.8f * p->bay_l;       /* arcade clear span */
 
+        float q_nave  = 0.5f * sqrtf(p->nave_w * p->nave_w +
+                                     p->bay_l * p->bay_l);
+        float q_aisle = 0.5f * sqrtf(p->aisle_w * p->aisle_w +
+                                     p->bay_l * p->bay_l);
         p->plinth_h = 0.4f + 0.15f * r1;
         p->sill_h   = 1.1f + 0.5f  * r2;
         if (p->style == CHURCH_CHAPEL) {
@@ -843,6 +847,10 @@ void church_plan(ChurchPlan *p, const float *params, int count) {
             p->wall_h   = p->impost_h
                         + gothic_arch_y(0.55f * p->bay_l, p->acute, 0.0f)
                         + 1.0f;
+            /* the vault-closure law (item 5): the wall head must clear
+               the diagonal's crown — the wall ribs ride ON stone */
+            if (p->wall_h < p->impost_h + q_nave + 0.35f)
+                p->wall_h = p->impost_h + q_nave + 0.35f;
             p->aisle_h  = p->wall_h;
         } else if (p->style == CHURCH_HALL) {
             p->wall_t   = 0.7f + 0.25f * r3;
@@ -850,6 +858,8 @@ void church_plan(ChurchPlan *p, const float *params, int count) {
             p->arcade_h = p->impost_h
                         + gothic_arch_y(arc_span, p->acute, 0.0f) + 0.5f;
             p->wall_h   = p->arcade_h + 0.8f;
+            if (p->wall_h < p->arcade_h + q_nave + 0.35f)   /* vault closure */
+                p->wall_h = p->arcade_h + q_nave + 0.35f;
             p->aisle_h  = p->wall_h;            /* THE hall trait        */
         } else {
             p->wall_t     = 0.8f + 0.3f * r3;
@@ -859,7 +869,11 @@ void church_plan(ChurchPlan *p, const float *params, int count) {
             p->clerest_h0 = p->arcade_h + 0.8f + 0.4f * r5;  /* triforium */
             p->clerest_h1 = p->clerest_h0 + 1.7f + 0.6f * r6;
             p->wall_h     = p->clerest_h1 + 0.5f;
+            if (p->wall_h < p->clerest_h0 + q_nave + 0.35f) /* vault closure */
+                p->wall_h = p->clerest_h0 + q_nave + 0.35f;
             p->aisle_h    = p->arcade_h + 0.4f;
+            if (p->aisle_h < p->impost_h + q_aisle + 0.35f)
+                p->aisle_h = p->impost_h + q_aisle + 0.35f;
         }
         p->parapet_h = 0.4f + 0.2f * r7;
     }
@@ -1563,6 +1577,9 @@ static void stone_course(MeshBuilder *b, const ChurchPlan *p) {
     }
 }
 
+static void stone_vaults(MeshBuilder *b, const ChurchPlan *p);  /* item 5,
+                                       defined below in reading order */
+
 void church_stone(MeshBuilder *b, const float *params, int count) {
     ChurchPlan plan;
     const ChurchPlan *p = &plan;
@@ -1623,12 +1640,15 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
                     p->style == CHURCH_HALL ? 0.75f : 0.55f);
         float bw = wt + 0.3f;
         int   st = p->style == CHURCH_BASILICA ? 3 : 2;
+        /* basilica aisle buttresses RAISED to receive the flyers */
+        float bh = p->style == CHURCH_BASILICA ? p->aisle_h + 0.6f
+                                               : p->aisle_h;
         for (i = 1; i < p->nbays; i++) {
             float x = p->west_x + p->tower_d + (float)i * p->bay_l;
-            buttress(b, p->aisle_h, bw, bd, st, 1.0f, 0.0f,
+            buttress(b, bh, bw, bd, st, 1.0f, 0.0f,
                      x, -(hwid + wt));   /* south: the body already
                                             extends -z; back on the face */
-            buttress(b, p->aisle_h, bw, bd, st, -1.0f, 0.0f,
+            buttress(b, bh, bw, bd, st, -1.0f, 0.0f,
                      x, hwid + wt);      /* north: flipped 180 */
         }
         if (p->aisles) {
@@ -1645,6 +1665,7 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
         }
     }
 
+    stone_vaults(b, p);             /* part 2: the crown of the system */
     stone_course(b, p);
 
     {   /* parapets: aisle walls full length, facade and flat east
@@ -1728,4 +1749,351 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
         }
     }
     (void)pfh;
+}
+
+/* ================== item 5: vaults — quadripartite ribs & webs =====
+   The crown of the system. Per bay: the DIAGONALS are semicircular
+   (a = 0) over the bay diagonal, so the crown is exactly q/2 above the
+   springing — the historical datum. Transverse and wall ribs are
+   pointed, their acuteness from the LEVEL-CROWN SOLVE — item 2's
+   formula applied exactly as the lodges applied it. Ribs die on the
+   abacus (ruled v1; the tas-de-charge block is the flagged
+   refinement). Webs are ruled lofts between half-ribs, emitted as
+   thin SLABS (intrados + extrados, ruins show the back), domed
+   gently. */
+
+#define VAULT_SEG 0.6f       /* rib chords: big smooth arcs, coarser
+                                than molding scale, shared by the webs */
+#define WEB_T     0.12f      /* the web slab's thickness              */
+
+static vec3 vlerp(vec3 a, vec3 b, float t) {
+    return vec3_add(a, vec3_scale(vec3_sub(b, a), t));
+}
+
+/* the arch path between two plan points, stood in its vertical plane,
+   springer -> crown -> springer; crown forced exact by arch_path_n */
+static int vault_path(vec3 *out, float x0, float z0, float x1, float z1,
+                      float spring, float a) {
+    vec3  tmp[GOTHIC_ARCH_MAX_PTS];
+    float dx = x1 - x0, dz = z1 - z0;
+    float s  = sqrtf(dx * dx + dz * dz);
+    float mx = 0.5f * (x0 + x1), mz = 0.5f * (z0 + z1);
+    int   n_h, n, i;
+    if (s < 0.2f) return 0;
+    dx /= s; dz /= s;
+    n_h = arch_half_segments(s, a, VAULT_SEG);
+    if (2 * n_h + 1 > GOTHIC_ARCH_MAX_PTS) n_h = (GOTHIC_ARCH_MAX_PTS - 1) / 2;
+    n = arch_path_n(tmp, s, a, n_h);
+    for (i = 0; i < n; i++) {
+        out[i].x = mx + dx * tmp[i].x;
+        out[i].y = spring + tmp[i].y;
+        out[i].z = mz + dz * tmp[i].x;
+    }
+    return n;
+}
+
+/* sweep PROF_RIB along a vault path — REVERSED so the section's o
+   points into the room: the roll hangs below the web (the archivolt
+   lesson), the open o=0 back rests against the web's intrados line */
+static void vault_rib(MeshBuilder *b, const vec3 *path, int n, float scale) {
+    vec3 rev[GOTHIC_ARCH_MAX_PTS];
+    vec3 d, pn;
+    int  i, pn_n;
+    const ProfilePt *rib = gothic_profile(PROF_RIB, &pn_n);
+    if (n < 2) return;
+    for (i = 0; i < n; i++) rev[i] = path[n - 1 - i];
+    d   = vec3_sub(path[n - 1], path[0]);
+    d.y = 0.0f;
+    if (vec3_dot(d, d) < 1e-8f) return;
+    pn = vec3_normalize(vec3_cross(d, vec3_make(0.0f, 1.0f, 0.0f)));
+    gothic_sweep(b, rib, pn_n, rev, n, pn, scale, 1, 1);
+}
+
+/* the boss: a small octahedral knob at a crown — the future ornament
+   slot, and the cover for the rib ends that converge there */
+static void boss_knob(MeshBuilder *b, vec3 c, float r) {
+    vec3 v[6];
+    int  f;
+    static const int F[8][3] = {
+        { 0, 2, 4 }, { 2, 1, 4 }, { 1, 3, 4 }, { 3, 0, 4 },
+        { 2, 0, 5 }, { 1, 2, 5 }, { 3, 1, 5 }, { 0, 3, 5 }
+    };
+    v[0] = vec3_add(c, vec3_make( r, 0.0f, 0.0f));
+    v[1] = vec3_add(c, vec3_make(-r, 0.0f, 0.0f));
+    v[2] = vec3_add(c, vec3_make(0.0f, 0.0f,  r));
+    v[3] = vec3_add(c, vec3_make(0.0f, 0.0f, -r));
+    v[4] = vec3_add(c, vec3_make(0.0f, -1.3f * r, 0.0f));   /* hangs */
+    v[5] = vec3_add(c, vec3_make(0.0f,  1.3f * r, 0.0f));
+    for (f = 0; f < 8; f++) {
+        vec3 a = v[F[f][0]], bb = v[F[f][1]], cc = v[F[f][2]];
+        vec3 nm = vec3_normalize(vec3_cross(vec3_sub(bb, a), vec3_sub(cc, a)));
+        sol_u32 i0 = mb_push_vertex(b, a.x, a.y, a.z, nm.x, nm.y, nm.z, 0, 0);
+        sol_u32 i1 = mb_push_vertex(b, bb.x, bb.y, bb.z, nm.x, nm.y, nm.z, 1, 0);
+        sol_u32 i2 = mb_push_vertex(b, cc.x, cc.y, cc.z, nm.x, nm.y, nm.z, 0, 1);
+        mb_push_triangle(b, i0, i1, i2);
+    }
+}
+
+/* one web cell: the ruled loft between two half-ribs (springer->boss,
+   EQUAL station counts — same span, same subdivision: equal index is
+   equal arclength), domed by 0.08H sin(pi t) sin(pi s); the slab's two
+   surfaces share the rib stations so adjacent cells meet seamlessly */
+static vec3 web_pt(const vec3 *ra, const vec3 *rb, int n, int k,
+                   float s, float dome, float lift) {
+    float t = (float)k / (float)(n - 1);
+    vec3  p = vlerp(ra[k], rb[k], s);
+    p.y += dome * sinf(SOL_PI * t) * sinf(SOL_PI * s) + lift;
+    return p;
+}
+
+static void web_quad(MeshBuilder *b, vec3 p00, vec3 p10, vec3 p11, vec3 p01,
+                     vec3 ref) {
+    /* oriented toward ref (the room below for the intrados, the sky
+       for the extrados). The boss row's rules CONVERGE: detect the
+       collapsed pair FIRST, before any orientation swap relocates it,
+       and emit the triangle of the three distinct corners. */
+    vec3    e = vec3_sub(p11, p10);
+    vec3    nm, cen;
+    float   l;
+    sol_u32 i0, i1, i2, i3;
+    int     tri = vec3_dot(e, e) < 1e-6f;
+
+    nm  = vec3_cross(vec3_sub(p10, p00), vec3_sub(p01, p00));
+    l   = sqrtf(vec3_dot(nm, nm));
+    if (l < 1e-10f) return;
+    nm  = vec3_scale(nm, 1.0f / l);
+    cen = vec3_scale(vec3_add(vec3_add(p00, p10), vec3_add(p11, p01)), 0.25f);
+    if (vec3_dot(nm, vec3_sub(ref, cen)) < 0.0f) {
+        vec3 tswap = p10; p10 = p01; p01 = tswap;
+        nm = vec3_scale(nm, -1.0f);
+        tri = tri ? 2 : 0;            /* the collapsed pair moved */
+    } else if (tri) {
+        tri = 1;
+    }
+    i0 = mb_push_vertex(b, p00.x, p00.y, p00.z, nm.x, nm.y, nm.z, 0, 0);
+    i1 = mb_push_vertex(b, p10.x, p10.y, p10.z, nm.x, nm.y, nm.z, 1, 0);
+    if (tri == 1) {                   /* unswapped: (p00, p10, p01) */
+        i3 = mb_push_vertex(b, p01.x, p01.y, p01.z, nm.x, nm.y, nm.z, 0, 1);
+        mb_push_triangle(b, i0, i1, i3);
+        return;
+    }
+    if (tri == 2) {                   /* swapped: pair sits at (p11,p01) */
+        i2 = mb_push_vertex(b, p11.x, p11.y, p11.z, nm.x, nm.y, nm.z, 1, 1);
+        mb_push_triangle(b, i0, i1, i2);
+        return;
+    }
+    i2 = mb_push_vertex(b, p11.x, p11.y, p11.z, nm.x, nm.y, nm.z, 1, 1);
+    i3 = mb_push_vertex(b, p01.x, p01.y, p01.z, nm.x, nm.y, nm.z, 0, 1);
+    mb_push_triangle(b, i0, i1, i2);
+    mb_push_triangle(b, i0, i2, i3);
+}
+
+static void web_cell(MeshBuilder *b, const vec3 *ra, const vec3 *rb,
+                     int n, float dome) {
+    vec3  chord = vec3_sub(rb[0], ra[0]);
+    float clen  = sqrtf(vec3_dot(chord, chord));
+    vec3  boss  = ra[n - 1];
+    vec3  ref_lo, ref_hi;
+    int   m, k, j, side;
+    if (n < 2 || clen < 0.2f) return;
+    m = (int)(clen / 0.5f);
+    if (m < 2) m = 2;
+    if (m > 5) m = 5;
+    ref_lo = vec3_make(boss.x, ra[0].y - 4.0f, boss.z);   /* the room  */
+    ref_hi = vec3_make(boss.x, boss.y + 6.0f, boss.z);    /* the sky   */
+    for (side = 0; side < 2; side++) {
+        float lift = side ? WEB_T : 0.0f;
+        vec3  ref  = side ? ref_hi : ref_lo;
+        for (k = 0; k + 1 < n; k++)
+            for (j = 0; j < m; j++) {
+                float s0 = (float)j / (float)m;
+                float s1 = (float)(j + 1) / (float)m;
+                web_quad(b,
+                         web_pt(ra, rb, n, k,     s0, dome, lift),
+                         web_pt(ra, rb, n, k + 1, s0, dome, lift),
+                         web_pt(ra, rb, n, k + 1, s1, dome, lift),
+                         web_pt(ra, rb, n, k,     s1, dome, lift),
+                         ref);
+            }
+    }
+}
+
+/* a respond: the half-shaft a rib bundle lands on, half-buried in its
+   wall plane (item 4's deferral cashed — the rib assignment exists) */
+static void respond(MeshBuilder *b, float x, float z, float y0, float y1,
+                    float scale) {
+    int pn;
+    const ProfilePt *oct = gothic_profile(PROF_SHAFT_OCT, &pn);
+    vec3 path[2];
+    if (y1 - y0 < 0.3f) return;
+    path[0] = vec3_make(x, y0, z);
+    path[1] = vec3_make(x, y1, z);
+    gothic_sweep(b, oct, pn, path, 2, vec3_make(0.0f, 0.0f, 1.0f),
+                 scale, 0, 1);
+}
+
+/* the flyer: a quarter-ellipse from the clerestory wall head down onto
+   the (raised) outer buttress, swept with a rectangular section; both
+   ends buried in their stone — §1.5's first registered dependency:
+   flyer <- {clerestory wall, outer buttress} */
+static const ProfilePt FLYER_RECT[5] = {
+    { -0.15f, -0.13f, 1 }, { 0.15f, -0.13f, 1 }, { 0.15f, 0.13f, 1 },
+    { -0.15f,  0.13f, 1 }, { -0.15f, -0.13f, 1 }
+};
+
+static void flyer(MeshBuilder *b, float x, float z_in, float z_out,
+                  float y_high, float y_low) {
+    vec3  pt[12];
+    float run = z_out - z_in, rise = y_high - y_low;
+    int   i, n = 9;
+    if (rise < 0.4f) return;
+    for (i = 0; i < n; i++) {
+        float th = 0.5f * SOL_PI * (float)i / (float)(n - 1);
+        pt[i] = vec3_make(x, y_low + rise * cosf(th), z_in + run * sinf(th));
+    }
+    gothic_sweep(b, FLYER_RECT, 5, pt, n,
+                 vec3_make(run > 0.0f ? -1.0f : 1.0f, 0.0f, 0.0f),
+                 1.0f, 1, 1);
+}
+
+/* one vaulted vessel: the four-cell quadripartite bays of a rectangle
+   strip (z0..z1 wide), diagonals round, everything else level-crowned */
+static void vault_vessel(MeshBuilder *b, const ChurchPlan *p,
+                         float x_w, int nbays, float z0, float z1,
+                         float spring, float rib_sc, int formerets) {
+    vec3  d1[GOTHIC_ARCH_MAX_PTS], d2[GOTHIC_ARCH_MAX_PTS];
+    vec3  h1r[GOTHIC_ARCH_MAX_PTS], h2r[GOTHIC_ARCH_MAX_PTS];
+    vec3  wr[GOTHIC_ARCH_MAX_PTS];
+    float w = z1 - z0, l = p->bay_l;
+    float hgt = 0.5f * sqrtf(w * w + l * l);
+    float a_t = gothic_arch_acuteness_for(w, hgt);
+    float a_l = gothic_arch_acuteness_for(l, hgt);
+    float dome = 0.08f * hgt;
+    int   i, k, n;
+
+    for (i = 0; i < nbays; i++) {
+        float xa = x_w + (float)i * l, xb = xa + l;
+        int   nh;
+        n = vault_path(d1, xa, z0, xb, z1, spring, 0.0f);
+        if (n < 3) continue;
+        vault_path(d2, xb, z0, xa, z1, spring, 0.0f);
+        nh = (n - 1) / 2;
+        vault_rib(b, d1, n, rib_sc);
+        vault_rib(b, d2, n, rib_sc);
+        boss_knob(b, d1[nh], 0.16f + 0.05f * rib_sc);
+        for (k = 0; k <= nh; k++) {            /* reversed halves */
+            h1r[k] = d1[n - 1 - k];            /* from (xa, z1)   */
+            h2r[k] = d2[n - 1 - k];            /* from (xb, z1)   */
+        }
+        web_cell(b, d1, d2, nh + 1, dome);     /* S: (xa,z0)+(xb,z0) */
+        web_cell(b, h1r, h2r, nh + 1, dome);   /* N — wait: h1r from
+              (xb,z1), h2r from (xa,z1): both rise to the boss */
+        web_cell(b, d1, h2r, nh + 1, dome);    /* W: (xa,z0)+(xa,z1) */
+        web_cell(b, d2, h1r, nh + 1, dome);    /* E: (xb,z0)+(xb,z1) */
+        if (formerets) {   /* wall ribs, slimmer, half-buried — the
+                              aisles skip theirs (budget; barely seen) */
+            n = vault_path(wr, xa, z0, xb, z0, spring, a_l);
+            vault_rib(b, wr, n, rib_sc * 0.65f);
+            n = vault_path(wr, xa, z1, xb, z1, spring, a_l);
+            vault_rib(b, wr, n, rib_sc * 0.65f);
+        }
+    }
+    /* transverse arches at the stations (shared between bays) */
+    for (i = 0; i <= nbays; i++) {
+        float x = x_w + (float)i * l;
+        n = vault_path(wr, x, z0, x, z1, spring, a_t);
+        vault_rib(b, wr, n, rib_sc * 1.1f);
+    }
+}
+
+/* nave/aisle/apse vaulting + responds + flyers — church_stone part 2 */
+static void stone_vaults(MeshBuilder *b, const ChurchPlan *p) {
+    float spring_n = p->style == CHURCH_BASILICA ? p->clerest_h0 :
+                     p->style == CHURCH_HALL ? p->arcade_h : p->impost_h;
+    float x_w  = p->west_x + p->tower_d;
+    float hwid = 0.5f * p->nave_w + p->aisle_w;
+    float rp   = stone_pier_r(p);
+    int   i, side;
+
+    /* skip the tower bay's high vault (the shaft is open to the top) */
+    vault_vessel(b, p, x_w, p->nbays, -0.5f * p->nave_w, 0.5f * p->nave_w,
+                 spring_n, 1.0f, 1);
+    if (p->aisles) {
+        vault_vessel(b, p, x_w, p->nbays, -hwid, -0.5f * p->nave_w,
+                     p->impost_h, 0.7f, 0);
+        vault_vessel(b, p, x_w, p->nbays, 0.5f * p->nave_w, hwid,
+                     p->impost_h, 0.7f, 0);
+    }
+
+    if (p->apse_sides == 5) {       /* the radial half-vault */
+        vec3  rr[6][65];   /* half paths: (GOTHIC_ARCH_MAX_PTS-1)/2+1 */
+        int   rn = 0, k;
+        float r   = 0.5411961f * p->nave_w;
+        float cxa = p->east_x + 0.3826834f * r;
+        for (k = 0; k < 6; k++) {
+            vec3  full[GOTHIC_ARCH_MAX_PTS];
+            float vx, vz;
+            int   n, j;
+            plan_apse_pier(p, k, &vx, &vz);
+            n = vault_path(full, vx, vz, 2.0f * cxa - vx, -vz,
+                           spring_n, 0.0f);
+            if (n < 3) { rn = 0; break; }
+            rn = (n - 1) / 2 + 1;
+            for (j = 0; j < rn; j++) rr[k][j] = full[j];
+            /* the rib stops a station short too: six sweeps converging
+               at one point stack anti-parallel side faces through the
+               center — everything inside the half-boss yields to it */
+            vault_rib(b, rr[k], rn - 1, 0.8f);
+        }
+        if (rn >= 3) {
+            /* the radial cells stop one station short of the center —
+               five shallow fans converging at one point congest into
+               near-coplanar slivers; the half-boss is FOR this */
+            for (k = 0; k < 5; k++)
+                web_cell(b, rr[k], rr[k + 1], rn - 1, 0.05f * r);
+            boss_knob(b, rr[0][rn - 1], 0.62f);
+        }
+    }
+
+    /* responds: the bundle's landing shafts (item 4's deferral cashed) */
+    if (p->aisles) {
+        for (i = p->tower ? 0 : 1; i < p->nbays; i++) {
+            float x, z;
+            if (plan_pier(p, i, PIER_ROW_S_ARCADE, &x, &z))
+                respond(b, x, z, p->impost_h, spring_n,
+                        0.4f * rp / 0.12f);
+            if (plan_pier(p, i, PIER_ROW_N_ARCADE, &x, &z))
+                respond(b, x, z, p->impost_h, spring_n,
+                        0.4f * rp / 0.12f);
+        }
+        for (i = 1; i < p->nbays; i++) {       /* aisle wall responds */
+            float x = x_w + (float)i * p->bay_l;
+            respond(b, x, -hwid, p->plinth_h, p->impost_h, 0.33f * rp / 0.12f);
+            respond(b, x,  hwid, p->plinth_h, p->impost_h, 0.33f * rp / 0.12f);
+        }
+    } else {
+        for (i = 1; i < p->nbays; i++) {       /* the chapel's wall shafts */
+            float x = x_w + (float)i * p->bay_l;
+            respond(b, x, -0.5f * p->nave_w, p->plinth_h, spring_n,
+                    0.33f * rp / 0.12f);
+            respond(b, x,  0.5f * p->nave_w, p->plinth_h, spring_n,
+                    0.33f * rp / 0.12f);
+        }
+    }
+
+    /* flyers: basilica only — the thrust line exists now (§1.5: the
+       flyer depends on its clerestory bay AND its outer buttress) */
+    if (p->style == CHURCH_BASILICA) {
+        float wt = p->wall_t;
+        for (i = 1; i < p->nbays; i++) {
+            float x = x_w + (float)i * p->bay_l;
+            float y_high = p->wall_h - 0.45f;
+            float y_low  = 0.78f * (p->aisle_h + 0.6f);
+            for (side = -1; side <= 1; side += 2) {
+                float z_in  = (float)side * 0.5f * p->nave_w;
+                float z_out = (float)side * (hwid + wt + 0.25f);
+                flyer(b, x, z_in, z_out, y_high, y_low);
+            }
+        }
+    }
 }
