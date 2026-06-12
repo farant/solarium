@@ -1220,30 +1220,30 @@ static void buttress(MeshBuilder *b, float h_head, float bw, float d0,
 /* the pier: octagonal shaft through an attic-base collar on a square
    sub-plinth, capital (frustum + abacus) at the impost. h_cap 0 skips
    the capital (apse buttress-piers run sheer to their flat tops). */
-static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
-                 float rp, float top, int capital, float yaw_c, float yaw_s,
-                 float keep) {
+static void pier(MeshBuilder *b, float plinth_h, float impost_h,
+                 float px, float pz, float rp, float top, int capital,
+                 float yaw_c, float yaw_s, float keep) {
     sol_u32 v0 = b->vertex_count;
     float sp = rp / 0.12f;             /* shaft profile scale            */
     float ap = rp * 0.9238795f;        /* the octagon's apothem          */
     int   pn;
     const ProfilePt *oct = gothic_profile(PROF_SHAFT_OCT, &pn);
     vec3  path[2];
-    float shaft_top = capital ? p->impost_h - 0.45f : top;
+    float shaft_top = capital ? impost_h - 0.45f : top;
     if (keep < 0.999f) {               /* the BROKEN COLUMN: truncated,
                                           capped flat at a course line */
-        shaft_top = p->plinth_h + keep * (shaft_top - p->plinth_h);
+        shaft_top = plinth_h + keep * (shaft_top - plinth_h);
         capital   = capital ? 2 : 0;   /* base yes, frustum/abacus no */
     }
 
     if (capital) {                     /* square sub-plinth, skirted */
         float hs = rp + 0.10f;
         float yb = -GOTHIC_FOUNDATION;
-        gz_face(b, -hs, hs, yb, p->plinth_h,  hs,  1);
-        gz_face(b, -hs, hs, yb, p->plinth_h, -hs, -1);
-        gx_face(b, -hs, yb, p->plinth_h, -hs, hs, -1);
-        gx_face(b,  hs, yb, p->plinth_h, -hs, hs,  1);
-        gy_face(b, -hs, hs, p->plinth_h, -hs, hs, 1);   /* full top: the
+        gz_face(b, -hs, hs, yb, plinth_h,  hs,  1);
+        gz_face(b, -hs, hs, yb, plinth_h, -hs, -1);
+        gx_face(b, -hs, yb, plinth_h, -hs, hs, -1);
+        gx_face(b,  hs, yb, plinth_h, -hs, hs,  1);
+        gy_face(b, -hs, hs, plinth_h, -hs, hs, 1);   /* full top: the
                                           shaft and base stand ON it */
         {   /* the attic base: PR_BASE around the shaft on a square loop,
                seam mid-side (item 1's closed-loop lesson) */
@@ -1253,24 +1253,24 @@ static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
             vec3 loop[6];
             /* walk +X first so o = cross(+Y, d) points OUTWARD; the
                seam closes mid-side (item 1's closed-loop lesson) */
-            loop[0] = vec3_make(0.0f, p->plinth_h, -ap);
-            loop[1] = vec3_make( ap,  p->plinth_h, -ap);
-            loop[2] = vec3_make( ap,  p->plinth_h,  ap);
-            loop[3] = vec3_make(-ap,  p->plinth_h,  ap);
-            loop[4] = vec3_make(-ap,  p->plinth_h, -ap);
-            loop[5] = vec3_make(0.0f, p->plinth_h, -ap);
+            loop[0] = vec3_make(0.0f, plinth_h, -ap);
+            loop[1] = vec3_make( ap,  plinth_h, -ap);
+            loop[2] = vec3_make( ap,  plinth_h,  ap);
+            loop[3] = vec3_make(-ap,  plinth_h,  ap);
+            loop[4] = vec3_make(-ap,  plinth_h, -ap);
+            loop[5] = vec3_make(0.0f, plinth_h, -ap);
             gothic_sweep(b, bp, bn, loop, 6, vec3_make(0.0f, 1.0f, 0.0f),
                          sb, 0, 0);
         }
     }
-    path[0] = vec3_make(0.0f, capital ? p->plinth_h : -GOTHIC_FOUNDATION,
+    path[0] = vec3_make(0.0f, capital ? plinth_h : -GOTHIC_FOUNDATION,
                         0.0f);
     path[1] = vec3_make(0.0f, shaft_top, 0.0f);
     gothic_sweep(b, oct, pn, path, 2, vec3_make(0.0f, 0.0f, 1.0f),
                  sp, 0, capital == 1 ? 0 : 1);
     if (capital == 1) {
         float aa = rp + 0.12f;                 /* abacus half-size  */
-        float yf0 = shaft_top, yf1 = p->impost_h - 0.15f;
+        float yf0 = shaft_top, yf1 = impost_h - 0.15f;
         int k;
         for (k = 0; k < 8; k++) {              /* the frustum: 8 quads */
             float a0 = (22.5f + 45.0f * (float)k) * (SOL_PI / 180.0f);
@@ -1293,11 +1293,11 @@ static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
         }
         /* the abacus slab: full bottom and top (anything stacked above
            is thinner — smaller-on-larger keeps both legal) */
-        gz_face(b, -aa, aa, yf1, p->impost_h,  aa,  1);
-        gz_face(b, -aa, aa, yf1, p->impost_h, -aa, -1);
-        gx_face(b, -aa, yf1, p->impost_h, -aa, aa, -1);
-        gx_face(b,  aa, yf1, p->impost_h, -aa, aa,  1);
-        gy_face(b, -aa, aa, p->impost_h, -aa, aa,  1);
+        gz_face(b, -aa, aa, yf1, impost_h,  aa,  1);
+        gz_face(b, -aa, aa, yf1, impost_h, -aa, -1);
+        gx_face(b, -aa, yf1, impost_h, -aa, aa, -1);
+        gx_face(b,  aa, yf1, impost_h, -aa, aa,  1);
+        gy_face(b, -aa, aa, impost_h, -aa, aa,  1);
         gy_face(b, -aa, aa, yf1, -aa, aa, -1);
     }
     mb_transform_from(b, v0, yaw_c, yaw_s, px, 0.0f, pz);
@@ -1858,10 +1858,10 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
             float x, z, tk;
             if (plan_pier(p, i, PIER_ROW_S_ARCADE, &x, &z) &&
                 church_survives(p, ELEM_PIER, i, 0, &tk))
-                pier(b, p, x, z, rp, 0.0f, 1, 1.0f, 0.0f, tk);
+                pier(b, p->plinth_h, p->impost_h, x, z, rp, 0.0f, 1, 1.0f, 0.0f, tk);
             if (plan_pier(p, i, PIER_ROW_N_ARCADE, &x, &z) &&
                 church_survives(p, ELEM_PIER, i, 2, &tk))
-                pier(b, p, x, z, rp, 0.0f, 1, 1.0f, 0.0f, tk);
+                pier(b, p->plinth_h, p->impost_h, x, z, rp, 0.0f, 1, 1.0f, 0.0f, tk);
         }
     if (p->apse_sides == 5) {
         float rap = 0.4f > 0.7f * wt ? 0.4f : 0.7f * wt;
@@ -1871,7 +1871,8 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
                 continue;
             plan_apse_pier(p, i, &x, &z);
             ang = (-112.5f + 45.0f * (float)i) * (SOL_PI / 180.0f);
-            pier(b, p, x, z, rap, tk * (p->wall_h + 0.25f), 0,
+            pier(b, p->plinth_h, p->impost_h, x, z, rap,
+                 tk * (p->wall_h + 0.25f), 0,
                  cosf(ang), sinf(ang), 1.0f);
         }
     }
@@ -3476,4 +3477,322 @@ static void stone_rubble(MeshBuilder *b, const ChurchPlan *p) {
                              vec3_make(cx, 8.0f, cz));
                 }
         }
+}
+
+/* ================== item 10: the follies ==================
+   Standalone vocabulary: every emitter below composes machinery the
+   church already proved — pier(), the sweep, the arch path, the face
+   helpers, quantize_keep. No plan: a single piece has no dependency
+   graph, so ruin is a truncation parameter, snapped to the same
+   course lines the church breaks on. */
+
+/* a box from the face helpers, abutment-aware like the kit's walls */
+static void folly_box(MeshBuilder *b, float x0, float x1, float y0,
+                      float y1, float z0, float z1, int top, int bottom,
+                      int ends) {
+    gz_face(b, x0, x1, y0, y1, z1,  1);
+    gz_face(b, x0, x1, y0, y1, z0, -1);
+    if (ends) {
+        gx_face(b, x0, y0, y1, z0, z1, -1);
+        gx_face(b, x1, y0, y1, z0, z1,  1);
+    }
+    if (top)    gy_face(b, x0, x1, y1, z0, z1,  1);
+    if (bottom) gy_face(b, x0, x1, y0, z0, z1, -1);
+}
+
+/* the shared derivation: proportions + the kept fraction — emitter and
+   collider read the SAME truncation (one formula, two readers) */
+static void column_dims(float h, float style, float broken, float *plinth,
+                        float *rp, float *st0, float *keep) {
+    int capital;
+    if (h < 0.6f) h = 0.6f;
+    capital = (style < 0.5f) ? 1 : 0;
+    *plinth = 0.45f;
+    if (*plinth > 0.25f * h) *plinth = 0.25f * h;
+    *rp = 0.06f * h;                           /* shaft ~8 diameters tall */
+    if (*rp < 0.09f) *rp = 0.09f;
+    if (*rp > 0.45f) *rp = 0.45f;
+    *st0  = capital ? (h - 0.45f) : h;
+    *keep = 1.0f;
+    if (broken > 0.001f) {
+        float k = 1.0f - broken;
+        if (k < 0.08f) k = 0.08f;
+        k = quantize_keep((const ChurchPlan *)0, k, h);
+        if (k > 0.93f) k = 0.93f;              /* a broken column stays broken */
+        *keep = k;
+    }
+}
+
+float gothic_column_top(float h, float style, float broken) {
+    float plinth, rp, st0, keep;
+    if (h < 0.6f) h = 0.6f;
+    column_dims(h, style, broken, &plinth, &rp, &st0, &keep);
+    return (keep < 0.999f) ? plinth + keep * (st0 - plinth) : h;
+}
+
+void gothic_column(MeshBuilder *b, float h, float style, float broken,
+                   unsigned seed) {
+    float plinth, rp, st0, keep;
+    int   capital;
+    if (h < 0.6f) h = 0.6f;
+    capital = (style < 0.5f) ? 1 : 0;          /* 1 = bare drum */
+    column_dims(h, style, broken, &plinth, &rp, &st0, &keep);
+    pier(b, plinth, h, 0.0f, 0.0f, rp, h, capital, 1.0f, 0.0f, keep);
+    if (keep < 0.999f) {   /* the snapped core: a slimmer course-tall stub
+                              riding the break, hash-set off center — the
+                              jagged cap without new machinery */
+        float bt  = plinth + keep * (st0 - plinth);
+        float sh  = 0.4f * (0.5f + gothic_hash01(seed, LANE_FOLLY, 0, 2));
+        if (bt + sh > st0) sh = st0 - bt;
+        if (sh > 0.12f) {
+            float ox = (gothic_hash01(seed, LANE_FOLLY, 0, 0) - 0.5f)
+                       * rp * 0.6f;
+            float oz = (gothic_hash01(seed, LANE_FOLLY, 0, 1) - 0.5f)
+                       * rp * 0.6f;
+            sol_u32 v0 = b->vertex_count;
+            int pn;
+            const ProfilePt *oct = gothic_profile(PROF_SHAFT_OCT, &pn);
+            vec3 path[2];
+            path[0] = vec3_make(0.0f, bt, 0.0f);
+            path[1] = vec3_make(0.0f, bt + sh, 0.0f);
+            gothic_sweep(b, oct, pn, path, 2, vec3_make(0.0f, 0.0f, 1.0f),
+                         0.55f * rp / 0.12f, 0, 1);
+            mb_transform_from(b, v0, 1.0f, 0.0f, ox, 0.0f, oz);
+        }
+    }
+}
+
+/* the masonry ring of an arch head from station 0 to i1 (of n), lifted
+   to spring height: front/back ring faces, intrados, extrados, and a
+   cap on the broken end. The outer curve rides each station's in-plane
+   outward normal (central difference over the FULL path, so a truncated
+   ring keeps the curve's own direction at its broken end). The ring's
+   springing end dies into the jamb below — no cap, the abutment law. */
+static void arch_band(MeshBuilder *b, const vec3 *path, int n, int i1,
+                      float band, float t, float spring, int cap_end) {
+    float nx[GOTHIC_ARCH_MAX_PTS], ny[GOTHIC_ARCH_MAX_PTS];
+    float al[GOTHIC_ARCH_MAX_PTS];
+    float zf = 0.5f * t, zb = -0.5f * t;
+    int   k;
+    if (n < 2 || i1 < 1) return;
+    if (i1 > n - 1) i1 = n - 1;
+    al[0] = 0.0f;
+    for (k = 0; k <= i1; k++) {
+        int   ka = (k > 0) ? k - 1 : 0;
+        int   kb = (k < n - 1) ? k + 1 : n - 1;
+        float dx = path[kb].x - path[ka].x;
+        float dy = path[kb].y - path[ka].y;
+        float l  = sqrtf(dx * dx + dy * dy);
+        if (l < 1e-7f) { dx = 0.0f; dy = 1.0f; l = 1.0f; }
+        nx[k] = -dy / l;                  /* left of travel = outward */
+        ny[k] =  dx / l;
+        if (k > 0) {
+            float sx = path[k].x - path[k - 1].x;
+            float sy = path[k].y - path[k - 1].y;
+            al[k] = al[k - 1] + sqrtf(sx * sx + sy * sy);
+        }
+    }
+    for (k = 0; k < i1; k++) {
+        float ix0 = path[k].x,     iy0 = spring + path[k].y;
+        float ix1 = path[k + 1].x, iy1 = spring + path[k + 1].y;
+        float ox0 = ix0 + band * nx[k],     oy0 = iy0 + band * ny[k];
+        float ox1 = ix1 + band * nx[k + 1], oy1 = iy1 + band * ny[k + 1];
+        float sx = ix1 - ix0, sy = iy1 - iy0;
+        float sl = sqrtf(sx * sx + sy * sy);
+        float snx, sny;
+        if (sl < 1e-7f) continue;
+        snx = -sy / sl; sny = sx / sl;    /* this segment's flat normal */
+        /* front + back ring faces */
+        g_quad4(b, ix0,iy0,zf, al[k],iy0,   ix1,iy1,zf, al[k+1],iy1,
+                   ox1,oy1,zf, al[k+1],oy1, ox0,oy0,zf, al[k],oy0,
+                0.0f, 0.0f, 1.0f);
+        g_quad4(b, ix1,iy1,zb, al[k+1],iy1, ix0,iy0,zb, al[k],iy0,
+                   ox0,oy0,zb, al[k],oy0,   ox1,oy1,zb, al[k+1],oy1,
+                0.0f, 0.0f, -1.0f);
+        /* intrados (faces the opening) + extrados (faces the sky) —
+           flat per strip: voussoir faceting, the item-2 ruling */
+        g_quad4(b, ix0,iy0,zf, al[k],zf,  ix0,iy0,zb, al[k],zb,
+                   ix1,iy1,zb, al[k+1],zb, ix1,iy1,zf, al[k+1],zf,
+                -snx, -sny, 0.0f);
+        g_quad4(b, ox0,oy0,zb, al[k],zb,  ox0,oy0,zf, al[k],zf,
+                   ox1,oy1,zf, al[k+1],zf, ox1,oy1,zb, al[k+1],zb,
+                snx, sny, 0.0f);
+    }
+    if (cap_end) {   /* the broken end: faces along the travel direction */
+        float ix = path[i1].x, iy = spring + path[i1].y;
+        float ox = ix + band * nx[i1], oy = iy + band * ny[i1];
+        float tx = ny[i1], ty = -nx[i1];  /* tangent = outward rotated -90 */
+        g_quad4(b, ix,iy,zf, zf,iy,  ix,iy,zb, zb,iy,
+                   ox,oy,zb, zb,oy,  ox,oy,zf, zf,oy,
+                tx, ty, 0.0f);
+    }
+}
+
+void gothic_arch_frag_dims(float span, float a, float h, float ruin,
+                           float *jw, float *spring, float *aa,
+                           float *hl, float *hr) {
+    float crown, band = 0.35f;
+    if (span < 0.5f) span = 0.5f;
+    if (h < 1.2f) h = 1.2f;
+    *jw = 0.35f + 0.10f * span;
+    if (*jw > 0.9f) *jw = 0.9f;
+    crown   = gothic_arch_y(span, a, 0.0f);
+    *spring = h - crown - band;
+    if (*spring < 0.3f) {             /* flatten to fit — the plan's move */
+        *spring = 0.3f;
+        a = gothic_arch_acuteness_for(span, h - band - *spring);
+    }
+    *aa = a;
+    if (ruin < 0.35f) { *hl = h; *hr = h; return; }
+    {   /* the ladder's kept jamb heights, course-quantized */
+        float kl = 1.0f - ((ruin > 0.75f) ? 1.8f * (ruin - 0.75f) : 0.0f);
+        float kr = 1.0f - 2.2f * (ruin - 0.35f);
+        if (kl < 0.4f) kl = 0.4f;
+        if (kr < 0.12f) kr = 0.12f;
+        kl = quantize_keep((const ChurchPlan *)0, kl, *spring);
+        kr = quantize_keep((const ChurchPlan *)0, kr, *spring);
+        if (kl > 1.0f) kl = 1.0f;     /* the round-up trap: a jamb must
+                                         never outgrow its springing */
+        if (kr > 1.0f) kr = 1.0f;
+        *hl = *spring * kl;
+        *hr = *spring * kr;
+    }
+}
+
+void gothic_arch_frag(MeshBuilder *b, float span, float a, float depth,
+                      float h, float ruin) {
+    vec3  path[GOTHIC_ARCH_MAX_PTS];
+    float jw, w, hw, spring, band, zf, zb, hl, hr2;
+    int   n;
+    if (span  < 0.5f) span  = 0.5f;
+    if (depth < 0.2f) depth = 0.2f;
+    if (h     < 1.2f) h     = 1.2f;
+    band = 0.35f;
+    gothic_arch_frag_dims(span, a, h, ruin, &jw, &spring, &a, &hl, &hr2);
+    w  = span + 2.0f * jw;
+    hw = 0.5f * w;
+    zf = 0.5f * depth; zb = -zf;
+    plinth_strip(b, -hw - 0.10f, hw + 0.10f, zb - 0.10f, zf + 0.10f,
+                 0.12f, 1, 0);        /* the doorstep IS the plinth */
+    if (ruin < 0.35f) {               /* whole: the existing emitter */
+        gothic_wall_arched(b, w, h, depth, jw, span, spring, a);
+        return;
+    }
+    n = gothic_arch_path(path, GOTHIC_ARCH_MAX_PTS, span, a,
+                         GOTHIC_MAX_SEG);
+    {   /* the ladder: the ring erodes from the right springing back
+           toward the surviving jamb; the right jamb falls fast, the
+           left holds until deep ruin (heights from the dims read) */
+        float fr = 1.0f - 1.55f * (ruin - 0.35f);
+        if (fr < 0.0f) fr = 0.0f;
+        folly_box(b, -hw, -hw + jw, 0.0f, hl, zb, zf, 1, 0, 1);
+        folly_box(b,  hw - jw, hw, 0.0f, hr2, zb, zf, 1, 0, 1);
+        if (n >= 2 && fr > 0.02f && hl > spring - 0.001f) {
+            int i1 = (int)(fr * (float)(n - 1) + 0.5f);
+            if (i1 >= 1)
+                arch_band(b, path, n, i1, band, depth, spring, 1);
+        }
+    }
+}
+
+void gothic_stair(MeshBuilder *b, float w, float rise, float run,
+                  int steps) {
+    float hw, yb = -GOTHIC_FOUNDATION;
+    int   k, n = steps;
+    if (n < 1)  n = 1;
+    if (n > 64) n = 64;
+    if (w    < 0.4f)  w    = 0.4f;
+    if (rise < 0.05f) rise = 0.05f;
+    if (run  < 0.12f) run  = 0.12f;
+    hw = 0.5f * w;
+    for (k = 0; k < n; k++) {
+        float x0  = run * (float)k, x1 = run * (float)(k + 1);
+        float top = rise * (float)(k + 1);
+        gy_face(b, x0, x1, top, -hw, hw, 1);                  /* tread */
+        gx_face(b, x0, (k == 0) ? yb : rise * (float)k, top,
+                -hw, hw, -1);                                 /* riser */
+        gz_face(b, x0, x1, yb, top, -hw, -1);                 /* flanks */
+        gz_face(b, x0, x1, yb, top,  hw,  1);
+    }
+    gx_face(b, run * (float)n, yb, rise * (float)n, -hw, hw, 1);
+}
+
+#define BALUSTER_POST 0.20f         /* end post width */
+
+int gothic_balusters(float len, float h, unsigned seed, float ruin,
+                     float *out_x, int max_n) {
+    float inner, sp;
+    int   n, i, kept = 0;
+    (void)h;
+    if (len < 0.8f) len = 0.8f;
+    inner = len - 2.0f * (BALUSTER_POST + 0.06f);
+    if (inner < 0.30f) return 0;
+    n = (int)(inner / 0.32f);
+    if (n < 1) n = 1;
+    sp = inner / (float)n;
+    for (i = 0; i < n; i++) {
+        if (gothic_hash01(seed, LANE_FOLLY, i, 7) < ruin) continue;
+        if (kept >= max_n) break;
+        out_x[kept++] = -0.5f * inner + sp * ((float)i + 0.5f);
+    }
+    return kept;
+}
+
+void gothic_balustrade(MeshBuilder *b, float len, float h, unsigned seed,
+                       float ruin) {
+    float hl, yb = -GOTHIC_FOUNDATION;
+    (void)seed;                    /* the balusters' — the pool reads it */
+    if (len < 0.8f) len = 0.8f;
+    if (h < 0.5f) h = 0.5f;
+    hl = 0.5f * len;
+    folly_box(b, -hl, -hl + BALUSTER_POST, yb, h + 0.08f,
+              -0.11f, 0.11f, 1, 0, 1);                    /* end posts */
+    folly_box(b,  hl - BALUSTER_POST, hl, yb, h + 0.08f,
+              -0.11f, 0.11f, 1, 0, 1);
+    folly_box(b, -hl + BALUSTER_POST, hl - BALUSTER_POST, yb,
+              GOTHIC_BALUSTER_SILL, -0.09f, 0.09f, 1, 0, 0);   /* the sill —
+                                       ends die into the posts */
+    if (ruin <= 0.65f)             /* past that the rail has nothing to
+                                      stand on and fell with them */
+        folly_box(b, -hl + BALUSTER_POST, hl - BALUSTER_POST,
+                  h - GOTHIC_BALUSTER_RAIL, h, -0.075f, 0.075f, 1, 1, 0);
+}
+
+void gothic_baluster_unit(MeshBuilder *b) {
+    int pn;
+    const ProfilePt *oct = gothic_profile(PROF_SHAFT_OCT, &pn);
+    vec3 path[2];
+    folly_box(b, -0.075f, 0.075f, 0.0f, 0.08f, -0.075f, 0.075f, 1, 0, 1);
+    path[0] = vec3_make(0.0f, 0.06f, 0.0f);   /* ends hide in the blocks */
+    path[1] = vec3_make(0.0f, 0.94f, 0.0f);
+    gothic_sweep(b, oct, pn, path, 2, vec3_make(0.0f, 0.0f, 1.0f),
+                 0.05f / 0.12f, 0, 0);
+    folly_box(b, -0.075f, 0.075f, 0.92f, 1.0f, -0.075f, 0.075f, 1, 1, 1);
+}
+
+void gothic_cross(MeshBuilder *b, float h) {
+    float yb = -GOTHIC_FOUNDATION, ht, harm0, harm1;
+    if (h < 1.5f) h = 1.5f;
+    ht    = h - 0.62f;                        /* shaft top: head begins */
+    harm0 = ht + 0.26f;
+    harm1 = harm0 + 0.16f;
+    folly_box(b, -0.85f, 0.85f, yb,    0.18f, -0.85f, 0.85f, 1, 0, 1);
+    folly_box(b, -0.55f, 0.55f, 0.18f, 0.36f, -0.55f, 0.55f, 1, 0, 1);
+    folly_box(b, -0.26f, 0.26f, 0.36f, 0.81f, -0.26f, 0.26f, 1, 0, 1);
+    {   /* the tapered shaft: four trapezoid sides, near-flat normals
+           (3 cm of lean over two meters) */
+        float r0 = 0.09f, r1 = 0.06f, y0 = 0.81f;
+        g_quad4(b, -r0,y0,r0, -r0,y0,  r0,y0,r0, r0,y0,
+                    r1,ht,r1,  r1,ht, -r1,ht,r1, -r1,ht, 0.0f,0.0f,1.0f);
+        g_quad4(b,  r0,y0,-r0, r0,y0, -r0,y0,-r0, -r0,y0,
+                   -r1,ht,-r1, -r1,ht,  r1,ht,-r1, r1,ht, 0.0f,0.0f,-1.0f);
+        g_quad4(b,  r0,y0,r0,  r0,y0,  r0,y0,-r0, -r0,y0,
+                    r1,ht,-r1, -r1,ht,  r1,ht,r1,  r1,ht, 1.0f,0.0f,0.0f);
+        g_quad4(b, -r0,y0,-r0, -r0,y0, -r0,y0,r0,  r0,y0,
+                   -r1,ht,r1,   r1,ht, -r1,ht,-r1, -r1,ht, -1.0f,0.0f,0.0f);
+    }
+    folly_box(b, -0.075f, 0.075f, ht, h, -0.075f, 0.075f, 1, 1, 1);
+    folly_box(b, -0.34f, 0.34f, harm0, harm1,
+              -0.070f, 0.070f, 1, 1, 1);      /* the arm: 5 mm shy of the
+                                       upright's faces (the stagger law) */
 }

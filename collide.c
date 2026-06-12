@@ -562,6 +562,75 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
             mat4  m = scene_world_matrix(s, o);
             emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
                            len * 0.5f, w * 0.5f, -t, 0.0f);
+
+        /* ---- the follies (P6 item 10): each reads the SAME truncation
+           the emitter performs — gothic_column_top / arch_frag_dims are
+           the shared formulas (one author, two readers) ---- */
+        } else if (strcmp(o->mesh_ref, "column") == 0) {
+            float h   = ref_p(o, "h");
+            float top = gothic_column_top(h, ref_p(o, "style"),
+                                          ref_p(o, "broken"));
+            float rp  = 0.06f * (h < 0.6f ? 0.6f : h);
+            mat4  m   = scene_world_matrix(s, o);
+            if (rp < 0.09f) rp = 0.09f;
+            if (rp > 0.45f) rp = 0.45f;
+            emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
+                           rp, rp, 0.0f, top);
+
+        } else if (strcmp(o->mesh_ref, "arch_frag") == 0) {
+            /* two jamb boxes — the opening between them admits, the
+               item-9 jambs-box-AROUND-the-portal law; kept heights make
+               fallen jambs climbable stumps */
+            float span = ref_p(o, "span"), h = ref_p(o, "h");
+            float depth = ref_p(o, "depth"), ruin = ref_p(o, "ruin");
+            float jw, spring, aa, hl, hr;
+            float hw;
+            mat4  m = scene_world_matrix(s, o);
+            if (span < 0.5f) span = 0.5f;
+            if (depth < 0.2f) depth = 0.2f;
+            gothic_arch_frag_dims(span, ref_p(o, "acute"), h, ruin,
+                                  &jw, &spring, &aa, &hl, &hr);
+            hw = 0.5f * (span + 2.0f * jw);
+            emit_local_box(cs, m, o->handle, -hw + 0.5f * jw, 0.0f,
+                           0.5f * jw, 0.5f * depth, 0.0f, hl);
+            emit_local_box(cs, m, o->handle,  hw - 0.5f * jw, 0.0f,
+                           0.5f * jw, 0.5f * depth, 0.0f, hr);
+
+        } else if (strcmp(o->mesh_ref, "stair") == 0) {
+            /* one box per step, each top a STEP_UP within the last —
+               the treaty climbs them, collide_stand makes them floors */
+            float w = ref_p(o, "w"), rise = ref_p(o, "rise");
+            float run = ref_p(o, "run");
+            int   n = (int)(ref_p(o, "steps") + 0.5f), k;
+            mat4  m = scene_world_matrix(s, o);
+            if (n < 1) n = 1;
+            if (n > 64) n = 64;
+            if (w < 0.4f) w = 0.4f;
+            if (rise < 0.05f) rise = 0.05f;
+            if (run < 0.12f) run = 0.12f;
+            for (k = 0; k < n; k++)
+                emit_local_box(cs, m, o->handle,
+                               run * ((float)k + 0.5f), 0.0f,
+                               0.5f * run, 0.5f * w,
+                               0.0f, rise * (float)(k + 1));
+
+        } else if (strcmp(o->mesh_ref, "balustrade") == 0) {
+            float len = ref_p(o, "len"), h = ref_p(o, "h");
+            mat4  m = scene_world_matrix(s, o);
+            if (len < 0.8f) len = 0.8f;
+            if (h < 0.5f) h = 0.5f;
+            emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
+                           0.5f * len, 0.11f, 0.0f, h);
+
+        } else if (strcmp(o->mesh_ref, "cross") == 0) {
+            /* the step slab (standable) + the shaft's mass above it */
+            float h = ref_p(o, "h");
+            mat4  m = scene_world_matrix(s, o);
+            if (h < 1.5f) h = 1.5f;
+            emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
+                           0.85f, 0.85f, 0.0f, 0.36f);
+            emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
+                           0.26f, 0.26f, 0.36f, h);
         }
     }
 }

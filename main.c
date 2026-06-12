@@ -46,6 +46,15 @@ typedef struct {
     sol_u32   island;
 } MeadowPatch;
 
+/* one balustrade's balusters (P6 item 10): a static instance buffer of
+   local slots — the copies ride their carcass's transform and its
+   visibility bit, exactly the meadow's island arrangement */
+typedef struct {
+    RhiBuffer data;
+    int       count;
+    sol_u32   source;
+} OrnamentPatch;
+
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
 
@@ -575,6 +584,123 @@ static const char *MEADOW_FRAGMENT_SRC =
     "    FragColor = vec4(vTint * (0.35 + 0.65 * vRoot), 1.0);\n"
     "}\n";
 #endif /* SOL_RHI_METAL — the meadow */
+
+/* --- the instanced-ornament shader (P6 item 10: the item-7 debt paid) ---
+   The meadow proved the per-instance machinery; ornament wants the FULL
+   PBR fragment over it. Stream 0 = the canonical 12-float vertex (one
+   baluster), stream 1 = where/turned/scaled each copy stands IN ITS
+   CARCASS'S LOCAL FRAME — uModel is the balustrade's own transform, so
+   dragging the carcass carries its copies for free (the meadow's island
+   trick). Shares FRAGMENT_SRC (a copy is lit like any surface) and the
+   shadow fragment (masonry casts). Normals ride the inverse scale —
+   the covector rule survives the per-instance stretch. */
+#ifdef SOL_RHI_METAL
+static const char *ORNAMENT_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn {\n"
+    "    float3 pos     [[attribute(0)]];\n"
+    "    float3 normal  [[attribute(1)]];\n"
+    "    float2 uv      [[attribute(2)]];\n"
+    "    float4 tangent [[attribute(3)]];\n"
+    "    float4 instA   [[attribute(4)]];\n"   /* xyz local pos, w yaw */
+    "    float4 instB   [[attribute(5)]];\n"   /* x xz-scale, y y-scale */
+    "};\n"
+    "struct VU {\n"
+    "    float4x4 uModel;\n"
+    "    float4x4 uView;\n"
+    "    float4x4 uProj;\n"
+    "    float3x3 uNormalMatrix;\n"
+    "};\n"
+    "struct VOut {\n"
+    "    float4 pos [[position]];\n"
+    "    float3 normal;\n"
+    "    float3 worldPos;\n"
+    "    float2 uv;\n"
+    "    float4 tangent;\n"
+    "};\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float c = cos(v.instA.w), s = sin(v.instA.w);\n"
+    "    float3 sp = float3(v.pos.x * v.instB.x, v.pos.y * v.instB.y, v.pos.z * v.instB.x);\n"
+    "    float3 lp = float3(c*sp.x + s*sp.z, sp.y, -s*sp.x + c*sp.z) + v.instA.xyz;\n"
+    "    float4 worldPos = u.uModel * float4(lp, 1.0);\n"
+    "    o.pos = u.uProj * (u.uView * worldPos);\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
+    "    float3 ln = float3(v.normal.x / v.instB.x, v.normal.y / v.instB.y, v.normal.z / v.instB.x);\n"
+    "    ln = float3(c*ln.x + s*ln.z, ln.y, -s*ln.x + c*ln.z);\n"
+    "    o.normal = u.uNormalMatrix * ln;\n"
+    "    o.worldPos = worldPos.xyz;\n"
+    "    o.uv = float2(v.uv.x * v.instB.x, v.uv.y * v.instB.y);\n"  /* world-scale UVs survive the stretch */
+    "    float3 lt = float3(c*v.tangent.x + s*v.tangent.z, v.tangent.y, -s*v.tangent.x + c*v.tangent.z);\n"
+    "    float3x3 lin = float3x3(u.uModel[0].xyz, u.uModel[1].xyz, u.uModel[2].xyz);\n"
+    "    o.tangent = float4(lin * lt, v.tangent.w);\n"
+    "    return o;\n"
+    "}\n";
+static const char *ORNAMENT_SHADOW_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn {\n"
+    "    float3 pos   [[attribute(0)]];\n"
+    "    float4 instA [[attribute(4)]];\n"
+    "    float4 instB [[attribute(5)]];\n"
+    "};\n"
+    "struct VU { float4x4 uModel; float4x4 uLightVP; };\n"
+    "struct VOut { float4 pos [[position]]; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float c = cos(v.instA.w), s = sin(v.instA.w);\n"
+    "    float3 sp = float3(v.pos.x * v.instB.x, v.pos.y * v.instB.y, v.pos.z * v.instB.x);\n"
+    "    float3 lp = float3(c*sp.x + s*sp.z, sp.y, -s*sp.x + c*sp.z) + v.instA.xyz;\n"
+    "    o.pos = u.uLightVP * (u.uModel * float4(lp, 1.0));\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
+    "    return o;\n"
+    "}\n";
+#else /* GLSL */
+static const char *ORNAMENT_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 1) in vec3 aNormal;\n"
+    "layout (location = 2) in vec2 aUV;\n"
+    "layout (location = 3) in vec4 aTangent;\n"
+    "layout (location = 4) in vec4 aInstA;\n"      /* xyz local pos, w yaw */
+    "layout (location = 5) in vec4 aInstB;\n"      /* x xz-scale, y y-scale */
+    "uniform mat4 uModel;\n"
+    "uniform mat4 uView;\n"
+    "uniform mat4 uProj;\n"
+    "uniform mat3 uNormalMatrix;\n"
+    "out vec3 vNormal;\n"
+    "out vec3 vWorldPos;\n"
+    "out vec2 vUV;\n"
+    "out vec4 vTangent;\n"
+    "void main() {\n"
+    "    float c = cos(aInstA.w), s = sin(aInstA.w);\n"
+    "    vec3 sp = vec3(aPos.x * aInstB.x, aPos.y * aInstB.y, aPos.z * aInstB.x);\n"
+    "    vec3 lp = vec3(c*sp.x + s*sp.z, sp.y, -s*sp.x + c*sp.z) + aInstA.xyz;\n"
+    "    vec4 worldPos = uModel * vec4(lp, 1.0);\n"
+    "    gl_Position = uProj * uView * worldPos;\n"
+    "    vec3 ln = vec3(aNormal.x / aInstB.x, aNormal.y / aInstB.y, aNormal.z / aInstB.x);\n"
+    "    ln = vec3(c*ln.x + s*ln.z, ln.y, -s*ln.x + c*ln.z);\n"   /* covector: inverse scale, then the yaw */
+    "    vNormal = uNormalMatrix * ln;\n"
+    "    vWorldPos = worldPos.xyz;\n"
+    "    vUV = vec2(aUV.x * aInstB.x, aUV.y * aInstB.y);\n"  /* world-scale UVs survive the stretch */
+    "    vec3 lt = vec3(c*aTangent.x + s*aTangent.z, aTangent.y, -s*aTangent.x + c*aTangent.z);\n"
+    "    vTangent = vec4(mat3(uModel) * lt, aTangent.w);\n"
+    "}\n";
+static const char *ORNAMENT_SHADOW_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 4) in vec4 aInstA;\n"
+    "layout (location = 5) in vec4 aInstB;\n"
+    "uniform mat4 uModel;\n"
+    "uniform mat4 uLightVP;\n"
+    "void main() {\n"
+    "    float c = cos(aInstA.w), s = sin(aInstA.w);\n"
+    "    vec3 sp = vec3(aPos.x * aInstB.x, aPos.y * aInstB.y, aPos.z * aInstB.x);\n"
+    "    vec3 lp = vec3(c*sp.x + s*sp.z, sp.y, -s*sp.x + c*sp.z) + aInstA.xyz;\n"
+    "    gl_Position = uLightVP * uModel * vec4(lp, 1.0);\n"
+    "}\n";
+#endif /* SOL_RHI_METAL — the instanced ornament */
 
 /* --- the particle shader (P4 item 7): BILLBOARDS — one shared unit quad,
    expanded in the vertex shader along the camera's own right/up so every
@@ -1598,6 +1724,14 @@ typedef struct {
     RhiBuffer   meadow_vbuf, meadow_ibuf;   /* the one shared tuft */
     MeadowPatch meadow[32];
     int         meadow_count;
+
+    /* instanced ornament (P6 item 10, the item-7 debt): one canonical
+       baluster through the FULL PBR pipeline + a shadow twin */
+    RhiPipeline   ornament_pipeline, ornament_shadow_pipeline;
+    Mesh          baluster_mesh;
+    OrnamentPatch ornament[64];
+    int           ornament_count;
+    float         ornament_fp;     /* the scene fingerprint last built */
     /* particles (P4 item 7): the pool is VIEW STATE (the reader-rig
        doctrine) — emitters persist as components, the weather never does.
        One shared unit quad, one instance buffer re-uploaded per frame,
@@ -1708,6 +1842,7 @@ typedef struct {
        is the plot, so every island shows its destined church */
     sol_bool    j_was_down;
     sol_bool    u_was_down;        /* edge-detect mint-church (U, P6 item 9) */
+    sol_bool    z_was_down;        /* edge-detect mint-abbey (Z, P6 item 10) */
     sol_bool    plan_on;
     sol_u32     plan_plot;         /* island the overlay was built for */
     Mesh        plan_mesh;         /* DERIVED, never serialized (arrows law) */
@@ -2103,6 +2238,81 @@ static void meadow_rebuild(AppState *st) {
     }
     if (st->meadow_count > 0)
         printf("the meadow: %d island(s), %d tufts\n", st->meadow_count, total);
+}
+
+/* The instanced ornament (P6 item 10): every balustrade's balusters as
+   one static instance buffer of LOCAL slots — gothic_balusters is the
+   one author (the carcass's sill/rail constants ride gothic.h, so the
+   copies stand exactly between them). Rebuilt when the fingerprint
+   moves; dragging only moves uModel, which the pool never bakes. */
+static void ornament_rebuild(AppState *st) {
+    int     p;
+    sol_u32 i;
+    int     total = 0;
+    for (p = 0; p < st->ornament_count; p++)
+        rhi_destroy_buffer(st->ornament[p].data);
+    st->ornament_count = 0;
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        float    xs[128], inst[128 * 8];
+        float    len, h, ruin, gap;
+        unsigned seed;
+        int      n, k;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "balustrade") != 0) continue;
+        if (st->ornament_count >=
+            (int)(sizeof st->ornament / sizeof st->ornament[0])) break;
+        len  = mesh_ref_param("balustrade", o->mesh_params,
+                              o->mesh_param_count, "len");
+        h    = mesh_ref_param("balustrade", o->mesh_params,
+                              o->mesh_param_count, "h");
+        seed = (unsigned)(mesh_ref_param("balustrade", o->mesh_params,
+                                         o->mesh_param_count, "seed") + 0.5f);
+        ruin = mesh_ref_param("balustrade", o->mesh_params,
+                              o->mesh_param_count, "ruin");
+        n = gothic_balusters(len, h, seed, ruin, xs, 128);
+        gap = (h - GOTHIC_BALUSTER_RAIL) - GOTHIC_BALUSTER_SILL;
+        if (n <= 0 || gap < 0.2f) continue;
+        for (k = 0; k < n; k++) {
+            inst[k * 8 + 0] = xs[k];
+            inst[k * 8 + 1] = GOTHIC_BALUSTER_SILL;
+            inst[k * 8 + 2] = 0.0f;
+            inst[k * 8 + 3] = 0.0f;   /* square balusters sit straight */
+            inst[k * 8 + 4] = gap;    /* thickness rides the gap: proportion */
+            inst[k * 8 + 5] = gap;
+            inst[k * 8 + 6] = 0.0f;
+            inst[k * 8 + 7] = 0.0f;
+        }
+        st->ornament[st->ornament_count].data =
+            rhi_create_buffer(RHI_BUFFER_VERTEX, inst,
+                              (size_t)n * 8 * sizeof(float));
+        st->ornament[st->ornament_count].count  = n;
+        st->ornament[st->ornament_count].source = o->handle;
+        st->ornament_count++;
+        total += n;
+    }
+    if (st->ornament_count > 0)
+        printf("ornament: %d balustrade(s), %d balusters instanced\n",
+               st->ornament_count, total);
+}
+
+/* the per-frame sync: a cheap fingerprint over (handle, params) of every
+   balustrade — immune to missed call sites (mint, L, X, hand-edit all
+   just change the fingerprint) */
+static void ornament_sync(AppState *st) {
+    sol_u32 i;
+    int     j;
+    float   fp = 0.0f;
+    for (i = 0; i < st->scene.count; i++) {
+        const SceneObject *o = &st->scene.objects[i];
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "balustrade") != 0) continue;
+        fp += (float)o->handle * 0.618034f;
+        for (j = 0; j < o->mesh_param_count; j++)
+            fp += o->mesh_params[j] * (float)(j + 1);
+    }
+    if (fp != st->ornament_fp) {
+        st->ornament_fp = fp;
+        ornament_rebuild(st);
+    }
 }
 
 /* the leaf visit for picking: app policy first, then the shared narrow
@@ -2882,6 +3092,9 @@ static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
    Movement/look are level-triggered (held keys); the mode toggle is edge-
    triggered so it fires once per press. */
 static void scene_resolve_meshes(Scene *s);    /* defined with init_scene below */
+static void hdr_reload(AppState *st, const char *path);  /* the abbey key
+                                          switches the sky (defined with
+                                          the watcher below) */
 static void apply_kind_materials(Scene *s);    /* likewise */
 static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
@@ -3345,6 +3558,24 @@ static float ground_under(AppState *st, vec3 p, sol_u32 *out_plot) {
    feet ride the same ground law the camera walks by */
 static float wander_ground(void *ctx, vec3 p, sol_u32 *plot) {
     return ground_under((AppState *)ctx, p, plot);
+}
+
+/* The ground at a mint point ahead of you: islands and architecture
+   claim spawn heights exactly the way they claim your feet — the same
+   two reads the camera's ground line makes each frame (terrain via
+   ground_under, pavement/steps/stumps via collide_stand), gated by the
+   step treaty at YOUR height. Flat world answers 0, so the old mints
+   keep their old meaning off-island. */
+static float mint_ground(AppState *st, vec3 pos) {
+    vec3  probe = pos, sfeet;
+    float g, gs;
+    probe.y = st->camera.pos.y;            /* what you could step onto */
+    g = ground_under(st, probe, (sol_u32 *)0);
+    sfeet = probe;
+    sfeet.y -= CAMERA_EYE_HEIGHT;
+    gs = collide_stand(&st->colliders, sfeet, COLLIDE_RADIUS);
+    if (gs > g) g = gs;
+    return g;
 }
 
 /* ---- the floor-plan overlay (P6 item 3) ----
@@ -4344,7 +4575,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
             f   = vec3_normalize(f);
             pos = vec3_add(st->camera.pos, vec3_scale(f, 2.2f));
-            pos.y = 0.9f;                  /* bottom-origin: face center ~1.5 */
+            pos.y = mint_ground(st, pos) + 0.9f;  /* bottom-origin: face
+                                              center ~1.5 above YOUR ground —
+                                              islands lift the board too */
             yaw = atan2f(-f.x, -f.z);      /* board +Z looks back at you */
             one = vec3_make(1.0f, 1.0f, 1.0f);
             memset(&empty, 0, sizeof empty);
@@ -4408,7 +4641,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
                 f   = vec3_normalize(f);
                 pos = vec3_add(st->camera.pos, vec3_scale(f, 1.8f));
-                pos.y = 0.0f;                  /* bottom-origin card on the floor */
+                pos.y = mint_ground(st, pos);  /* bottom-origin card on
+                                                  YOUR ground, not the void's */
                 yaw = atan2f(-f.x, -f.z);      /* facing you */
                 h = scene_add(&st->scene, 0, empty, pos,
                               quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw), one);
@@ -4466,7 +4700,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
             f   = vec3_normalize(f);
             pos = vec3_add(st->camera.pos, vec3_scale(f, 1.6f));
-            pos.y = p[1] * 0.5f;                  /* standing: height spans +-h/2 */
+            pos.y = mint_ground(st, pos)
+                  + p[1] * 0.5f;                  /* standing: height spans +-h/2 */
             yaw = atan2f(-f.z, f.x);              /* the spine (-x) faces you */
             memset(&empty, 0, sizeof empty);
             anchor = scene_add(&st->scene, 0, empty, pos,
@@ -4763,6 +4998,256 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
         }
         st->u_was_down = u_now;
+    }
+
+    /* Z composes THE ABBEY (P6 item 10, the phase's portfolio): one large
+       island minted ahead, its hall church at ruin 0.55, the churchyard
+       cross, a broken colonnade descending the west approach, balustrades
+       at the porch, candle sconces in the choir — and the night sky.
+       Everything here is vocabulary items 1-9 built; this key only
+       COMPOSES. The follies ride as CHILDREN of the church anchor in
+       PLAN coordinates: they inherit the datum lift and the swap yaw,
+       and their feet find the hill through the same plan_to_local +
+       terrain_height read the datum sampling uses. */
+    {
+        sol_bool z_now = glfwGetKey(w, GLFW_KEY_Z) == GLFW_PRESS;
+        if (z_now && !st->z_was_down) {
+            float      iw = 44.0f, id = 44.0f, iseed = 9001.0f;
+            float      tpar[5];
+            float      cpar[5];
+            ChurchPlan cp;
+            Mesh       empty;
+            vec3       one = vec3_make(1.0f, 1.0f, 1.0f);
+            vec3       f, ipos;
+            float      datum = 0.0f, x, z;
+            int        i2, j2;
+            sol_u32    island, anchor;
+            quat       rot;
+
+            f = camera_forward(&st->camera);
+            f.y = 0.0f;
+            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+            f    = vec3_normalize(f);
+            ipos = vec3_add(st->camera.pos, vec3_scale(f, 0.55f * iw + 8.0f));
+            ipos.y = st->camera.pos.y - CAMERA_EYE_HEIGHT;
+
+            memset(&empty, 0, sizeof empty);
+            tpar[0] = iw; tpar[1] = id; tpar[2] = 56.0f;
+            tpar[3] = 2.4f; tpar[4] = iseed;
+            island = scene_add(&st->scene, 0, empty, ipos, quat_identity(), one);
+            scene_mesh_ref_set(&st->scene, island, "terrain");
+            scene_mesh_params_set(&st->scene, island, tpar, 5);
+            scene_meta_set(&st->scene, island, "room_type", "land");
+            scene_meta_set(&st->scene, island, "name", "the abbey hill");
+
+            /* the hall church, already half-fallen (style 1, ruin 0.55) */
+            cpar[0] = 15.0f; cpar[1] = 24.0f; cpar[2] = iseed;
+            cpar[3] = 1.0f;  cpar[4] = 0.55f;
+            church_plan(&cp, cpar, 5);
+            {
+                SceneObject *isl = scene_get(&st->scene, island);
+                for (i2 = 0; i2 <= cp.nbays; i2++)        /* the datum */
+                    for (j2 = 0; j2 <= PIER_ROW_N_WALL; j2++) {
+                        float lx, lz, hgt;
+                        if (!plan_pier(&cp, i2, j2, &x, &z)) continue;
+                        plan_to_local(&cp, x, z, &lx, &lz);
+                        hgt = terrain_height(isl->mesh_params,
+                                             isl->mesh_param_count, lx, lz);
+                        if (hgt > datum) datum = hgt;
+                    }
+                for (i2 = 0; i2 < 6; i2++) {
+                    float lx, lz, hgt;
+                    if (!plan_apse_pier(&cp, i2, &x, &z)) continue;
+                    plan_to_local(&cp, x, z, &lx, &lz);
+                    hgt = terrain_height(isl->mesh_params,
+                                         isl->mesh_param_count, lx, lz);
+                    if (hgt > datum) datum = hgt;
+                }
+            }
+            rot = cp.swapped
+                ? quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                       -0.5f * (float)SOL_PI)
+                : quat_identity();
+            anchor = scene_add(&st->scene, 0, empty,
+                               vec3_add(ipos, vec3_make(0.0f, datum, 0.0f)),
+                               rot, one);
+            scene_meta_set(&st->scene, anchor, "room_type", "church");
+            scene_meta_set(&st->scene, anchor, "name", "the abbey");
+            {
+                SceneObject *iso = scene_get(&st->scene, island);
+                if (iso && iso->nid)
+                    scene_meta_set(&st->scene, anchor, "plot", iso->nid);
+            }
+            {
+                static const char *refs[4] = {
+                    "church_stone", "church_glass",
+                    "church_roof",  "church_floor"
+                };
+                int r2;
+                for (r2 = 0; r2 < 4; r2++) {
+                    sol_u32 ch = scene_add(&st->scene, anchor, empty,
+                                           vec3_make(0, 0, 0),
+                                           quat_identity(), one);
+                    scene_mesh_ref_set(&st->scene, ch, refs[r2]);
+                    scene_mesh_params_set(&st->scene, ch, cpar, 5);
+                    {
+                        SceneObject *co = scene_get(&st->scene, ch);
+                        if (co) {
+                            Material mm = material_default();
+                            if (r2 == 0 || r2 == 3) {
+                                mm.base_color = vec3_make(1.0f, 1.0f, 1.0f);
+                                mm.roughness  = 1.0f;
+                                mm.metallic   = 1.0f;
+                            } else if (r2 == 1) {
+                                mm.base_color = vec3_make(0.02f, 0.025f, 0.045f);
+                                mm.roughness  = 0.08f;
+                                mm.emissive   = vec3_make(1.8f, 1.12f, 0.5f);
+                            } else {
+                                mm.base_color = vec3_make(0.30f, 0.32f, 0.36f);
+                                mm.roughness  = 0.55f;
+                            }
+                            co->material = mm;
+                        }
+                        if (r2 == 0) {
+                            scene_tex_ref_set(&st->scene, ch, "stone");
+                        } else if (r2 == 3) {
+                            float fp2[4];
+                            fp2[0] = iseed + 7.0f;
+                            fp2[1] = 2.4f; fp2[2] = 0.8f; fp2[3] = 0.8f;
+                            scene_tex_ref_set(&st->scene, ch, "stone");
+                            scene_tex_params_set(&st->scene, ch, fp2, 4);
+                        }
+                    }
+                }
+            }
+
+            /* a folly child: plan coords in, its feet on the hill (child
+               y is datum-relative, so the terrain read subtracts it) */
+            {
+                SceneObject *isl = scene_get(&st->scene, island);
+#define ABBEY_CHILD(refname, px, pz, yawq, prm, prmn, nm, texed)           \
+                do {                                                       \
+                    float lx_, lz_, hgt_;                                  \
+                    sol_u32 ch_;                                           \
+                    plan_to_local(&cp, (px), (pz), &lx_, &lz_);            \
+                    hgt_ = terrain_height(isl->mesh_params,                \
+                                          isl->mesh_param_count, lx_, lz_);\
+                    ch_ = scene_add(&st->scene, anchor, empty,             \
+                                    vec3_make((px), hgt_ - datum, (pz)),   \
+                                    (yawq), one);                          \
+                    scene_mesh_ref_set(&st->scene, ch_, (refname));        \
+                    if ((prmn) > 0)                                        \
+                        scene_mesh_params_set(&st->scene, ch_, (prm), (prmn)); \
+                    scene_meta_set(&st->scene, ch_, "name", (nm));         \
+                    if (texed) {                                           \
+                        SceneObject *fo_ = scene_get(&st->scene, ch_);     \
+                        if (fo_) {                                         \
+                            Material fm_ = material_default();             \
+                            fm_.base_color = vec3_make(1.0f, 1.0f, 1.0f);  \
+                            fm_.roughness = 1.0f; fm_.metallic = 1.0f;     \
+                            fo_->material = fm_;                           \
+                        }                                                  \
+                        scene_tex_ref_set(&st->scene, ch_, "stone");       \
+                    }                                                      \
+                } while (0)
+
+                /* the churchyard cross, south of the west approach */
+                {
+                    float xp[1];
+                    xp[0] = 3.4f;
+                    ABBEY_CHILD("cross", cp.west_x - 3.5f, 4.5f,
+                                quat_identity(), xp, 1,
+                                "the churchyard cross", 1);
+                }
+                /* the broken colonnade descending the approach: three
+                   pairs, more fallen the farther from the door */
+                {
+                    int   pk;
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+                    for (pk = 0; pk < 3; pk++) {
+                        float cx2 = cp.west_x - 4.0f - 2.8f * (float)pk;
+                        float cprm[4];
+                        char  cname[32];
+                        cprm[0] = 4.2f; cprm[1] = 0.0f;
+                        cprm[2] = (pk == 0) ? 0.0f
+                                : 0.18f + 0.26f * (float)pk;
+                        cprm[3] = iseed + (float)pk * 3.0f;
+                        sprintf(cname, "colonnade %d s", pk);
+                        ABBEY_CHILD("column", cx2, -2.3f, quat_identity(),
+                                    cprm, 4, cname, 1);
+                        cprm[2] = (pk == 2) ? 0.8f
+                                : 0.10f + 0.22f * (float)pk;
+                        cprm[3] = iseed + (float)pk * 3.0f + 1.0f;
+                        sprintf(cname, "colonnade %d n", pk);
+                        ABBEY_CHILD("column", cx2, 2.3f, quat_identity(),
+                                    cprm, 4, cname, 1);
+                    }
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+                }
+                /* balustrades flanking the porch, one more ruined */
+                {
+                    float bprm[4];
+                    bprm[0] = 3.0f; bprm[1] = 1.0f;
+                    bprm[2] = iseed; bprm[3] = 0.3f;
+                    ABBEY_CHILD("balustrade", cp.west_x - 2.6f, -2.3f,
+                                quat_identity(), bprm, 4,
+                                "porch balustrade s", 1);
+                    bprm[2] = iseed + 1.0f; bprm[3] = 0.6f;
+                    ABBEY_CHILD("balustrade", cp.west_x - 2.6f, 2.3f,
+                                quat_identity(), bprm, 4,
+                                "porch balustrade n", 1);
+                }
+#undef ABBEY_CHILD
+            }
+
+            /* candle sconces in the choir (P4 item 5's lights + flicker):
+               children at PAVEMENT height — they ride the church frame */
+            {
+                static const float SCZ[3] = { -2.2f, 2.2f, 0.0f };
+                int sc;
+                for (sc = 0; sc < 3; sc++) {
+                    float sx = cp.east_x - 2.0f - (sc == 2 ? 2.2f : 0.0f);
+                    sol_u32 h2 = scene_add(&st->scene, anchor, empty,
+                                vec3_make(sx, cp.plinth_h + 1.9f, SCZ[sc]),
+                                quat_identity(),
+                                vec3_make(0.10f, 0.10f, 0.10f));
+                    scene_mesh_ref_set(&st->scene, h2, "box");
+                    scene_meta_set(&st->scene, h2, "name", "sconce");
+                    scene_meta_set(&st->scene, h2, "light", "point");
+                    scene_meta_set(&st->scene, h2, "light_color",
+                                   "1.0 0.62 0.30");
+                    scene_meta_set(&st->scene, h2, "light_intensity", "9");
+                    scene_meta_set(&st->scene, h2, "light_radius", "7");
+                    scene_component_add(&st->scene, h2, "flicker",
+                                        (const float *)0, 0);
+                    {
+                        SceneObject *so = scene_get(&st->scene, h2);
+                        if (so) {
+                            Material m = material_default();
+                            m.base_color = vec3_make(0.95f, 0.78f, 0.50f);
+                            m.emissive   = vec3_make(1.5f, 0.85f, 0.38f);
+                            m.roughness  = 0.4f;
+                            so->material = m;
+                        }
+                    }
+                }
+            }
+
+            scene_resolve_meshes(&st->scene);
+            collide_rebuild(&st->colliders, &st->scene);
+            meadow_rebuild(st);                /* the hill grows its grass —
+                                                  and through the roofless bays */
+            scene_save(&st->scene, "scene.stml");
+            hdr_reload(st, "rogland_clear_night_4k.hdr");  /* dusk falls */
+            printf("the abbey rises on its hill (datum %.2f) — night falls\n",
+                   datum);
+        }
+        st->z_was_down = z_now;
     }
 
     /* O mints a LANTERN (P4 item 5): an ordinary draggable prop whose light
@@ -5907,6 +6392,61 @@ static int init_scene(AppState *state) {
         }
     }
 
+    /* the instanced-ornament machinery (P6 item 10: the item-7 debt paid):
+       ONE canonical baluster in the full 12-float layout (stream 0),
+       per-balustrade local-slot buffers (stream 1), the whole PBR
+       fragment over every copy — and the shadow twin, because masonry
+       casts. The buffers come from ornament_sync once the palace loads. */
+    {
+        RhiShader       osh, oshs;
+        RhiPipelineDesc od  = {0};
+        RhiPipelineDesc osd = {0};
+        MeshBuilder     mb;
+        mb_init(&mb);
+        gothic_baluster_unit(&mb);
+        state->baluster_mesh = mesh_from_builder(&mb);
+        mb_free(&mb);
+        osh = rhi_create_shader(ORNAMENT_VERTEX_SRC, FRAGMENT_SRC);
+        if (osh.id) {
+            od.shader = osh;
+            od.attrs[0].location = 0; od.attrs[0].format = RHI_FORMAT_FLOAT3;
+            od.attrs[0].offset   = 0;
+            od.attrs[1].location = 1; od.attrs[1].format = RHI_FORMAT_FLOAT3;
+            od.attrs[1].offset   = 3 * sizeof(float);
+            od.attrs[2].location = 2; od.attrs[2].format = RHI_FORMAT_FLOAT2;
+            od.attrs[2].offset   = 6 * sizeof(float);
+            od.attrs[3].location = 3; od.attrs[3].format = RHI_FORMAT_FLOAT4;
+            od.attrs[3].offset   = 8 * sizeof(float);
+            od.attrs[4].location = 4; od.attrs[4].format = RHI_FORMAT_FLOAT4;
+            od.attrs[4].offset   = 0;  od.attrs[4].per_instance = 1;
+            od.attrs[5].location = 5; od.attrs[5].format = RHI_FORMAT_FLOAT4;
+            od.attrs[5].offset   = 16; od.attrs[5].per_instance = 1;
+            od.attr_count      = 6;
+            od.stride          = 12 * sizeof(float);
+            od.instance_stride = 8 * sizeof(float);
+            od.depth_test      = SOL_TRUE;
+            od.blend           = SOL_FALSE;
+            state->ornament_pipeline = rhi_create_pipeline(&od);
+        }
+        oshs = rhi_create_shader(ORNAMENT_SHADOW_VERTEX_SRC,
+                                 SHADOW_FRAGMENT_SRC);
+        if (oshs.id) {
+            osd.shader = oshs;
+            osd.attrs[0].location = 0; osd.attrs[0].format = RHI_FORMAT_FLOAT3;
+            osd.attrs[0].offset   = 0;
+            osd.attrs[1].location = 4; osd.attrs[1].format = RHI_FORMAT_FLOAT4;
+            osd.attrs[1].offset   = 0;  osd.attrs[1].per_instance = 1;
+            osd.attrs[2].location = 5; osd.attrs[2].format = RHI_FORMAT_FLOAT4;
+            osd.attrs[2].offset   = 16; osd.attrs[2].per_instance = 1;
+            osd.attr_count      = 3;
+            osd.stride          = 12 * sizeof(float);
+            osd.instance_stride = 8 * sizeof(float);
+            osd.depth_test      = SOL_TRUE;
+            osd.blend           = SOL_FALSE;
+            state->ornament_shadow_pipeline = rhi_create_pipeline(&osd);
+        }
+    }
+
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
@@ -6350,6 +6890,28 @@ static void render(AppState *state) {
                 rhi_draw_indexed(0, sm->mesh.index_count);
             }
         }
+        /* instanced ornament casts too (P6 item 10) — floating shadowless
+           balusters would read wrong */
+        if (state->ornament_shadow_pipeline.id && state->ornament_count > 0 &&
+            state->baluster_mesh.index_count > 0) {
+            int op;
+            rhi_set_pipeline(state->ornament_shadow_pipeline);
+            rhi_set_uniform_mat4("uLightVP", lvp.m);
+            rhi_bind_vertex_buffer(state->baluster_mesh.vbuffer);
+            rhi_bind_index_buffer(state->baluster_mesh.ibuffer);
+            for (op = 0; op < state->ornament_count; op++) {
+                SceneObject *o = scene_get(&state->scene,
+                                           state->ornament[op].source);
+                mat4 model;
+                if (!o) continue;
+                if (lvis && !lvis[o->handle]) continue;
+                model = scene_world_matrix(&state->scene, o);
+                rhi_set_uniform_mat4("uModel", model.m);
+                rhi_bind_instance_buffer(state->ornament[op].data);
+                rhi_draw_indexed_instanced(0, state->baluster_mesh.index_count,
+                                           state->ornament[op].count);
+            }
+        }
         rhi_end_pass();
     }
     rt1 = glfwGetTime();
@@ -6497,6 +7059,33 @@ static void render(AppState *state) {
             if (vis && !vis[state->meadow[mp].island]) continue;
             rhi_bind_instance_buffer(state->meadow[mp].data);
             rhi_draw_indexed_instanced(0, 12, state->meadow[mp].count);
+        }
+    }
+
+    /* the instanced ornament (P6 item 10): every balustrade's balusters,
+       one draw each — full PBR through the carcass's OWN material (a
+       stone-dressed balustrade grows stone balusters), riding the
+       carcass's visibility bit */
+    if (state->ornament_pipeline.id && state->ornament_count > 0 &&
+        state->baluster_mesh.index_count > 0) {
+        int op;
+        for (op = 0; op < state->ornament_count; op++) {
+            SceneObject *o = scene_get(&state->scene,
+                                       state->ornament[op].source);
+            mat4 model;
+            if (!o) continue;
+            if (vis && !vis[o->handle]) continue;
+            model = scene_world_matrix(&state->scene, o);
+            bind_scene_uniforms(state, state->ornament_pipeline, model,
+                                view, proj, eye,
+                                o->handle == sel_root ? 1.0f : 0.0f,
+                                o->material);
+            rhi_bind_vertex_buffer(state->baluster_mesh.vbuffer);
+            rhi_bind_instance_buffer(state->ornament[op].data);
+            rhi_bind_index_buffer(state->baluster_mesh.ibuffer);
+            rhi_draw_indexed_instanced(0, state->baluster_mesh.index_count,
+                                       state->ornament[op].count);
+            state->draws_done++;
         }
     }
 
@@ -7350,6 +7939,8 @@ int main(void) {
         bvh_refresh(&state);                          /* boxes current AFTER the
                                                          animations move things —
                                                          culling reads them next */
+        ornament_sync(&state);                        /* balustrades' copies follow
+                                                         their params (P6 item 10) */
         yardstick_ms(&state.t_update, glfwGetTime() - y1);
         render(&state);
 

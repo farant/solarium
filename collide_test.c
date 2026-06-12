@@ -579,6 +579,68 @@ int main(void) {
         scene_free(&s);
         printf("church agreement: portal admits, walls reject, ruin opens\n");
     }
+
+    {   /* P6 item 10: THE FOLLIES — the stair climbs tread by tread
+           (each top one treaty step from the last) and stands underfoot
+           (collide_stand claims the tread); the fragment's opening
+           admits between its jambs; the broken column's box top reads
+           the SAME truncation the emitter carved */
+        Scene       s;
+        ColliderSet cs;
+        float stair_p[4]  = { 2.0f, 0.16f, 0.34f, 8.0f };
+        float frag_p[5]   = { 2.2f, 1.0f, 0.6f, 4.5f, 0.0f };
+        float col_p[4]    = { 4.5f, 0.0f, 0.55f, 7.0f };
+        sol_u32 hc;
+        vec3  feet, out;
+        float gs;
+        scene_init(&s);
+        collide_set_init(&cs);
+        add_ref(&s, 0, v3(0, 0, 0), qid(), "stair", stair_p, 4);
+        add_ref(&s, 0, v3(20, 0, 0), qid(), "arch_frag", frag_p, 5);
+        hc = add_ref(&s, 0, v3(40, 0, 0), qid(), "column", col_p, 4);
+        collide_rebuild(&cs, &s);
+        /* climb: walk the run; the slide may not stop short of the top */
+        feet = v3(-1.0f, 0.0f, 0.0f);
+        {
+            int k;
+            for (k = 0; k < 12; k++) {
+                out  = collide_slide(&cs, feet, v3(0.45f, 0.0f, 0.0f),
+                                     0.35f, 1.8f);
+                gs   = collide_stand(&cs, out, 0.35f);
+                if (gs > out.y) out.y = gs;
+                feet = out;
+            }
+        }
+        if (feet.y < 0.16f * 8.0f - 0.01f)
+            printf("FAIL: the stair must climb to its top (y %.2f)\n",
+                   feet.y);
+        /* the fragment admits between its jambs */
+        feet = v3(20.0f, 0.0f, -2.0f);
+        out  = collide_slide(&cs, feet, v3(0.0f, 0.0f, 4.0f), 0.35f, 1.8f);
+        if (out.z < 1.5f)
+            printf("FAIL: the fragment's opening must admit (z %.2f)\n",
+                   out.z);
+        /* and a jamb rejects */
+        feet = v3(20.0f - 0.5f * 2.2f - 0.4f, 0.0f, -2.0f);
+        out  = collide_slide(&cs, feet, v3(0.0f, 0.0f, 4.0f), 0.35f, 1.8f);
+        if (out.z > -0.5f)
+            printf("FAIL: the fragment's jamb must reject (z %.2f)\n",
+                   out.z);
+        /* the broken column's collider top = the emitter's truncation */
+        {
+            float top = gothic_column_top(4.5f, 0.0f, 0.55f);
+            int   i, ok = 0;
+            for (i = 0; i < cs.count; i++)
+                if (cs.boxes[i].source == hc &&
+                    approx(cs.boxes[i].y1, top, 0.001f)) ok = 1;
+            if (!ok)
+                printf("FAIL: column collider top diverged from the cut\n");
+        }
+        collide_set_free(&cs);
+        scene_free(&s);
+        printf("follies agreement: stair climbs+stands, fragment admits, "
+               "column reads the cut\n");
+    }
     printf("collide_test: OK\n");
     return 0;
 }

@@ -958,6 +958,128 @@ static void test_ruin(void) {
     }
 }
 
+/* ---- 17: the follies (item 10) — standalone vocabulary ----
+   Determinism + the audit for every row; broken pieces stay lower than
+   whole ones; the baluster enumerator is bounded, capped, and MONOTONE
+   in ruin (a baluster lost at 0.3 stays lost at 0.6). */
+static float mb_max_y(const MeshBuilder *b) {
+    sol_u32 i;
+    float top = -1e9f;
+    for (i = 0; i < b->vertex_count; i++) {
+        float y = b->vertices[i * 12 + 1];
+        if (y > top) top = y;
+    }
+    return top;
+}
+
+static void test_follies(void) {
+    static const float COL_BROKEN[4]  = { 4.5f, 0.0f, 0.55f, 7.0f };
+    static const float COL_DRUM[4]    = { 4.5f, 1.0f, 0.4f, 11.0f };
+    static const float FRAG_WHOLE[5]  = { 2.2f, 1.0f, 0.6f, 4.5f, 0.0f };
+    static const float FRAG_DEEP[5]   = { 2.2f, 1.0f, 0.6f, 4.5f, 0.9f };
+    static const float BAL_RUINED[4]  = { 3.0f, 1.0f, 7.0f, 0.5f };
+
+    det_check("column", (const float *)0, 0, 0.5f);
+    det_check("column", COL_BROKEN, 4, 0.5f);
+    det_check("column", COL_DRUM, 4, 0.5f);
+    det_check("arch_frag", FRAG_WHOLE, 5, 0.5f);
+    det_check("arch_frag", (const float *)0, 0, 0.5f);   /* default ruin .5 */
+    det_check("arch_frag", FRAG_DEEP, 5, 0.5f);
+    det_check("stair", (const float *)0, 0, 0.9f);
+    det_check("balustrade", (const float *)0, 0, 0.5f);
+    det_check("balustrade", BAL_RUINED, 4, 0.5f);
+    det_check("cross", (const float *)0, 0, 0.5f);
+
+    {   /* the audit, on every folly at defaults + the ruined variants */
+        static const char *refs[5] = { "column", "arch_frag", "stair",
+                                       "balustrade", "cross" };
+        int r;
+        for (r = 0; r < 5; r++) {
+            MeshBuilder b;
+            mb_init(&b);
+            if (mesh_ref_build(refs[r], (const float *)0, 0, &b))
+                audit_coplanar(&b, refs[r]);
+            mb_free(&b);
+        }
+        {
+            MeshBuilder b;
+            mb_init(&b);
+            mesh_ref_build("arch_frag", FRAG_DEEP, 5, &b);
+            audit_coplanar(&b, "arch_frag deep ruin");
+            mb_free(&b);
+        }
+    }
+
+    {   /* broken < whole, and the stair tops out exactly */
+        MeshBuilder w, br;
+        mb_init(&w); mb_init(&br);
+        mesh_ref_build("column", (const float *)0, 0, &w);
+        mesh_ref_build("column", COL_BROKEN, 4, &br);
+        if (mb_max_y(&br) >= mb_max_y(&w))
+            fail("follies: broken column not lower than whole");
+        mb_free(&w); mb_free(&br);
+        mb_init(&w); mb_init(&br);
+        mesh_ref_build("arch_frag", FRAG_WHOLE, 5, &w);
+        mesh_ref_build("arch_frag", FRAG_DEEP, 5, &br);
+        if (mb_max_y(&br) >= mb_max_y(&w))
+            fail("follies: ruined fragment not lower than whole");
+        mb_free(&w); mb_free(&br);
+        mb_init(&w);
+        mesh_ref_build("stair", (const float *)0, 0, &w);
+        if (fabsf(mb_max_y(&w) - 0.16f * 8.0f) > 1e-4f)
+            fail("follies: stair top != steps * rise");
+        mb_free(&w);
+    }
+
+    {   /* the baluster enumerator: bounded, capped, monotone in ruin */
+        float xs[64];
+        int   prev = 1000, i, k;
+        static const float R[4] = { 0.0f, 0.3f, 0.6f, 0.9f };
+        for (k = 0; k < 4; k++) {
+            int n = gothic_balusters(3.0f, 1.0f, 7u, R[k], xs, 64);
+            if (n > prev)
+                fail("follies: balusters not monotone in ruin");
+            prev = n;
+            for (i = 0; i < n; i++)
+                if (xs[i] < -1.5f || xs[i] > 1.5f)
+                    fail("follies: baluster outside the run");
+        }
+        if (gothic_balusters(3.0f, 1.0f, 7u, 0.0f, xs, 64) < 4)
+            fail("follies: default balustrade nearly empty");
+        if (gothic_balusters(3.0f, 1.0f, 7u, 0.0f, xs, 2) != 2)
+            fail("follies: max_n cap not honored");
+        {   /* monotone MEMBERSHIP, not just count: survivors at deep
+               ruin are a subset of the survivors at light ruin */
+            float xa[64], xb[64];
+            int na = gothic_balusters(3.0f, 1.0f, 7u, 0.2f, xa, 64);
+            int nb = gothic_balusters(3.0f, 1.0f, 7u, 0.7f, xb, 64);
+            int a, bz, found;
+            for (bz = 0; bz < nb; bz++) {
+                found = 0;
+                for (a = 0; a < na; a++)
+                    if (fabsf(xa[a] - xb[bz]) < 1e-6f) found = 1;
+                if (!found)
+                    fail("follies: a fallen baluster came back");
+            }
+        }
+    }
+
+    {   /* the unit baluster: spans exactly [0,1] high, deterministic */
+        MeshBuilder a, b;
+        mb_init(&a); mb_init(&b);
+        gothic_baluster_unit(&a);
+        gothic_baluster_unit(&b);
+        if (a.vertex_count != b.vertex_count ||
+            memcmp(a.vertices, b.vertices,
+                   (size_t)a.vertex_count * 12 * sizeof(sol_f32)) != 0)
+            fail("follies: baluster unit not deterministic");
+        if (fabsf(mb_max_y(&a) - 1.0f) > 1e-5f)
+            fail("follies: baluster unit not unit-height");
+        audit_coplanar(&a, "baluster unit");
+        mb_free(&a); mb_free(&b);
+    }
+}
+
 int main(void) {
     test_square_is_box();
     test_miter();
@@ -975,6 +1097,7 @@ int main(void) {
     test_spire_manifold();
     test_roof();
     test_ruin();
+    test_follies();
     if (g_fail) { printf("gothic_test: FAILED\n"); return 1; }
     printf("gothic_test: OK\n");
     return 0;

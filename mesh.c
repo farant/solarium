@@ -774,6 +774,21 @@ static void emit_church_floor(MeshBuilder *b, const float *p) {
 static void emit_pinnacle(MeshBuilder *b, const float *p) {
     gothic_pinnacle(b, p[0], (unsigned)(p[1] + 0.5f));
 }
+static void emit_column(MeshBuilder *b, const float *p) {
+    gothic_column(b, p[0], p[1], p[2], (unsigned)(p[3] + 0.5f));
+}
+static void emit_arch_frag(MeshBuilder *b, const float *p) {
+    gothic_arch_frag(b, p[0], p[1], p[2], p[3], p[4]);
+}
+static void emit_stair(MeshBuilder *b, const float *p) {
+    gothic_stair(b, p[0], p[1], p[2], (int)(p[3] + 0.5f));
+}
+static void emit_balustrade(MeshBuilder *b, const float *p) {
+    gothic_balustrade(b, p[0], p[1], (unsigned)(p[2] + 0.5f), p[3]);
+}
+static void emit_cross(MeshBuilder *b, const float *p) {
+    gothic_cross(b, p[0]);
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -835,7 +850,19 @@ static const MeshRefEntry REGISTRY[] = {
       { "w", "d", "seed", "style", "ruin", "built", "acute", "reserved" },
       { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_floor },
     /* the standalone pinnacle (P6 item 7; item 10 instances it) */
-    { "pinnacle", 2, { "h", "seed" }, { 1.8f, 7.0f }, emit_pinnacle }
+    { "pinnacle", 2, { "h", "seed" }, { 1.8f, 7.0f }, emit_pinnacle },
+    /* the follies (P6 item 10): the kit's vocabulary, placeable alone —
+       each a thin wrapper over machinery the church proved; ruin is a
+       per-piece truncation param (no plan, no graph) */
+    { "column", 4, { "h", "style", "broken", "seed" },
+      { 4.5f, 0.0f, 0.0f, 7.0f }, emit_column },
+    { "arch_frag", 5, { "span", "acute", "depth", "h", "ruin" },
+      { 2.2f, 1.0f, 0.6f, 4.5f, 0.5f }, emit_arch_frag },
+    { "stair", 4, { "w", "rise", "run", "steps" },
+      { 2.0f, 0.16f, 0.34f, 8.0f }, emit_stair },
+    { "balustrade", 4, { "len", "h", "seed", "ruin" },
+      { 3.0f, 1.0f, 7.0f, 0.0f }, emit_balustrade },
+    { "cross", 1, { "h" }, { 3.2f }, emit_cross }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 

@@ -147,6 +147,7 @@ enum {
     LANE_RUIN,        /* item 8: the decay field                     */
     LANE_RUIN_DIR,    /* item 8: which end collapses first           */
     LANE_SPIRE,       /* item 7: broach vs parapet-and-needle        */
+    LANE_FOLLY,       /* item 10: standalone pieces' variation       */
     LANE_COUNT
 };
 
@@ -307,6 +308,66 @@ void gothic_spire(MeshBuilder *b, float cx, float cz, float half,
 /* a pinnacle: Roriczer simplified — square shaft, four gablets, a
    slender pyramid, a finial knob. Stands on its local origin. */
 void gothic_pinnacle(MeshBuilder *b, float h, unsigned seed);
+
+/* ---- item 10: the follies — standalone vocabulary over the kit ----
+   Each is a thin wrapper over machinery items 1-9 built: no new
+   geometry algorithms, only composition. A single piece has no
+   dependency graph, so ruin here is an honest truncation parameter —
+   course-quantized like everything that breaks. All stand on their
+   local origin with the GOTHIC_FOUNDATION skirt below grade. */
+
+/* base/shaft/capital column (the church's pier, planless): style 0 =
+   dressed (sub-plinth, attic base, capital), 1 = bare drum. broken > 0
+   truncates at a course line and plants the snapped core — a slimmer
+   stub riding the break, hash-set off center. */
+void gothic_column(MeshBuilder *b, float h, float style, float broken,
+                   unsigned seed);
+
+/* a freestanding arched wall fragment. Whole (ruin < 0.35) it is the
+   arched-wall emitter flush; beyond, a ladder: jambs as course-kept
+   masses, the head ring eroding from the right springing back toward
+   the surviving jamb — one jamb + a sprung half-arch dying into air. */
+void gothic_arch_frag(MeshBuilder *b, float span, float a, float depth,
+                      float h, float ruin);
+
+/* a straight stair ascending +x from the origin, risers a STEP_UP
+   treaty away from climbable (the colliders make every tread stand) */
+void gothic_stair(MeshBuilder *b, float w, float rise, float run,
+                  int steps);
+
+/* the balustrade CARCASS: end posts, sill, rail — the balusters
+   themselves are the instance pool's (one unit mesh, many transforms).
+   Their slots come from gothic_balusters below, so carcass and pool
+   can never disagree. Past ruin 0.65 the rail has nothing to stand on
+   and falls with them. */
+void gothic_balustrade(MeshBuilder *b, float len, float h, unsigned seed,
+                       float ruin);
+
+/* baluster slot positions along the run (local x, centered): fills
+   out_x up to max_n, returns the count filled. ruin drops slots by
+   per-slot hash — MONOTONE: a baluster lost at 0.3 stays lost at 0.6. */
+int gothic_balusters(float len, float h, unsigned seed, float ruin,
+                     float *out_x, int max_n);
+
+/* the truncation truths the COLLIDERS read (one formula, two readers —
+   §1.2 at folly scale): the kept top of a possibly-broken column, and
+   the fragment's derived dimensions + kept jamb heights (whole pieces
+   report hl = hr = h). */
+float gothic_column_top(float h, float style, float broken);
+void  gothic_arch_frag_dims(float span, float a, float h, float ruin,
+                            float *jw, float *spring, float *aa,
+                            float *hl, float *hr);
+
+/* one canonical baluster, height exactly 1 (y in [0,1]) — the unit
+   mesh the instance pool scales to each balustrade's gap. The sill top
+   and rail depth are shared here so the pool's copies stand EXACTLY
+   between the carcass's members (they cannot disagree). */
+#define GOTHIC_BALUSTER_SILL 0.15f   /* sill top: where balusters stand */
+#define GOTHIC_BALUSTER_RAIL 0.13f   /* rail depth below the run height */
+void gothic_baluster_unit(MeshBuilder *b);
+
+/* a churchyard cross: two steps, the socket, a tapered shaft, the head */
+void gothic_cross(MeshBuilder *b, float h);
 
 /* ---- item 8: the ruin & the worksite — survival is a query ----
    There is no ruin pass: every emitter call site asks church_survives
