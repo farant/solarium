@@ -3,6 +3,7 @@
 
 #include "mesh.h"        /* MeshBuilder */
 #include "sol_types.h"   /* vec3 */
+#include "sweep.h"       /* the profile lathe (P7 item 1): ProfilePt + sweep_extrude */
 
 /* gothic.h — the Gothic kit (P6). Pure CPU geometry vocabulary with
    collide.c's citizenship: strict C89, headless-testable, no rhi/scene
@@ -18,20 +19,15 @@
    angular cap rescues small circles (a 0.3 m tracery foil under the
    linear cap alone would be a 4-gon). */
 #define GOTHIC_MAX_SEG 0.25f                     /* meters per chord    */
-#define GOTHIC_MAX_ANG (22.5f * 0.01745329252f)  /* radians per segment */
+#define GOTHIC_MAX_ANG SWEEP_MAX_ANG          /* radians per segment (the lathe's) */
 
 /* Segment count for an arc of arc_len meters turning arc_angle radians:
    n = max(ceil(len / MAX_SEG), ceil(angle / MAX_ANG)), at least 1. */
 int gothic_arc_segments(float arc_len, float arc_angle);
 
-/* A profile point, in section space: o = outward (away from the wall or
-   core; profiles project into +o — flip via the sweep's plane/path), u =
-   up in the section's frame. Creased points get hard normals (a fillet
-   arris); uncreased points share an averaged normal (a roll reads round).
-   Profiles are OPEN polylines walked bottom -> out -> top, wound CCW in
-   (o,u) so face normals point out of the material; CLOSED profiles repeat
-   their first point (creased at the seam). */
-typedef struct { float o, u; unsigned char crease; } ProfilePt;
+/* ProfilePt lives in sweep.h now (P7 item 1) — the kit's profiles
+   project into +o (away from the wall or core; flip via the sweep's
+   plane/path) and walk bottom -> out -> top. */
 
 /* The molding table (§Item 1) — APPEND-ONLY: profile ids are scene-file
    currency once the kit's params reference them. The glossary is the
@@ -65,7 +61,7 @@ const ProfilePt *gothic_profile(int prof_id, int *out_n);
    profile arclength, v = path arclength, in meters.
    Limits: 2 <= prof_n <= GOTHIC_SWEEP_MAX_PROF, path_n >= 2, no
    doubled-back joints (turn ~180 degrees) — violations emit nothing. */
-#define GOTHIC_SWEEP_MAX_PROF 16
+#define GOTHIC_SWEEP_MAX_PROF SWEEP_MAX_PROF
 void gothic_sweep(MeshBuilder *b, const ProfilePt *prof, int prof_n,
                   const vec3 *path, int path_n, vec3 plane_n,
                   float scale, int cap0, int cap1);

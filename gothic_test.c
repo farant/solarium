@@ -958,6 +958,81 @@ static void test_ruin(void) {
     }
 }
 
+/* ---- 18: taper on the sweep (P7 item 1) ----
+   The equivalence law: NULL scales and constant scales reproduce the
+   untapered sweep BYTE-identically. The cone law: a tapered straight
+   sweep's normals match the analytic cone normal. Radii: a linear
+   scales array yields linearly scaled rings. */
+static void test_taper(void) {
+    static const ProfilePt SQ[5] = {
+        { 0.5f, -0.5f, 1 }, { 0.5f, 0.5f, 1 }, { -0.5f, 0.5f, 1 },
+        { -0.5f, -0.5f, 1 }, { 0.5f, -0.5f, 1 }
+    };
+    vec3 path[3];
+    path[0] = vec3_make(0.0f, 0.0f, 0.0f);
+    path[1] = vec3_make(2.0f, 0.0f, 0.0f);
+    path[2] = vec3_make(4.0f, 0.0f, 0.0f);
+
+    {   /* equivalence: legacy == NULL == constant array, memcmp */
+        MeshBuilder a, b, c;
+        float ones[3];
+        ones[0] = 1.0f; ones[1] = 1.0f; ones[2] = 1.0f;
+        mb_init(&a); mb_init(&b); mb_init(&c);
+        gothic_sweep(&a, SQ, 5, path, 3, vec3_make(0, 1, 0), 1.0f, 1, 1);
+        sweep_extrude(&b, SQ, 5, path, 3, vec3_make(0, 1, 0), 1.0f,
+                      (const float *)0, 1, 1);
+        sweep_extrude(&c, SQ, 5, path, 3, vec3_make(0, 1, 0), 1.0f,
+                      ones, 1, 1);
+        if (a.vertex_count != b.vertex_count ||
+            memcmp(a.vertices, b.vertices,
+                   (size_t)a.vertex_count * 12 * sizeof(sol_f32)) != 0 ||
+            memcmp(a.indices, b.indices,
+                   (size_t)a.index_count * sizeof(sol_u32)) != 0)
+            fail("taper: NULL scales not byte-identical to legacy");
+        if (a.vertex_count != c.vertex_count ||
+            memcmp(a.vertices, c.vertices,
+                   (size_t)a.vertex_count * 12 * sizeof(sol_f32)) != 0)
+            fail("taper: constant scales not byte-identical to legacy");
+        mb_free(&a); mb_free(&b); mb_free(&c);
+    }
+
+    {   /* radii: linear scales -> ring extents scale per station; and
+           THE CONE LAW: side normals lean by atan(dr/ds) exactly */
+        MeshBuilder b;
+        float scl[3];
+        float slope, nx_want, len_want;
+        sol_u32 i;
+        int bad_r = 0, bad_n = 0;
+        scl[0] = 1.0f; scl[1] = 0.75f; scl[2] = 0.5f;
+        mb_init(&b);
+        sweep_extrude(&b, SQ, 5, path, 3, vec3_make(0, 1, 0), 1.0f,
+                      scl, 0, 0);
+        slope = (0.75f - 1.0f) / 2.0f;          /* dr/ds per unit support */
+        for (i = 0; i < b.vertex_count; i++) {
+            const sol_f32 *v = &b.vertices[i * 12];
+            float ex = (float)fabs((double)v[1]);  /* |y| extent */
+            float ez = (float)fabs((double)v[2]);  /* |z| extent */
+            float want = v[0] < 0.5f ? 0.5f : v[0] < 2.5f ? 0.375f : 0.25f;
+            if ((float)fabs((double)(ex - want)) > 1e-5f &&
+                (float)fabs((double)(ez - want)) > 1e-5f)
+                bad_r++;
+            /* the cone law on the +z face's normals (normal = v[3..5];
+               nz dominant): the stored normal must be
+               normalize((-slope*support, 0, 1)) — support = 0.5 */
+            if (v[5] > 0.9f) {
+                len_want = sqrtf(1.0f + slope * 0.5f * slope * 0.5f);
+                nx_want  = -(slope * 0.5f) / len_want;
+                if ((float)fabs((double)(v[3] - nx_want)) > 1e-4f)
+                    bad_n++;
+            }
+        }
+        if (bad_r) fail("taper: ring extents off the linear scales");
+        if (bad_n) fail("taper: side normals break the cone law");
+        check_consistency(&b, 0.5f, "tapered square");
+        mb_free(&b);
+    }
+}
+
 /* ---- 17: the follies (item 10) — standalone vocabulary ----
    Determinism + the audit for every row; broken pieces stay lower than
    whole ones; the baluster enumerator is bounded, capped, and MONOTONE
@@ -1098,6 +1173,7 @@ int main(void) {
     test_roof();
     test_ruin();
     test_follies();
+    test_taper();
     if (g_fail) { printf("gothic_test: FAILED\n"); return 1; }
     printf("gothic_test: OK\n");
     return 0;
