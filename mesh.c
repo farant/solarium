@@ -762,6 +762,9 @@ static void emit_portal(MeshBuilder *b, const float *p) {
 static void emit_church_stone(MeshBuilder *b, const float *p) {
     church_stone(b, p, MESH_REF_MAX_PARAMS);
 }
+static void emit_church_glass(MeshBuilder *b, const float *p) {
+    church_glass(b, p, MESH_REF_MAX_PARAMS);
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -812,7 +815,10 @@ static const MeshRefEntry REGISTRY[] = {
        Defaults MUST equal gothic_church_defaults (gothictest asserts). */
     { "church_stone", 8,
       { "w", "d", "seed", "style", "ruin", "built", "acute", "reserved" },
-      { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_stone }
+      { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_stone },
+    { "church_glass", 8,
+      { "w", "d", "seed", "style", "ruin", "built", "acute", "reserved" },
+      { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_glass }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 

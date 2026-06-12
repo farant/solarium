@@ -249,4 +249,38 @@ void church_stone(MeshBuilder *b, const float *params, int count);
    these same values (gothictest asserts the two tables agree) */
 extern const float gothic_church_defaults[8];
 
+/* ---- item 6: windows & tracery — the GEOMETRIC grammar ----
+   Circles and pointed sub-arches only (~1250-1310): every element
+   compass-constructible from what is already there. Per window: the
+   span divides into LIGHTS (a building-wide divisor — one tracery
+   shop, one hand), each light heads in a sub-arch inheriting the main
+   acuteness, and the spandrels take FOILED CIRCLES solved tangent to
+   their three bounding arcs (Apollonius CCC, by deterministic
+   bisection). Bars are MASONRY (PROF_MULLION sweeps into
+   church_stone); the panels are church_glass — the church group's
+   second member. */
+#define TRACERY_MAX_FOILS 3
+typedef struct {
+    int   n_lights;              /* 1..4                              */
+    float pitch;                 /* light pitch = span / n_lights     */
+    float sub_span;              /* head span: pitch minus the mullion
+                                    shoulders (heads spring from the
+                                    bar's SIDES, not its centerline)  */
+    float sub_acute;             /* inherited from the opening        */
+    int   n_foils;
+    float foil_x[TRACERY_MAX_FOILS];
+    float foil_y[TRACERY_MAX_FOILS];   /* absolute heights            */
+    float foil_r[TRACERY_MAX_FOILS];
+} GothicTracery;
+
+/* construct the grammar for one opening (window-local x, centered 0).
+   divisor = the building's jittered light width (LANE_TRACERY).
+   Returns 0 for non-windows or degenerate spans. */
+int gothic_tracery(const GothicOpening *o, float divisor, GothicTracery *t);
+
+/* the glass: one flat panel per light and per foil, mid-wall, double
+   sided (3mm apart — coincident sides are their own z-fight). Same
+   schema as church_stone, same plan, same windows. */
+void church_glass(MeshBuilder *b, const float *params, int count);
+
 #endif /* GOTHIC_H */

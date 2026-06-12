@@ -690,21 +690,105 @@ static void test_church_stone(void) {
             if (g_fail) return;
         }
 
-    {   /* the budget: the shell's 60k (item 4) plus the vaults' ride
-           (item 5) — a long VAULTED basilica within 100k; item 10's
+    {   /* the budget: shell 60k (item 4) + vaults (item 5) + tracery
+           (item 6) — a long DRESSED basilica within 130k; item 10's
            400k demo-island cap is the governing number */
         float params[8] = { 26.0f, 58.0f, 3.0f, 2.0f, 0.0f, 1.0f, 1.0f, 0.0f };
         MeshBuilder b;
         mb_init(&b);
         church_stone(&b, params, 8);
-        if (b.index_count / 3 >= 100000)
-            fail("church_stone: vaulted basilica over the 100k budget");
+        if (b.index_count / 3 >= 130000)
+            fail("church_stone: dressed basilica over the 130k budget");
         if (b.index_count / 3 < 1000)
             fail("church_stone: basilica suspiciously empty");
         printf("church_stone: basilica shell %u tris\n",
                (unsigned)(b.index_count / 3));
         mb_free(&b);
     }
+}
+
+/* ---- 13: item 6 — the geometric grammar ---- */
+static void test_tracery(void) {
+    static const float SPANS[5] = { 0.8f, 1.4f, 2.2f, 3.1f, 4.5f };
+    int si, f;
+    for (si = 0; si < 5; si++) {
+        GothicOpening o;
+        GothicTracery t;
+        float c_m, r_m, c_s, r_s;
+        o.kind = GOTHIC_OPEN_WINDOW; o.cx = 0.0f; o.w = SPANS[si];
+        o.sill = 1.2f; o.spring = 1.2f + 0.6f * SPANS[si]; o.acute = 1.0f;
+        if (!gothic_tracery(&o, 0.7f, &t))
+            { fail("tracery: refused a legal window"); return; }
+        if (t.n_lights < 1 || t.n_lights > 4)
+            { fail("tracery: lights out of 1..4"); return; }
+        if (t.sub_span > t.pitch + 1e-6f || t.sub_span < 0.3f * t.pitch)
+            { fail("tracery: sub-span out of its pitch"); return; }
+        /* the 5 mm law: every foil tangent to its three bounding arcs.
+           Main intrados: internal, |dist - (r_m - rf)| <= 5mm against
+           the arc on the foil's side; sub-arches: external against the
+           two nearest arc centers. */
+        c_m = 0.5f * o.acute * o.w; r_m = c_m + 0.5f * o.w;
+        c_s = 0.5f * t.sub_acute * t.sub_span; r_s = c_s + 0.5f * t.sub_span;
+        for (f = 0; f < t.n_foils; f++) {
+            float fx = t.foil_x[f], fy = t.foil_y[f], fr = t.foil_r[f];
+            float mx = fx < 0.0f ? c_m : -c_m;
+            float dx = fx - mx, dy = fy - o.spring;
+            float best1 = 1e9f, best2 = 1e9f;
+            int   li;
+            if (fabsf(sqrtf(dx * dx + dy * dy) - (r_m - fr)) > 5e-3f)
+                { fail("tracery: foil not tangent to the main intrados"); return; }
+            for (li = 0; li < t.n_lights; li++) {   /* two nearest sub arcs */
+                float lc = -0.5f * o.w + ((float)li + 0.5f) * t.pitch;
+                float e;
+                dx = fx - (lc - c_s); dy = fy - o.spring;
+                e = fabsf(sqrtf(dx * dx + dy * dy) - (r_s + fr));
+                if (e < best1) { best2 = best1; best1 = e; }
+                else if (e < best2) best2 = e;
+                dx = fx - (lc + c_s);
+                e = fabsf(sqrtf(dx * dx + dy * dy) - (r_s + fr));
+                if (e < best1) { best2 = best1; best1 = e; }
+                else if (e < best2) best2 = e;
+            }
+            if (t.n_lights > 1 && (best1 > 5e-3f || best2 > 5e-3f))
+                { fail("tracery: foil not tangent to its sub-arches"); return; }
+            if (fabsf(fx) + fr > 0.5f * o.w + 1e-3f)
+                { fail("tracery: foil outside its window"); return; }
+        }
+    }
+    {   /* glass: no slivers — minimum triangle angle on the real mesh */
+        MeshBuilder g;
+        sol_u32 t2;
+        mb_init(&g);
+        church_glass(&g, (const float *)0, 0);
+        if (g.index_count == 0) { fail("glass: emitted nothing"); mb_free(&g); return; }
+        for (t2 = 0; t2 < g.index_count / 3; t2++) {
+            vec3 a = vpos(&g, g.indices[t2 * 3]);
+            vec3 b = vpos(&g, g.indices[t2 * 3 + 1]);
+            vec3 c = vpos(&g, g.indices[t2 * 3 + 2]);
+            vec3 e0 = vec3_sub(b, a), e1 = vec3_sub(c, b), e2 = vec3_sub(a, c);
+            float l0 = sqrtf(vec3_dot(e0, e0)), l1 = sqrtf(vec3_dot(e1, e1));
+            float l2 = sqrtf(vec3_dot(e2, e2));
+            float longest = l0 > l1 ? (l0 > l2 ? l0 : l2) : (l1 > l2 ? l1 : l2);
+            vec3 cr = vec3_cross(e0, vec3_scale(e2, -1.0f));
+            float area2 = sqrtf(vec3_dot(cr, cr));
+            /* min altitude = area2/longest; sliver if under ~2.6 percent
+               of the longest edge (about 1.5 degrees) */
+            if (area2 / (longest * longest) < 0.026f) {
+                printf("FAIL: glass sliver at (%.3f %.3f %.3f)-(%.3f %.3f %.3f)-(%.3f %.3f %.3f)\n",
+                       a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+                g_fail = 1; break;
+            }
+        }
+        check_consistency(&g, 0.99f, "glass");
+        mb_free(&g);
+    }
+    {   /* the glass row: same schema, same defaults, deterministic */
+        const char *const *names; const float *defs;
+        int n = mesh_ref_schema("church_glass", &names, &defs);
+        if (n != 8 || memcmp(defs, gothic_church_defaults, 8 * sizeof(float)) != 0)
+            fail("church_glass: registry defaults drifted from the plan's");
+    }
+    det_check("church_glass", (const float *)0, 0, 0.99f);
 }
 
 int main(void) {
@@ -720,6 +804,7 @@ int main(void) {
     test_portal();
     test_plan();
     test_church_stone();
+    test_tracery();
     if (g_fail) { printf("gothic_test: FAILED\n"); return 1; }
     printf("gothic_test: OK\n");
     return 0;

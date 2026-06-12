@@ -191,6 +191,10 @@ static void emit_ring(MeshBuilder *b, const ProfilePt *prof, int prof_n,
     }
 }
 
+/* loop-closure state: gothic_sweep is single-threaded like the engine */
+static RingIds g_loop_first;
+static int     g_loop_on = 0;
+
 /* quads between consecutive rings, one per profile edge; winding chosen
    so the geometric normal matches the edge's section normal (asserted by
    gothic_test against a known box sweep) */
@@ -286,17 +290,44 @@ void gothic_sweep(MeshBuilder *b, const ProfilePt *prof, int prof_n,
 
     if (!b || !prof || !path) return;
     if (prof_n < 2 || prof_n > GOTHIC_SWEEP_MAX_PROF || path_n < 2) return;
+    g_loop_on = 0;                  /* never inherit a stale loop seam */
 
     up = vec3_normalize(plane_n);
     sect_build(prof, prof_n, sp);
 
-    {
+    {   /* a CLOSED LOOP (first == last point) gets a mitered seam ring
+           stitched back to itself — no caps, no gap (item 6's tracery
+           circles; item 1's 360-degree gap retired). Sharp-seam loops
+           fall back to the open path. */
         vec3 d0 = vec3_normalize(vec3_sub(path[1], path[0]));
-        vec3 o0 = vec3_normalize(vec3_cross(up, d0));
-        emit_ring(b, prof, prof_n, sp, path[0], o0, o0, up, scale, 0.0f, &prev);
-        if (cap0)
-            cap_emit(b, prof, prof_n, path[0], o0, up, scale,
-                     vec3_scale(d0, -1.0f), 1);
+        vec3 dl = vec3_sub(path[path_n - 1], path[path_n - 2]);
+        vec3 dc = vec3_sub(path[path_n - 1], path[0]);
+        int  closed = vec3_dot(dc, dc) < 1e-10f && path_n >= 4;
+        if (closed) {
+            float c2;
+            dl = vec3_normalize(dl);
+            c2 = vec3_dot(dl, d0);
+            if (c2 >= 0.86602540f) {
+                vec3 m   = vec3_normalize(vec3_add(dl, d0));
+                vec3 o_u = vec3_normalize(vec3_cross(up, m));
+                vec3 o_p = vec3_scale(o_u, 1.0f / sqrtf((1.0f + c2) * 0.5f));
+                emit_ring(b, prof, prof_n, sp, path[0], o_p, o_u, up,
+                          scale, 0.0f, &prev);
+                g_loop_first = prev;
+                g_loop_on    = 1;
+            } else {
+                closed = 0;
+            }
+        }
+        if (!closed) {
+            vec3 o0 = vec3_normalize(vec3_cross(up, d0));
+            g_loop_on = 0;
+            emit_ring(b, prof, prof_n, sp, path[0], o0, o0, up, scale,
+                      0.0f, &prev);
+            if (cap0)
+                cap_emit(b, prof, prof_n, path[0], o0, up, scale,
+                         vec3_scale(d0, -1.0f), 1);
+        }
     }
     last_pos = path[0];
     arc = 0.0f;
@@ -311,11 +342,18 @@ void gothic_sweep(MeshBuilder *b, const ProfilePt *prof, int prof_n,
         last_pos = path[i];
 
         if (i == path_n - 1) {                     /* the end ring */
-            vec3 oe = vec3_normalize(vec3_cross(up, d_s));
-            emit_ring(b, prof, prof_n, sp, path[i], oe, oe, up, scale, arc, &cur);
-            stitch(b, &prev, &cur, prof_n);
-            if (cap1)
-                cap_emit(b, prof, prof_n, path[i], oe, up, scale, d_s, 0);
+            if (g_loop_on) {                       /* close the loop */
+                stitch(b, &prev, &g_loop_first, prof_n);
+                g_loop_on = 0;
+                continue;
+            }
+            {
+                vec3 oe = vec3_normalize(vec3_cross(up, d_s));
+                emit_ring(b, prof, prof_n, sp, path[i], oe, oe, up, scale, arc, &cur);
+                stitch(b, &prev, &cur, prof_n);
+                if (cap1)
+                    cap_emit(b, prof, prof_n, path[i], oe, up, scale, d_s, 0);
+            }
         } else {                                   /* an interior joint */
             vec3  d_n = vec3_normalize(vec3_sub(path[i + 1], path[i]));
             float c   = vec3_dot(d_s, d_n);
@@ -1579,6 +1617,8 @@ static void stone_course(MeshBuilder *b, const ChurchPlan *p) {
 
 static void stone_vaults(MeshBuilder *b, const ChurchPlan *p);  /* item 5,
                                        defined below in reading order */
+static void church_windows(MeshBuilder *stone, MeshBuilder *glass,
+                           const ChurchPlan *p);            /* item 6 */
 
 void church_stone(MeshBuilder *b, const float *params, int count) {
     ChurchPlan plan;
@@ -1666,6 +1706,9 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
     }
 
     stone_vaults(b, p);             /* part 2: the crown of the system */
+    church_windows(b, (MeshBuilder *)0, p);   /* item 6: the bars are
+                                                 masonry; the glass is
+                                                 church_glass's */
     stone_course(b, p);
 
     {   /* parapets: aisle walls full length, facade and flat east
@@ -2096,4 +2139,379 @@ static void stone_vaults(MeshBuilder *b, const ChurchPlan *p) {
             }
         }
     }
+}
+
+/* ================== item 6: windows & tracery ==================
+   The GEOMETRIC grammar: circles and pointed sub-arches only — every
+   element compass-constructible from what is already there, which is
+   why this is the most algorithmic period in architectural history,
+   and why it is v1. */
+
+/* internal tangency to the main arch's intrados pins cy for a centered
+   foil of radius rf; defined when the foil fits under the crown */
+static int foil_cy_main(float c_m, float r_m, float spring, float cx,
+                        float rf, float *cy) {
+    float rr = r_m - rf;
+    float dx = cx - (cx < 0.0f ? c_m : -c_m);   /* the arc on this side */
+    float q  = rr * rr - dx * dx;
+    if (q <= 0.0f) return 0;
+    *cy = spring + sqrtf(q);
+    return 1;
+}
+
+/* the centered foil: internal to the main arcs (symmetric), external
+   to the two nearest sub-arch arcs — one unknown after the main pins
+   cy(rf); the residual is monotone, bisection is exact enough for the
+   5 mm law and deterministic (the brief's own permission) */
+static int foil_center(float c_m, float r_m, float sub_cx, float c_s,
+                       float r_s, float spring, float *out_y, float *out_r) {
+    float lo = 0.03f, hi = 0.45f * r_m, cy = 0.0f;
+    float tx = sub_cx - c_s;            /* the sub-arch's inner arc center */
+    int   it;
+    for (it = 0; it < 36; it++) {
+        float rf = 0.5f * (lo + hi);
+        float dx, dy, res;
+        if (!foil_cy_main(c_m, r_m, spring, 0.0f, rf, &cy)) { hi = rf; continue; }
+        dx = 0.0f - tx; dy = cy - spring;
+        res = sqrtf(dx * dx + dy * dy) - (r_s + rf);
+        if (res > 0.0f) lo = rf; else hi = rf;
+    }
+    if (lo < 0.05f) return 0;
+    if (!foil_cy_main(c_m, r_m, spring, 0.0f, lo, &cy)) return 0;
+    *out_y = cy;
+    *out_r = lo;
+    return 1;
+}
+
+/* the off-center foil (n = 4's outer spandrels): cx joins the unknowns
+   — nested bisection, the inner solving rf for left-sub tangency at a
+   given cx, the outer balancing the right-sub residual */
+static int foil_outer(float c_m, float r_m, float t0x, float t1x,
+                      float c_s_unused, float r_s, float spring, float mx,
+                      float half_range, float *ox, float *oy, float *orr) {
+    float clo = mx - 1.3f * half_range, chi = mx + 1.3f * half_range;
+    float cy = 0.0f, rf = 0.0f;
+    int   oit, iit;
+    (void)c_s_unused;
+    for (oit = 0; oit < 30; oit++) {
+        float cx = 0.5f * (clo + chi);
+        float lo = 0.03f, hi = 0.9f * r_m;   /* generous: the main-arc
+                                  constraint self-limits via foil_cy_main */
+        float dx, dy, res1;
+        for (iit = 0; iit < 30; iit++) {
+            float rt = 0.5f * (lo + hi);
+            float r0;
+            if (!foil_cy_main(c_m, r_m, spring, cx, rt, &cy)) { hi = rt; continue; }
+            dx = cx - t0x; dy = cy - spring;
+            r0 = sqrtf(dx * dx + dy * dy) - (r_s + rt);
+            if (r0 > 0.0f) lo = rt; else hi = rt;
+        }
+        rf = lo;
+        if (!foil_cy_main(c_m, r_m, spring, cx, rf, &cy)) return 0;
+        dx = cx - t1x; dy = cy - spring;
+        res1 = sqrtf(dx * dx + dy * dy) - (r_s + rf);
+        if (res1 > 0.0f) clo = cx; else chi = cx;
+    }
+    if (rf < 0.045f) return 0;
+    *ox = clo; *oy = cy; *orr = rf;
+    return 1;
+}
+
+int gothic_tracery(const GothicOpening *o, float divisor, GothicTracery *t) {
+    float s, c_m, r_m, c_s, r_s, pl;
+    int   n;
+    if (!o || !t || o->kind != GOTHIC_OPEN_WINDOW) return 0;
+    memset(t, 0, sizeof *t);
+    s = o->w;
+    if (s < 0.35f || divisor < 0.3f) return 0;
+    n = (int)(s / divisor + 0.5f);
+    if (n < 1) n = 1;
+    if (n > 4) n = 4;
+    t->n_lights  = n;
+    t->pitch     = s / (float)n;
+    t->sub_span  = t->pitch - (n > 1 ? 1.5f * 0.16f * 0.55f : 0.0f);
+    t->sub_acute = o->acute;
+    if (n == 1) { t->sub_span = t->pitch; return 1; }
+
+    arch_cr(s, o->acute, &c_m, &r_m);
+    pl = t->pitch;
+    arch_cr(t->sub_span, o->acute, &c_s, &r_s);
+
+    {   /* the center foil: n=2 between the pair, n=3 over the middle
+           light, n=4 over the center pair — one symmetric solve */
+        float sub_cx = (n == 3) ? 0.0f : -0.5f * pl;
+        float fy, fr;
+        if (foil_center(c_m, r_m, sub_cx, c_s, r_s, o->spring, &fy, &fr)) {
+            t->foil_x[t->n_foils] = 0.0f;
+            t->foil_y[t->n_foils] = fy;
+            t->foil_r[t->n_foils] = fr;
+            t->n_foils++;
+        }
+    }
+    if (n == 4) {   /* small foils in the outer spandrels */
+        float mx = -0.5f * s + pl;        /* the outer-left mullion line */
+        float t0x = (mx - 0.5f * pl) - c_s;   /* left light's inner arc  */
+        float t1x = (mx + 0.5f * pl) + c_s;   /* center-left's outer arc */
+        float fx, fy, fr;
+        if (foil_outer(c_m, r_m, t0x, t1x, c_s, r_s, o->spring, mx,
+                       0.35f * pl, &fx, &fy, &fr)) {
+            t->foil_x[t->n_foils] = fx;
+            t->foil_y[t->n_foils] = fy;
+            t->foil_r[t->n_foils] = fr;
+            t->n_foils++;
+            t->foil_x[t->n_foils] = -fx;      /* mirrored               */
+            t->foil_y[t->n_foils] = fy;
+            t->foil_r[t->n_foils] = fr;
+            t->n_foils++;
+        }
+    }
+    return 1;
+}
+
+/* a bigger earclip for the glass polygons (the cap version is sized
+   for profiles; a traceried light's boundary runs longer) */
+#define GLASS_MAX_PTS 28
+static int glass_earclip(const float *px, const float *py, int m, int *tris) {
+    int idx[GLASS_MAX_PTS];
+    int k, j, nt = 0;
+    for (k = 0; k < m; k++) idx[k] = k;
+    while (m > 3) {
+        /* the BEST ear, not the first: lowest-index clipping carves
+           long slivers from elongated panels; score = fatness
+           (area over squared perimeter), ties to the lower index —
+           still fully deterministic */
+        int   best = -1;
+        float best_score = -1.0f;
+        for (k = 0; k < m; k++) {
+            int ia = idx[(k + m - 1) % m], ib = idx[k], ic = idx[(k + 1) % m];
+            float ex0 = px[ib] - px[ia], ey0 = py[ib] - py[ia];
+            float ex1 = px[ic] - px[ib], ey1 = py[ic] - py[ib];
+            float ex2 = px[ia] - px[ic], ey2 = py[ia] - py[ic];
+            float cr = ex0 * (py[ic] - py[ia]) - ey0 * (px[ic] - px[ia]);
+            float per, score;
+            int   blocked = 0;
+            if (cr <= 1e-9f) continue;
+            for (j = 0; j < m; j++) {
+                float d1, d2, d3;
+                int ip = idx[j];
+                if (ip == ia || ip == ib || ip == ic) continue;
+                d1 = ex0 * (py[ip] - py[ia]) - ey0 * (px[ip] - px[ia]);
+                d2 = ex1 * (py[ip] - py[ib]) - ey1 * (px[ip] - px[ib]);
+                d3 = ex2 * (py[ip] - py[ic]) - ey2 * (px[ip] - px[ic]);
+                if (d1 > -1e-9f && d2 > -1e-9f && d3 > -1e-9f) { blocked = 1; break; }
+            }
+            if (blocked) continue;
+            per = ex0 * ex0 + ey0 * ey0 + ex1 * ex1 + ey1 * ey1
+                + ex2 * ex2 + ey2 * ey2;
+            score = per > 1e-12f ? cr / per : 0.0f;
+            if (score > best_score + 1e-9f) { best_score = score; best = k; }
+        }
+        if (best < 0) return nt;
+        k = best;
+        {
+            int ia = idx[(k + m - 1) % m], ib = idx[k], ic = idx[(k + 1) % m];
+            tris[nt * 3] = ia; tris[nt * 3 + 1] = ib; tris[nt * 3 + 2] = ic;
+            nt++;
+            for (j = k; j + 1 < m; j++) idx[j] = idx[j + 1];
+            m--;
+        }
+    }
+    tris[nt * 3] = idx[0]; tris[nt * 3 + 1] = idx[1]; tris[nt * 3 + 2] = idx[2];
+    return nt + 1;
+}
+
+/* one glass panel: a flat polygon in window-local (x, y), emitted
+   double-sided 3 mm apart (coincident sides are their own z-fight) */
+static void glass_panel(MeshBuilder *g, const float *px, const float *py,
+                        int m) {
+    int  tris[(GLASS_MAX_PTS - 2) * 3];
+    int  nt, k, side;
+    if (!g || m < 3 || m > GLASS_MAX_PTS) return;
+    nt = glass_earclip(px, py, m, tris);
+    for (side = 0; side < 2; side++) {
+        float z = side ? 0.003f : -0.003f;
+        float nz = side ? 1.0f : -1.0f;
+        for (k = 0; k < nt; k++) {
+            int a = tris[k * 3], bb = tris[k * 3 + 1], cc = tris[k * 3 + 2];
+            sol_u32 i0 = mb_push_vertex(g, px[a], py[a], z, 0, 0, nz, px[a], py[a]);
+            sol_u32 i1, i2;
+            if (side) {
+                i1 = mb_push_vertex(g, px[bb], py[bb], z, 0, 0, nz, px[bb], py[bb]);
+                i2 = mb_push_vertex(g, px[cc], py[cc], z, 0, 0, nz, px[cc], py[cc]);
+            } else {
+                i1 = mb_push_vertex(g, px[cc], py[cc], z, 0, 0, nz, px[cc], py[cc]);
+                i2 = mb_push_vertex(g, px[bb], py[bb], z, 0, 0, nz, px[bb], py[bb]);
+            }
+            mb_push_triangle(g, i0, i1, i2);
+        }
+    }
+}
+
+/* dress ONE window: bars into `stone`, panels into `glass` (either may
+   be NULL — church_stone and church_glass call the SAME walker, §1.2),
+   all in window-local coords, then placed by the wall's own frame */
+#define TR_BAR_SCALE 0.55f
+static void emit_tracery(MeshBuilder *stone, MeshBuilder *glass,
+                         const GothicOpening *o, float divisor,
+                         float c, float s_, float tx, float tz) {
+    GothicTracery t;
+    vec3   path[GOTHIC_ARCH_MAX_PTS];
+    int    pn_n, i, n;
+    const ProfilePt *bar = gothic_profile(PROF_MULLION, &pn_n);
+    sol_u32 v0s = stone ? stone->vertex_count : 0;
+    sol_u32 v0g = glass ? glass->vertex_count : 0;
+
+    if (!gothic_tracery(o, divisor, &t)) return;
+
+    if (stone && t.n_lights > 1) {
+        for (i = 1; i < t.n_lights; i++) {       /* the mullions */
+            float mx = -0.5f * o->w + (float)i * t.pitch;
+            path[0] = vec3_make(mx, o->sill + 0.004f, 0.0f);
+            path[1] = vec3_make(mx, o->spring, 0.0f);
+            gothic_sweep(stone, bar, pn_n, path, 2,
+                         vec3_make(0.0f, 0.0f, 1.0f), TR_BAR_SCALE, 1, 0);
+        }
+        for (i = 0; i < t.n_lights; i++) {       /* the sub-arch heads */
+            float lc = -0.5f * o->w + ((float)i + 0.5f) * t.pitch;
+            int   j;
+            n = gothic_arch_path(path, GOTHIC_ARCH_MAX_PTS, t.sub_span,
+                                 t.sub_acute, GOTHIC_MAX_SEG);
+            for (j = 0; j < n; j++) {
+                path[j].x += lc;
+                path[j].y += o->spring;
+            }
+            if (i == 0)              path[0].x     += 0.004f;  /* off the jamb */
+            if (i == t.n_lights - 1) path[n - 1].x -= 0.004f;
+            gothic_sweep(stone, bar, pn_n, path, n,
+                         vec3_make(0.0f, 0.0f, 1.0f), TR_BAR_SCALE,
+                         i == 0, i == t.n_lights - 1);
+        }
+        for (i = 0; i < t.n_foils; i++) {        /* the foiled circles */
+            int   nc = gothic_arc_segments(2.0f * SOL_PI * t.foil_r[i],
+                                           2.0f * SOL_PI);
+            int   j;
+            if (nc < 12) nc = 12;
+            if (nc > 24) nc = 24;
+            for (j = 0; j <= nc; j++) {
+                float th = 2.0f * SOL_PI * (float)j / (float)nc;
+                path[j] = vec3_make(t.foil_x[i] + t.foil_r[i] * sinf(th),
+                                    t.foil_y[i] + t.foil_r[i] * cosf(th),
+                                    0.0f);
+            }
+            path[nc] = path[0];                  /* closed: bit-equal seam */
+            /* slimmer than the bars it kisses, and STAGGERED per foil:
+               at a tangency the bodies interpenetrate (real tracery
+               MERGES there) — equal scales would lay face on face, so
+               every kissing pair differs by a step */
+            gothic_sweep(stone, bar, pn_n, path, nc + 1,
+                         vec3_make(0.0f, 0.0f, 1.0f),
+                         TR_BAR_SCALE * (0.88f - 0.11f * (float)i),
+                         0, 0);
+        }
+    }
+
+    if (glass) {
+        float px[GLASS_MAX_PTS], py[GLASS_MAX_PTS];
+        for (i = 0; i < t.n_lights; i++) {       /* one panel per light */
+            float x0 = -0.5f * o->w + (float)i * t.pitch;
+            float lc = x0 + 0.5f * t.pitch;
+            int   m = 0, j;
+            px[m] = x0;            py[m] = o->sill; m++;
+            px[m] = x0 + t.pitch;  py[m] = o->sill; m++;
+            px[m] = x0 + t.pitch;  py[m] = o->spring; m++;
+            for (j = 7; j >= 1; j--) {           /* the head, coarse —
+                                                    it tucks under the bar */
+                float xx = x0 + t.pitch * (float)j / 8.0f;
+                px[m] = xx;
+                py[m] = o->spring + gothic_arch_y(t.sub_span, t.sub_acute, xx - lc);
+                m++;
+            }
+            px[m] = x0; py[m] = o->spring; m++;
+            glass_panel(glass, px, py, m);
+        }
+        for (i = 0; i < t.n_foils; i++) {        /* one disc per foil */
+            int m = 12, j;
+            for (j = 0; j < m; j++) {
+                float th = 2.0f * SOL_PI * (float)j / (float)m;
+                px[j] = t.foil_x[i] + t.foil_r[i] * sinf(-th);
+                py[j] = t.foil_y[i] + t.foil_r[i] * cosf(th);
+            }
+            glass_panel(glass, px, py, m);
+        }
+    }
+
+    if (stone) mb_transform_from(stone, v0s, c, s_, tx, 0.0f, tz);
+    if (glass) mb_transform_from(glass, v0g, c, s_, tx, 0.0f, tz);
+}
+
+/* the window walk — the SAME windows, the SAME frames as the wall
+   emitters; bars land in church_stone, panels in church_glass */
+static void church_windows(MeshBuilder *stone, MeshBuilder *glass,
+                           const ChurchPlan *p) {
+    float divisor = 0.7f * (0.9f + 0.2f *
+                    gothic_hash01(p->seed, LANE_TRACERY, 0, 0));
+    float wt   = p->wall_t;
+    float hwid = 0.5f * p->nave_w + p->aisle_w;
+    GothicOpening o;
+    int   i;
+
+    for (i = 0; i < p->nbays; i++) {
+        plan_opening(p, WALL_AISLE_S, i, &o);
+        if (o.kind == GOTHIC_OPEN_WINDOW)
+            emit_tracery(stone, glass, &o, divisor, 1.0f, 0.0f,
+                         o.cx, -(hwid + 0.5f * wt));
+        plan_opening(p, WALL_AISLE_N, i, &o);
+        if (o.kind == GOTHIC_OPEN_WINDOW)
+            emit_tracery(stone, glass, &o, divisor, 1.0f, 0.0f,
+                         o.cx, hwid + 0.5f * wt);
+        if (p->style == CHURCH_BASILICA) {
+            plan_opening(p, WALL_CLEREST_S, i, &o);
+            if (o.kind == GOTHIC_OPEN_WINDOW)
+                emit_tracery(stone, glass, &o, divisor, 1.0f, 0.0f,
+                             o.cx, -0.5f * p->nave_w);
+            plan_opening(p, WALL_CLEREST_N, i, &o);
+            if (o.kind == GOTHIC_OPEN_WINDOW)
+                emit_tracery(stone, glass, &o, divisor, 1.0f, 0.0f,
+                             o.cx, 0.5f * p->nave_w);
+        }
+    }
+    plan_opening(p, WALL_WEST, 1, &o);           /* the great window */
+    if (o.kind == GOTHIC_OPEN_WINDOW)
+        emit_tracery(stone, glass, &o, divisor, 0.0f, -1.0f,
+                     p->west_x - 0.5f * wt, 0.0f);
+    plan_opening(p, WALL_EAST, 0, &o);
+    if (o.kind == GOTHIC_OPEN_WINDOW)
+        emit_tracery(stone, glass, &o, divisor, 0.0f, 1.0f,
+                     p->east_x + 0.5f * wt, 0.0f);
+    if (p->apse_sides == 5) {
+        float rap   = 0.4f > 0.7f * wt ? 0.4f : 0.7f * wt;
+        float inset = 0.83f * rap;
+        int   k;
+        for (k = 0; k < 5; k++) {                /* mirror stone_east */
+            float ax, az, bx, bz, mx, mz, dx, dz, nl, nx, nz, len;
+            plan_apse_pier(p, k,     &ax, &az);
+            plan_apse_pier(p, k + 1, &bx, &bz);
+            mx = 0.5f * (ax + bx); mz = 0.5f * (az + bz);
+            dx = bx - ax; dz = bz - az;
+            nl = sqrtf(dx * dx + dz * dz);
+            len = nl - 2.0f * inset;
+            if (len < 0.5f || nl < 1e-6f) continue;
+            nx = dz / nl; nz = -dx / nl;
+            plan_opening(p, WALL_APSE, k, &o);
+            if (o.kind == GOTHIC_OPEN_WINDOW && o.w > len - 0.6f) {
+                o.w = len - 0.6f;
+                if (o.w < 0.3f) continue;
+            }
+            if (o.kind == GOTHIC_OPEN_WINDOW)
+                emit_tracery(stone, glass, &o, divisor, nz, nx,
+                             mx + nx * 0.5f * wt, mz + nz * 0.5f * wt);
+        }
+    }
+}
+
+void church_glass(MeshBuilder *b, const float *params, int count) {
+    ChurchPlan plan;
+    if (!b) return;
+    church_plan(&plan, params, count);
+    church_windows((MeshBuilder *)0, b, &plan);
 }
