@@ -1,0 +1,72 @@
+/* flora.h — the living island's plans (P7 item 2). tree_plan is to a
+   tree what church_plan is to the church (§1.2, organism edition): a
+   pure, deterministic, allocation-bounded expansion of (species, seed,
+   age) into the BRANCH GRAPH — and everything else is a reader of it:
+   the wood emitter sweeps its segments (item 3), the canopy instances
+   its tips (item 4), the collider boxes its trunk, the wind sways what
+   it lists. Same seed, same tree, forever.
+
+   Pure CPU, strict C89, headless-testable; no rhi/scene includes. */
+#ifndef FLORA_H
+#define FLORA_H
+
+#include "sol_types.h"   /* vec3 */
+
+#define FLORA_PARAMS  16     /* one shared knob vector (species = presets) */
+#define FLORA_MAX_SEG 256    /* the arena cap: a budget enforced, not hoped */
+#define FLORA_MAX_GENS 7
+
+/* species are PRESETS over the one schema (the synth lesson, fourth
+   verse): a shrub is a species whose trunk knobs shrink, not new code */
+enum { FLORA_OAK = 0, FLORA_PINE, FLORA_BIRCH, FLORA_CYPRESS,
+       FLORA_SPECIES_COUNT };
+
+/* lanes — APPEND-ONLY (the gothic law). Keys are (node_id, ordinal):
+   node identity, never a sequential stream, so adding a knob can never
+   reshuffle an existing tree — and the AGE LAW holds (a sapling's
+   topology is a PREFIX of the elder tree's, same seed). */
+enum {
+    LANE_FLORA_SPLIT = 0,   /* fork count jitter                  */
+    LANE_FLORA_AZIMUTH,     /* azimuth jitter about the golden angle */
+    LANE_FLORA_LENGTH,      /* segment length jitter              */
+    LANE_FLORA_PITCH,       /* spread angle jitter                */
+    LANE_FLORA_LEAN,        /* the whole tree's lean              */
+    LANE_FLORA_COUNT
+};
+
+/* flora owns its hash twin: no other module's change may regrow a wood */
+float flora_hash01(unsigned seed, int lane, int i, int j);
+
+int         flora_species(const char *name);        /* -1 unknown */
+const char *flora_species_name(int species);        /* NULL out of range */
+
+/* The knob schema: names shared across species, defaults per species.
+   {seed, age, height, girth, apical, splits, spread, droop, twist,
+    taper, decay, gens, jitter, leaf_size, leaf_density, reserved}
+   — leaf knobs are item 4's, reserved now so the schema never grows.
+   Returns FLORA_PARAMS, or -1 for an unknown species. */
+int flora_schema(int species, const char *const **names,
+                 const float **defaults);
+
+/* One branch segment. Radii obey DA VINCI'S RULE by construction: at
+   every fork the children's cross-sections sum to the parent's end
+   cross-section (the leader takes the apical share, laterals split the
+   rest) — radii are DERIVED, never authored. tip marks twig ends (the
+   canopy's seats). Base local space, y up, trunk base at the origin. */
+typedef struct {
+    vec3          p0, p1;
+    float         r0, r1;
+    short         parent;       /* segment index; -1 = the root */
+    unsigned char depth;        /* generation                   */
+    unsigned char tip;
+} FloraSeg;
+
+/* The plan. params is a PREFIX over the species defaults (the mesh-ref
+   rule; seed and age ride the vector as knobs 0 and 1). Fills out (at
+   most max_seg segments, BFS generation order — the cap truncates the
+   YOUNGEST growth first and never orphans a child) and returns the
+   count. 0 on a bad species or arena. */
+int flora_tree_plan(int species, const float *params, int count,
+                    FloraSeg *out, int max_seg);
+
+#endif /* FLORA_H */

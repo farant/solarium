@@ -13,7 +13,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c skel.c json.c glb.c
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c gothic.c sweep.c flora.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c skel.c json.c glb.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     exit 0
 fi
@@ -160,6 +160,18 @@ if [ "$MODE" = "jsontest" ]; then
         json.c json_test.c \
         -o json_test
     echo "built ./json_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
+# Build + run the headless branch-graph test under the sanitizers (P7
+# item 2, 15th suite). tree_plan is pure arithmetic — libc + sol_math.
+if [ "$MODE" = "floratest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        flora.c sol_math.c flora_test.c \
+        -o flora_test
+    echo "built ./flora_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
 
