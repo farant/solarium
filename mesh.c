@@ -765,6 +765,12 @@ static void emit_church_stone(MeshBuilder *b, const float *p) {
 static void emit_church_glass(MeshBuilder *b, const float *p) {
     church_glass(b, p, MESH_REF_MAX_PARAMS);
 }
+static void emit_church_roof(MeshBuilder *b, const float *p) {
+    church_roof(b, p, MESH_REF_MAX_PARAMS);
+}
+static void emit_pinnacle(MeshBuilder *b, const float *p) {
+    gothic_pinnacle(b, p[0], (unsigned)(p[1] + 0.5f));
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -818,7 +824,12 @@ static const MeshRefEntry REGISTRY[] = {
       { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_stone },
     { "church_glass", 8,
       { "w", "d", "seed", "style", "ruin", "built", "acute", "reserved" },
-      { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_glass }
+      { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_glass },
+    { "church_roof", 8,
+      { "w", "d", "seed", "style", "ruin", "built", "acute", "reserved" },
+      { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_roof },
+    /* the standalone pinnacle (P6 item 7; item 10 instances it) */
+    { "pinnacle", 2, { "h", "seed" }, { 1.8f, 7.0f }, emit_pinnacle }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 

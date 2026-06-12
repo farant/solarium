@@ -283,4 +283,26 @@ int gothic_tracery(const GothicOpening *o, float divisor, GothicTracery *t);
    schema as church_stone, same plan, same windows. */
 void church_glass(MeshBuilder *b, const float *params, int count);
 
+/* ---- item 7: roof, tower & spire — the silhouette ----
+   Everything above the parapet. The roof is its SKIN (no trusses):
+   the hall's single great roof vs the basilica's stepped section is
+   the style scalar made visible at two hundred meters. Roofs sit
+   BEHIND the parapets (the parapet-gutter arrangement — eaves never
+   fight the item-4 parapets). The spire crosses square to octagon by
+   BROACHES: ad quadratum's third appearance, foundation to spire-tip.
+   Same schema, the group's THIRD member. */
+void church_roof(MeshBuilder *b, const float *params, int count);
+
+/* the spire alone (also item 10 vocabulary): an octagonal pyramid
+   over a square head, broached at the corners; the diagonal faces are
+   SPLIT at the broach points so the assembly is edge-manifold — every
+   edge shared by exactly two triangles except the base perimeter
+   (asserted in gothictest). broach_f = the ridge's height fraction. */
+void gothic_spire(MeshBuilder *b, float cx, float cz, float half,
+                  float base_y, float apex_h, float broach_f);
+
+/* a pinnacle: Roriczer simplified — square shaft, four gablets, a
+   slender pyramid, a finial knob. Stands on its local origin. */
+void gothic_pinnacle(MeshBuilder *b, float h, unsigned seed);
+
 #endif /* GOTHIC_H */

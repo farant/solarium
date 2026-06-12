@@ -791,6 +791,74 @@ static void test_tracery(void) {
     det_check("church_glass", (const float *)0, 0, 0.99f);
 }
 
+/* ---- 14: item 7 — the silhouette ---- */
+static void test_spire_manifold(void) {
+    /* the broach assembly is EDGE-MANIFOLD: every positional edge is
+       shared by exactly two triangles, except the base perimeter */
+    MeshBuilder b;
+    sol_u32 t, k, t2, k2;
+    mb_init(&b);
+    gothic_spire(&b, 0.0f, 0.0f, 1.0f, 5.0f, 2.6f, 0.34f);
+    if (b.index_count == 0) { fail("spire: emitted nothing"); mb_free(&b); return; }
+    for (t = 0; t < b.index_count / 3; t++)
+        for (k = 0; k < 3; k++) {
+            vec3 p = vpos(&b, b.indices[t * 3 + k]);
+            vec3 q = vpos(&b, b.indices[t * 3 + (k + 1) % 3]);
+            int uses = 0;
+            if (p.y < 5.0f + 1e-4f && q.y < 5.0f + 1e-4f)
+                continue;                          /* base perimeter */
+            for (t2 = 0; t2 < b.index_count / 3; t2++)
+                for (k2 = 0; k2 < 3; k2++) {
+                    vec3 a = vpos(&b, b.indices[t2 * 3 + k2]);
+                    vec3 c = vpos(&b, b.indices[t2 * 3 + (k2 + 1) % 3]);
+                    if ((near3(a, p.x, p.y, p.z, 1e-5f) && near3(c, q.x, q.y, q.z, 1e-5f)) ||
+                        (near3(a, q.x, q.y, q.z, 1e-5f) && near3(c, p.x, p.y, p.z, 1e-5f)))
+                        uses++;
+                }
+            if (uses != 2) {
+                printf("FAIL: spire: edge (%.2f %.2f %.2f)-(%.2f %.2f %.2f) used %d times\n",
+                       p.x, p.y, p.z, q.x, q.y, q.z, uses);
+                g_fail = 1; mb_free(&b); return;
+            }
+        }
+    check_consistency(&b, 0.99f, "spire");
+    mb_free(&b);
+}
+
+static void test_roof(void) {
+    const char *const *names; const float *defs;
+    int n = mesh_ref_schema("church_roof", &names, &defs);
+    if (n != 8 || memcmp(defs, gothic_church_defaults, 8 * sizeof(float)) != 0)
+        fail("church_roof: registry defaults drifted from the plan's");
+    det_check("church_roof", (const float *)0, 0, 0.9f);
+    det_check("pinnacle", (const float *)0, 0, 0.5f);
+    {   /* the style proof: the hall's one great roof is WIDER than the
+           basilica's nave gable — the stepped section made measurable */
+        float ph[8] = { 18, 30, 7, 1, 0, 1, 1, 0 };
+        float pb[8] = { 18, 30, 7, 2, 0, 1, 1, 0 };
+        MeshBuilder h, bb;
+        float zh = 0.0f, zb = 0.0f;
+        sol_u32 i;
+        mb_init(&h); mb_init(&bb);
+        church_roof(&h, ph, 8);
+        church_roof(&bb, pb, 8);
+        for (i = 0; i < h.vertex_count; i++)
+            if (fabsf(h.vertices[i * 12 + 2]) > zh)
+                zh = fabsf(h.vertices[i * 12 + 2]);
+        /* the basilica's NAVE gable: ridge-adjacent slopes only — take
+           max z of vertices ABOVE the aisle roofs' reach instead */
+        for (i = 0; i < bb.vertex_count; i++)
+            if (bb.vertices[i * 12 + 1] > 11.0f &&
+                fabsf(bb.vertices[i * 12 + 2]) > zb)
+                zb = fabsf(bb.vertices[i * 12 + 2]);
+        if (zh < zb + 1.0f)
+            fail("roof: the hall's great roof should out-span the basilica's nave gable");
+        if (h.index_count == 0 || bb.index_count == 0)
+            fail("roof: a style emitted nothing");
+        mb_free(&h); mb_free(&bb);
+    }
+}
+
 int main(void) {
     test_square_is_box();
     test_miter();
@@ -805,6 +873,8 @@ int main(void) {
     test_plan();
     test_church_stone();
     test_tracery();
+    test_spire_manifold();
+    test_roof();
     if (g_fail) { printf("gothic_test: FAILED\n"); return 1; }
     printf("gothic_test: OK\n");
     return 0;

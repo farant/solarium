@@ -552,6 +552,10 @@ static void ladder_strip(MeshBuilder *b, float ox0, float oy0, float ox1,
 #define WF_NO_SILL   8   /* the threshold/sill ledge: a plinth or floor
                             below already claims that plane */
 
+static void tri3(MeshBuilder *b, vec3 a, vec3 c, vec3 d);   /* item 7,
+                                       defined below in reading order */
+static void quad3(MeshBuilder *b, vec3 a, vec3 c, vec3 d, vec3 e);
+
 /* the shared core: N recessed orders, widest at the FRONT (+z) face,
    sharing center cx, springing height and acuteness. Around the gap,
    slab by slab: each order owns its sub-thickness's jamb reveals,
@@ -1138,9 +1142,11 @@ static void place_arch(MeshBuilder *b, float span, float hloc, float t,
    WEATHERING slope (two sloped quads' worth: one quad + side
    triangles) — exposed faces only, the back never emitted. */
 static void buttress(MeshBuilder *b, float h_head, float bw, float d0,
-                     int stages, float c, float s, float tx, float tz) {
+                     int stages, float wall_head, float c, float s,
+                     float tx, float tz) {
     sol_u32 v0 = b->vertex_count;
     float hx = 0.5f * bw;
+    float y_peak = 0.0f;
     float fr2[2]; float fr3[3]; const float *fr;
     float y0 = 0.0f, dk = d0;
     int k;
@@ -1170,20 +1176,38 @@ static void buttress(MeshBuilder *b, float h_head, float bw, float d0,
             mb_push_triangle(b, ia, ib, ic);
             mb_push_triangle(b, ia, ic, id);
         }
-        {   /* side triangles under the slope */
-            sol_u32 t0, t1, t2;
+        {   /* the side closure: the FULL trapezoid from the slope line
+               back to the wall — the old wedge triangle stopped at the
+               next stage's front plane and left the band behind it
+               open (Fran's punch list, error6). Degenerates to the
+               triangle on the top stage, where dn = 0. */
+            sol_u32 t0, t1, t2, t3;
             t0 = mb_push_vertex(b, -hx, y1, -dk, -1.0f, 0.0f, 0.0f, -dk, y1);
-            t1 = mb_push_vertex(b, -hx, y1, -dn, -1.0f, 0.0f, 0.0f, -dn, y1);
-            t2 = mb_push_vertex(b, -hx, y1 + rise, -dn, -1.0f, 0.0f, 0.0f, -dn, y1 + rise);
+            t1 = mb_push_vertex(b, -hx, y1, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, y1);
+            t2 = mb_push_vertex(b, -hx, y1 + rise, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, y1 + rise);
             mb_push_triangle(b, t0, t1, t2);
+            if (dn > 1e-5f) {
+                t3 = mb_push_vertex(b, -hx, y1 + rise, -dn, -1.0f, 0.0f, 0.0f, -dn, y1 + rise);
+                mb_push_triangle(b, t0, t2, t3);
+            }
             t0 = mb_push_vertex(b, hx, y1, -dk, 1.0f, 0.0f, 0.0f, -dk, y1);
-            t1 = mb_push_vertex(b, hx, y1 + rise, -dn, 1.0f, 0.0f, 0.0f, -dn, y1 + rise);
-            t2 = mb_push_vertex(b, hx, y1, -dn, 1.0f, 0.0f, 0.0f, -dn, y1);
+            t1 = mb_push_vertex(b, hx, y1 + rise, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, y1 + rise);
+            t2 = mb_push_vertex(b, hx, y1, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, y1);
             mb_push_triangle(b, t0, t1, t2);
+            if (dn > 1e-5f) {
+                t3 = mb_push_vertex(b, hx, y1 + rise, -dn, 1.0f, 0.0f, 0.0f, -dn, y1 + rise);
+                mb_push_triangle(b, t0, t3, t1);
+            }
         }
         y0 = y1 + rise;
         dk = dn;
+        if (y0 > y_peak) y_peak = y0;
     }
+    /* the back face ABOVE the wall head: a back buried in its wall may
+       legally not exist — a back standing proud of it must (a raised
+       buttress without one is a window into the hollow interior) */
+    if (y_peak > wall_head + 0.02f)
+        gz_face(b, -hx, hx, wall_head - 0.05f, y_peak, -0.01f, 1);
     mb_transform_from(b, v0, c, s, tx, 0.0f, tz);
 }
 
@@ -1364,9 +1388,23 @@ static void stone_facade(MeshBuilder *b, const ChurchPlan *p) {
     GothicOpening door, win;
     float h_split;
 
-    plan_opening(p, WALL_WEST, 0, &door);
-    plan_opening(p, WALL_WEST, 1, &win);
-    h_split = door.spring + gothic_arch_y(door.w, door.acute, 0.0f) + 0.3f;
+    {   /* the split must clear the WIDEST order's crown, not the
+           door's — three stepped orders crown half a meter above it,
+           and the crown-above-top guard silently refused the whole
+           portal wall on basilicas (Fran's punch list, error9) */
+        int ords0 = p->style == CHURCH_BASILICA ? 3 :
+                    p->style == CHURCH_HALL ? 2 : 1;
+        float wide;
+        plan_opening(p, WALL_WEST, 0, &door);
+        plan_opening(p, WALL_WEST, 1, &win);
+        wide = door.w + 2.0f * 0.15f * (float)(ords0 - 1);
+        h_split = door.spring + gothic_arch_y(wide, door.acute, 0.0f) + 0.3f;
+        if (win.kind == GOTHIC_OPEN_WINDOW && win.sill < h_split + 0.15f) {
+            win.sill = h_split + 0.15f;
+            if (win.spring < win.sill + 0.3f) win.spring = win.sill + 0.3f;
+            opening_fit(&win, p->wall_h - 0.8f);
+        }
+    }
 
     {   /* the portal: recessed orders by style, archivolt-dressed.
            A chapel's facade ends abut the long walls' inner faces (no
@@ -1393,6 +1431,59 @@ static void stone_facade(MeshBuilder *b, const ChurchPlan *p) {
         place_piece(b, p->aisle_w, p->aisle_h - p->plinth_h, wt,
                     (const GothicOpening *)0, 0.0f, p->plinth_h,
                     WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, -1.0f, xc,  fz);
+    }
+    {   /* item 7: the LINTEL and TYMPANUM fill the innermost order's
+           head — the slab that has carried sculpture nine centuries;
+           ours takes the normal map and waits. Recessed from the back
+           face so nothing is coplanar. */
+        float zi0 = p->west_x - wt + 0.06f;        /* slab band (x)   */
+        float zi1 = zi0 + 0.16f;
+        float ly  = door.spring - 0.05f + p->plinth_h * 0.0f;
+        float hw2 = 0.5f * door.w;
+        /* the lintel: ends ABUT the jamb reveals (no end faces — the
+           audit's lesson, again) */
+        gy_face(b, zi0, zi1, ly - 0.22f, -hw2, hw2, -1);   /* underside */
+        gx_face(b, zi0, ly - 0.22f, ly, -hw2, hw2, -1);    /* west face */
+        gx_face(b, zi1, ly - 0.22f, ly, -hw2, hw2,  1);    /* east face */
+        {   /* the tympanum: the arch-head polygon as a thin slab */
+            vec3 hp[GOTHIC_ARCH_MAX_PTS];
+            int  hn = gothic_arch_path(hp, GOTHIC_ARCH_MAX_PTS, door.w,
+                                       door.acute, GOTHIC_MAX_SEG);
+            int  j;
+            for (j = 0; j + 1 < hn; j++) {
+                vec3 a0 = vec3_make(zi0, door.spring + hp[j].y,     -hp[j].x);
+                vec3 a1 = vec3_make(zi0, door.spring + hp[j + 1].y, -hp[j + 1].x);
+                vec3 b0 = vec3_make(zi0, ly, -hp[j].x);
+                vec3 b1 = vec3_make(zi0, ly, -hp[j + 1].x);
+                vec3 c0 = vec3_make(zi1, door.spring + hp[j].y,     -hp[j].x);
+                vec3 c1 = vec3_make(zi1, door.spring + hp[j + 1].y, -hp[j + 1].x);
+                vec3 d0 = vec3_make(zi1, ly, -hp[j].x);
+                vec3 d1 = vec3_make(zi1, ly, -hp[j + 1].x);
+                quad3(b, a1, a0, b0, b1);          /* west: the carved face */
+                quad3(b, c0, c1, d1, d0);          /* east face — the head
+                      strip is NOT emitted: the portal's own intrados
+                      already owns that surface (one author per plane) */
+            }
+        }
+    }
+    {   /* item 7: porch steps from the plan's west residue — risers a
+           STEP_UP treaty away from being climbable (item 9's colliders) */
+        float riser = 0.16f, tread = 0.34f;
+        int   nstep = (int)(p->plinth_h / riser);
+        float sw    = 0.5f * door.w + 0.7f;
+        int   k;
+        if (nstep > 0 && p->porch > tread * (float)nstep * 0.5f) {
+            for (k = 1; k <= nstep; k++) {
+                float top = p->plinth_h - riser * (float)k;
+                float xs0 = p->west_x - wt - tread * (float)k;
+                float xs1 = p->west_x - wt - tread * (float)(k - 1);
+                if (top <= 0.02f) break;
+                gy_face(b, xs0, xs1, top, -sw, sw, 1);
+                gx_face(b, xs0, 0.0f, top, -sw, sw, -1);
+                gz_face(b, xs0, xs1, 0.0f, top, -sw, -1);
+                gz_face(b, xs0, xs1, 0.0f, top,  sw,  1);
+            }
+        }
     }
 }
 
@@ -1461,9 +1552,13 @@ static void stone_east(MeshBuilder *b, const ChurchPlan *p) {
                 win.w = len - 0.6f;
                 if (win.w < 0.3f) win.kind = GOTHIC_OPEN_NONE;
             }
+            /* ends EMITTED: the trimmed slabs' corners poke past the
+               piers' octagonal cover, and suppressed ends read as
+               slits into the choir (Fran's punch list, error8) — the
+               capped end buries in the pier and surfaces as a reveal */
             place_piece(b, len, p->wall_h, wt,
                         win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
-                        0.0f, 0.0f, WF_NO_ENDS,
+                        0.0f, 0.0f, 0,
                         nz, nx, mx + nx * 0.5f * wt, mz + nz * 0.5f * wt);
         }
     }
@@ -1592,9 +1687,12 @@ static void stone_course(MeshBuilder *b, const ChurchPlan *p) {
         }
         if (p->apse_sides == 0) {
             pt[n++] = vec3_make(xe, y, hs * (hwid + wt)); /* east corner */
-            n = course_jog(pt, n, hs * (0.5f * p->nave_w + 0.5f * bw),
-                           hs * (0.5f * p->nave_w - 0.5f * bw),
-                           bd, y, 1, xe, 0);
+            if (p->aisles)        /* jog ONLY around a buttress that was
+                                     built — chapels have none here, and
+                                     a jog around nothing frames a hole */
+                n = course_jog(pt, n, hs * (0.5f * p->nave_w + 0.5f * bw),
+                               hs * (0.5f * p->nave_w - 0.5f * bw),
+                               bd, y, 1, xe, 0);
             if (n + 1 <= COURSE_MAX_PTS)
                 pt[n++] = vec3_make(xe, y, hs * 0.18f);   /* meet mid-east */
         } else {
@@ -1619,6 +1717,7 @@ static void stone_vaults(MeshBuilder *b, const ChurchPlan *p);  /* item 5,
                                        defined below in reading order */
 static void church_windows(MeshBuilder *stone, MeshBuilder *glass,
                            const ChurchPlan *p);            /* item 6 */
+static void stone_pinnacles(MeshBuilder *b, const ChurchPlan *p);
 
 void church_stone(MeshBuilder *b, const float *params, int count) {
     ChurchPlan plan;
@@ -1685,26 +1784,27 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
                                                : p->aisle_h;
         for (i = 1; i < p->nbays; i++) {
             float x = p->west_x + p->tower_d + (float)i * p->bay_l;
-            buttress(b, bh, bw, bd, st, 1.0f, 0.0f,
+            buttress(b, bh, bw, bd, st, p->aisle_h, 1.0f, 0.0f,
                      x, -(hwid + wt));   /* south: the body already
                                             extends -z; back on the face */
-            buttress(b, bh, bw, bd, st, -1.0f, 0.0f,
+            buttress(b, bh, bw, bd, st, p->aisle_h, -1.0f, 0.0f,
                      x, hwid + wt);      /* north: flipped 180 */
         }
         if (p->aisles) {
-            buttress(b, p->wall_h, bw, bd, st, 0.0f, 1.0f,
+            buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, 1.0f,
                      p->west_x - wt, -0.5f * p->nave_w);
-            buttress(b, p->wall_h, bw, bd, st, 0.0f, 1.0f,
+            buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, 1.0f,
                      p->west_x - wt, 0.5f * p->nave_w);
             if (p->apse_sides == 0) {
-                buttress(b, p->wall_h, bw, bd, st, 0.0f, -1.0f,
+                buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, -1.0f,
                          p->east_x + wt, -0.5f * p->nave_w);
-                buttress(b, p->wall_h, bw, bd, st, 0.0f, -1.0f,
+                buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, -1.0f,
                          p->east_x + wt, 0.5f * p->nave_w);
             }
         }
     }
 
+    stone_pinnacles(b, p);          /* item 7: every buttress crowned */
     stone_vaults(b, p);             /* part 2: the crown of the system */
     church_windows(b, (MeshBuilder *)0, p);   /* item 6: the bars are
                                                  masonry; the glass is
@@ -1729,7 +1829,13 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
                           -(zs - 0.5f * pw), zs - 0.5f * pw,
                           p->wall_h, p->wall_h + p->parapet_h, 0, 1);
         if (p->style == CHURCH_BASILICA) {
-            float x0 = p->west_x + p->tower_d, x1 = p->east_x;
+            /* run forward to MEET the facade parapet (12mm shy: the
+               abutting end must not share its plane) — ending at the
+               wall line left a beam-end floating over the aisle roof */
+            float x0 = p->tower ? p->west_x + p->tower_d
+                                : p->west_x - wt + pw + 0.012f;
+            float x1 = p->apse_sides ? p->east_x
+                                     : p->east_x + wt - pw - 0.012f;
             parapet_strip(b, x0, x1, -0.5f * p->nave_w - 0.5f * pw,
                           -0.5f * p->nave_w + 0.5f * pw,
                           p->wall_h, p->wall_h + p->parapet_h, 1, 0);
@@ -1882,53 +1988,55 @@ static void boss_knob(MeshBuilder *b, vec3 c, float r) {
    equal arclength), domed by 0.08H sin(pi t) sin(pi s); the slab's two
    surfaces share the rib stations so adjacent cells meet seamlessly */
 static vec3 web_pt(const vec3 *ra, const vec3 *rb, int n, int k,
-                   float s, float dome, float lift) {
-    float t = (float)k / (float)(n - 1);
-    vec3  p = vlerp(ra[k], rb[k], s);
-    p.y += dome * sinf(SOL_PI * t) * sinf(SOL_PI * s) + lift;
+                   float s, float dome, float lift,
+                   float clen, float a_bnd) {
+    /* the LUNETTE: the cell's wall-side edge follows its BOUNDARY ARCH
+       (which crowns at the same H as the diagonals — the level-crown
+       law pays again), fading toward the boss as (1-t)^2: the ridge
+       from wall-crown to boss runs level with a real ridge's slight
+       sag, and windows live inside the lunettes instead of behind a
+       hanging chord canopy (Fran's punch list, error4) */
+    float t  = (float)k / (float)(n - 1);
+    float ft = (1.0f - t) * (1.0f - t);
+    vec3  p  = vlerp(ra[k], rb[k], s);
+    p.y += ft * gothic_arch_y(clen, a_bnd, (s - 0.5f) * clen)
+         + dome * sinf(SOL_PI * t) * sinf(SOL_PI * s) + lift;
     return p;
 }
 
 static void web_quad(MeshBuilder *b, vec3 p00, vec3 p10, vec3 p11, vec3 p01,
                      vec3 ref) {
-    /* oriented toward ref (the room below for the intrados, the sky
-       for the extrados). The boss row's rules CONVERGE: detect the
-       collapsed pair FIRST, before any orientation swap relocates it,
-       and emit the triangle of the three distinct corners. */
-    vec3    e = vec3_sub(p11, p10);
-    vec3    nm, cen;
-    float   l;
-    sol_u32 i0, i1, i2, i3;
-    int     tri = vec3_dot(e, e) < 1e-6f;
-
-    nm  = vec3_cross(vec3_sub(p10, p00), vec3_sub(p01, p00));
-    l   = sqrtf(vec3_dot(nm, nm));
-    if (l < 1e-10f) return;
-    nm  = vec3_scale(nm, 1.0f / l);
-    cen = vec3_scale(vec3_add(vec3_add(p00, p10), vec3_add(p11, p01)), 0.25f);
-    if (vec3_dot(nm, vec3_sub(ref, cen)) < 0.0f) {
-        vec3 tswap = p10; p10 = p01; p01 = tswap;
-        nm = vec3_scale(nm, -1.0f);
-        tri = tri ? 2 : 0;            /* the collapsed pair moved */
-    } else if (tri) {
-        tri = 1;
+    /* the lunette lift twists quads near the wall edges — each triangle
+       carries its OWN geometric normal, oriented toward ref (the room
+       for the intrados, the sky for the extrados). The boss row's
+       collapsed pair drops to one triangle. */
+    vec3 e = vec3_sub(p11, p10);
+    int  tri = vec3_dot(e, e) < 1e-6f;
+    vec3 tp[2][3];
+    int  nt = 0, q;
+    if (tri) {
+        tp[0][0] = p00; tp[0][1] = p10; tp[0][2] = p01; nt = 1;
+    } else {
+        tp[0][0] = p00; tp[0][1] = p10; tp[0][2] = p11;
+        tp[1][0] = p00; tp[1][1] = p11; tp[1][2] = p01; nt = 2;
     }
-    i0 = mb_push_vertex(b, p00.x, p00.y, p00.z, nm.x, nm.y, nm.z, 0, 0);
-    i1 = mb_push_vertex(b, p10.x, p10.y, p10.z, nm.x, nm.y, nm.z, 1, 0);
-    if (tri == 1) {                   /* unswapped: (p00, p10, p01) */
-        i3 = mb_push_vertex(b, p01.x, p01.y, p01.z, nm.x, nm.y, nm.z, 0, 1);
-        mb_push_triangle(b, i0, i1, i3);
-        return;
-    }
-    if (tri == 2) {                   /* swapped: pair sits at (p11,p01) */
-        i2 = mb_push_vertex(b, p11.x, p11.y, p11.z, nm.x, nm.y, nm.z, 1, 1);
+    for (q = 0; q < nt; q++) {
+        vec3 a = tp[q][0], c = tp[q][1], d = tp[q][2];
+        vec3 nm = vec3_cross(vec3_sub(c, a), vec3_sub(d, a));
+        vec3 cen = vec3_scale(vec3_add(vec3_add(a, c), d), 1.0f / 3.0f);
+        float l = sqrtf(vec3_dot(nm, nm));
+        sol_u32 i0, i1, i2;
+        if (l < 1e-10f) continue;
+        nm = vec3_scale(nm, 1.0f / l);
+        if (vec3_dot(nm, vec3_sub(ref, cen)) < 0.0f) {
+            vec3 sw = c; c = d; d = sw;
+            nm = vec3_scale(nm, -1.0f);
+        }
+        i0 = mb_push_vertex(b, a.x, a.y, a.z, nm.x, nm.y, nm.z, a.x + a.z, a.y);
+        i1 = mb_push_vertex(b, c.x, c.y, c.z, nm.x, nm.y, nm.z, c.x + c.z, c.y);
+        i2 = mb_push_vertex(b, d.x, d.y, d.z, nm.x, nm.y, nm.z, d.x + d.z, d.y);
         mb_push_triangle(b, i0, i1, i2);
-        return;
     }
-    i2 = mb_push_vertex(b, p11.x, p11.y, p11.z, nm.x, nm.y, nm.z, 1, 1);
-    i3 = mb_push_vertex(b, p01.x, p01.y, p01.z, nm.x, nm.y, nm.z, 0, 1);
-    mb_push_triangle(b, i0, i1, i2);
-    mb_push_triangle(b, i0, i2, i3);
 }
 
 static void web_cell(MeshBuilder *b, const vec3 *ra, const vec3 *rb,
@@ -1936,9 +2044,11 @@ static void web_cell(MeshBuilder *b, const vec3 *ra, const vec3 *rb,
     vec3  chord = vec3_sub(rb[0], ra[0]);
     float clen  = sqrtf(vec3_dot(chord, chord));
     vec3  boss  = ra[n - 1];
+    float a_bnd;
     vec3  ref_lo, ref_hi;
     int   m, k, j, side;
     if (n < 2 || clen < 0.2f) return;
+    a_bnd = gothic_arch_acuteness_for(clen, boss.y - ra[0].y);
     m = (int)(clen / 0.5f);
     if (m < 2) m = 2;
     if (m > 5) m = 5;
@@ -1952,10 +2062,10 @@ static void web_cell(MeshBuilder *b, const vec3 *ra, const vec3 *rb,
                 float s0 = (float)j / (float)m;
                 float s1 = (float)(j + 1) / (float)m;
                 web_quad(b,
-                         web_pt(ra, rb, n, k,     s0, dome, lift),
-                         web_pt(ra, rb, n, k + 1, s0, dome, lift),
-                         web_pt(ra, rb, n, k + 1, s1, dome, lift),
-                         web_pt(ra, rb, n, k,     s1, dome, lift),
+                         web_pt(ra, rb, n, k,     s0, dome, lift, clen, a_bnd),
+                         web_pt(ra, rb, n, k + 1, s0, dome, lift, clen, a_bnd),
+                         web_pt(ra, rb, n, k + 1, s1, dome, lift, clen, a_bnd),
+                         web_pt(ra, rb, n, k,     s1, dome, lift, clen, a_bnd),
                          ref);
             }
     }
@@ -2011,7 +2121,7 @@ static void vault_vessel(MeshBuilder *b, const ChurchPlan *p,
     float hgt = 0.5f * sqrtf(w * w + l * l);
     float a_t = gothic_arch_acuteness_for(w, hgt);
     float a_l = gothic_arch_acuteness_for(l, hgt);
-    float dome = 0.08f * hgt;
+    float dome = 0.04f * hgt;
     int   i, k, n;
 
     for (i = 0; i < nbays; i++) {
@@ -2093,7 +2203,7 @@ static void stone_vaults(MeshBuilder *b, const ChurchPlan *p) {
                five shallow fans converging at one point congest into
                near-coplanar slivers; the half-boss is FOR this */
             for (k = 0; k < 5; k++)
-                web_cell(b, rr[k], rr[k + 1], rn - 1, 0.05f * r);
+                web_cell(b, rr[k], rr[k + 1], rn - 1, 0.025f * r);
             boss_knob(b, rr[0][rn - 1], 0.62f);
         }
     }
@@ -2411,30 +2521,23 @@ static void emit_tracery(MeshBuilder *stone, MeshBuilder *glass,
     }
 
     if (glass) {
+        /* ONE full-aperture panel per window — the glass field is
+           CONTINUOUS behind the tracery, as real glazing is; the bars
+           sit proud of it on both sides. (Replaces the per-light
+           patchwork, whose spandrels were open holes — Fran's punch
+           list, error5. Item 8 shatters per window.) */
         float px[GLASS_MAX_PTS], py[GLASS_MAX_PTS];
-        for (i = 0; i < t.n_lights; i++) {       /* one panel per light */
-            float x0 = -0.5f * o->w + (float)i * t.pitch;
-            float lc = x0 + 0.5f * t.pitch;
-            int   m = 0, j;
-            px[m] = x0;            py[m] = o->sill; m++;
-            px[m] = x0 + t.pitch;  py[m] = o->sill; m++;
-            px[m] = x0 + t.pitch;  py[m] = o->spring; m++;
-            for (j = 7; j >= 1; j--) {           /* the head, coarse —
-                                                    it tucks under the bar */
-                float xx = x0 + t.pitch * (float)j / 8.0f;
-                px[m] = xx;
-                py[m] = o->spring + gothic_arch_y(t.sub_span, t.sub_acute, xx - lc);
+        vec3  hp[GOTHIC_ARCH_MAX_PTS];
+        int   m = 0, hn, j;
+        hn = gothic_arch_path(hp, GOTHIC_ARCH_MAX_PTS, o->w, o->acute,
+                              0.45f * o->w);
+        if (hn >= 3 && hn + 4 <= GLASS_MAX_PTS) {
+            px[m] = -0.5f * o->w; py[m] = o->sill; m++;
+            px[m] =  0.5f * o->w; py[m] = o->sill; m++;
+            for (j = hn - 1; j >= 0; j--) {   /* the head, right to left */
+                px[m] = hp[j].x;
+                py[m] = o->spring + hp[j].y;
                 m++;
-            }
-            px[m] = x0; py[m] = o->spring; m++;
-            glass_panel(glass, px, py, m);
-        }
-        for (i = 0; i < t.n_foils; i++) {        /* one disc per foil */
-            int m = 12, j;
-            for (j = 0; j < m; j++) {
-                float th = 2.0f * SOL_PI * (float)j / (float)m;
-                px[j] = t.foil_x[i] + t.foil_r[i] * sinf(-th);
-                py[j] = t.foil_y[i] + t.foil_r[i] * cosf(th);
             }
             glass_panel(glass, px, py, m);
         }
@@ -2514,4 +2617,286 @@ void church_glass(MeshBuilder *b, const float *params, int count) {
     if (!b) return;
     church_plan(&plan, params, count);
     church_windows((MeshBuilder *)0, b, &plan);
+}
+
+/* ================== item 7: roof, tower & spire ==================
+   The silhouette: after this item the ruin = 0 church is COMPLETE.
+   Roofs are skins behind the parapets; the spire crosses square to
+   octagon by broaches — ad quadratum from foundation to tip. */
+
+/* one push for a flat triangle with its own normal */
+static void tri3(MeshBuilder *b, vec3 a, vec3 c, vec3 d) {
+    vec3 nm = vec3_cross(vec3_sub(c, a), vec3_sub(d, a));
+    float l = sqrtf(vec3_dot(nm, nm));
+    sol_u32 i0, i1, i2;
+    if (l < 1e-10f) return;
+    nm = vec3_scale(nm, 1.0f / l);
+    i0 = mb_push_vertex(b, a.x, a.y, a.z, nm.x, nm.y, nm.z, a.x + a.z, a.y);
+    i1 = mb_push_vertex(b, c.x, c.y, c.z, nm.x, nm.y, nm.z, c.x + c.z, c.y);
+    i2 = mb_push_vertex(b, d.x, d.y, d.z, nm.x, nm.y, nm.z, d.x + d.z, d.y);
+    mb_push_triangle(b, i0, i1, i2);
+}
+static void quad3(MeshBuilder *b, vec3 a, vec3 c, vec3 d, vec3 e) {
+    tri3(b, a, c, d);
+    tri3(b, a, d, e);
+}
+
+/* one roof slope: a thin slab — the weather face, the underside the
+   nave looks up at, and the eave strip closing the low edge */
+#define ROOF_T 0.12f
+static void roof_slope(MeshBuilder *b, float x0, float x1,
+                       float z_eave, float y_eave, float z_ridge,
+                       float y_ridge) {
+    vec3 e0 = vec3_make(x0, y_eave, z_eave);
+    vec3 e1 = vec3_make(x1, y_eave, z_eave);
+    vec3 r0 = vec3_make(x0, y_ridge, z_ridge);
+    vec3 r1 = vec3_make(x1, y_ridge, z_ridge);
+    vec3 dn = vec3_make(0.0f, -ROOF_T, 0.0f);
+    /* top: wound so the normal points up-and-out */
+    if (z_eave > z_ridge) quad3(b, e0, e1, r1, r0);
+    else                  quad3(b, e1, e0, r0, r1);
+    /* underside */
+    if (z_eave > z_ridge)
+        quad3(b, vec3_add(e1, dn), vec3_add(e0, dn),
+              vec3_add(r0, dn), vec3_add(r1, dn));
+    else
+        quad3(b, vec3_add(e0, dn), vec3_add(e1, dn),
+              vec3_add(r1, dn), vec3_add(r0, dn));
+    /* the eave strip */
+    if (z_eave > z_ridge)
+        quad3(b, e1, e0, vec3_add(e0, dn), vec3_add(e1, dn));
+    else
+        quad3(b, e0, e1, vec3_add(e1, dn), vec3_add(e0, dn));
+}
+
+/* a gable: the triangular end wall as a thin slab, faces both ways */
+static void roof_gable(MeshBuilder *b, float x, float dir, float z0,
+                       float z1, float y_eave, float y_ridge) {
+    float zr = 0.5f * (z0 + z1);
+    vec3 a0 = vec3_make(x, y_eave, z0);
+    vec3 a1 = vec3_make(x, y_eave, z1);
+    vec3 ap = vec3_make(x, y_ridge, zr);
+    vec3 off = vec3_make(0.12f * dir, 0.0f, 0.0f);
+    if (dir > 0.0f) { tri3(b, a0, a1, ap); }
+    else            { tri3(b, a1, a0, ap); }
+    if (dir > 0.0f)
+        tri3(b, vec3_add(a1, vec3_scale(off, -1.0f)),
+             vec3_add(a0, vec3_scale(off, -1.0f)),
+             vec3_add(ap, vec3_scale(off, -1.0f)));
+    else
+        tri3(b, vec3_add(a0, vec3_scale(off, -1.0f)),
+             vec3_add(a1, vec3_scale(off, -1.0f)),
+             vec3_add(ap, vec3_scale(off, -1.0f)));
+}
+
+void gothic_spire(MeshBuilder *b, float cx, float cz, float half,
+                  float base_y, float apex_h, float broach_f) {
+    /* the octagon inscribed in the square — ad quadratum: its flush
+       faces ride the square's sides, its diagonal faces cross the
+       corners, and the BROACHES fill what the crossing cut away */
+    float t = half * 0.4142136f;          /* tan(22.5)*half: face half */
+    vec3  apex = vec3_make(cx, base_y + apex_h, cz);
+    vec3  v[8];
+    int   k;
+    if (!b || half < 0.05f || apex_h < 0.1f) return;
+    v[0] = vec3_make(cx + half, base_y, cz - t);
+    v[1] = vec3_make(cx + half, base_y, cz + t);
+    v[2] = vec3_make(cx + t,    base_y, cz + half);
+    v[3] = vec3_make(cx - t,    base_y, cz + half);
+    v[4] = vec3_make(cx - half, base_y, cz + t);
+    v[5] = vec3_make(cx - half, base_y, cz - t);
+    v[6] = vec3_make(cx - t,    base_y, cz - half);
+    v[7] = vec3_make(cx + t,    base_y, cz - half);
+    for (k = 0; k < 8; k += 2)            /* the flush faces */
+        tri3(b, v[k], v[k + 1], apex);
+    for (k = 1; k < 8; k += 2) {          /* diagonal faces + broaches */
+        vec3  va = v[k], vb = v[(k + 1) % 8];
+        vec3  mid = vec3_scale(vec3_add(va, vb), 0.5f);
+        vec3  p   = vlerp(mid, apex, broach_f);   /* the broach point */
+        float sx  = (va.x - cx) + (vb.x - cx);
+        float sz  = (va.z - cz) + (vb.z - cz);
+        vec3  corner = vec3_make(cx + (sx > 0.0f ? half : -half), base_y,
+                                 cz + (sz > 0.0f ? half : -half));
+        /* the diagonal face SPLIT at p (edge-manifold by construction) */
+        tri3(b, va, p, apex);
+        tri3(b, p, vb, apex);
+        /* the broach: a half-pyramid from the corner onto the face */
+        tri3(b, corner, va, p);
+        tri3(b, vb, corner, p);
+    }
+}
+
+void gothic_pinnacle(MeshBuilder *b, float h, unsigned seed) {
+    /* Roriczer simplified: shaft to 0.55h, gablets to 0.7h, the
+       needle to h, a finial knob — derived from one square */
+    float hw = 0.16f * h * (0.9f + 0.2f * gothic_hash01(seed, LANE_SPIRE, 1, 0));
+    float y_sh = 0.55f * h, y_gb = 0.72f * h;
+    int   k;
+    if (!b || h < 0.3f) return;
+    /* the base cap: an open shaft bottom reads as a hole the moment
+       the seat is not flush (Fran's punch list, error2) */
+    quad3(b, vec3_make(-hw, 0.0f, -hw), vec3_make(hw, 0.0f, -hw),
+          vec3_make(hw, 0.0f, hw), vec3_make(-hw, 0.0f, hw));
+    for (k = 0; k < 4; k++) {
+        float c = (k == 0) ? 1.0f : (k == 2) ? -1.0f : 0.0f;
+        float s = (k == 1) ? 1.0f : (k == 3) ? -1.0f : 0.0f;
+        /* shaft face, gablet triangle leaning out, needle face */
+        vec3 a = vec3_make(c * hw - s * hw, 0.0f,    s * hw + c * hw);
+        vec3 d = vec3_make(c * hw + s * hw, 0.0f,    s * hw - c * hw);
+        vec3 a1 = vec3_make(a.x, y_sh, a.z), d1 = vec3_make(d.x, y_sh, d.z);
+        vec3 gp = vec3_make(c * 1.5f * hw, y_gb, s * 1.5f * hw);
+        vec3 ap = vec3_make(0.0f, h, 0.0f);
+        quad3(b, d, a, a1, d1);
+        tri3(b, d1, a1, gp);                /* the gablet */
+        tri3(b, a1, ap, gp);                /* needle flanks */
+        tri3(b, gp, ap, d1);
+    }
+    boss_knob(b, vec3_make(0.0f, h, 0.0f), 0.10f * h);
+}
+
+/* the pinnacle ring on buttress heads + tower corners (needle mode) —
+   emitted into church_stone (masonry); item 10's standalone ref and
+   instanced scatter reuse gothic_pinnacle directly */
+static void stone_pinnacles(MeshBuilder *b, const ChurchPlan *p) {
+    float wt   = p->wall_t;
+    float hwid = 0.5f * p->nave_w + p->aisle_w;
+    float bh   = p->style == CHURCH_BASILICA ? p->aisle_h + 0.6f : p->aisle_h;
+    float bd   = (p->style == CHURCH_BASILICA ? 1.05f :
+                  p->style == CHURCH_HALL ? 0.75f : 0.55f);
+    float ph   = 1.4f + 0.25f * p->wall_t * 4.0f;
+    float ytop = 0.93f * bh + 0.30f;
+    float seat = 0.30f * ph;             /* the coped seat's half-size */
+    int   i, sd;
+    for (i = 1; i < p->nbays; i++) {
+        float x = p->west_x + p->tower_d + (float)i * p->bay_l;
+        for (sd = -1; sd <= 1; sd += 2) {
+            /* clear of the buttress back plane AND the parapet face —
+               0.35bd landed the shaft face a centimeter off the back */
+            float zc = (float)sd * (hwid + wt + 0.35f * bd + 0.07f);
+            sol_u32 v0;
+            /* the coped seat: buried into the weathering below, the
+               pinnacle stands ON it — never hovers over the slope */
+            gz_face(b, x - seat, x + seat, ytop - 0.45f, ytop, zc + seat, 1);
+            gz_face(b, x - seat, x + seat, ytop - 0.45f, ytop, zc - seat, -1);
+            gx_face(b, x - seat, ytop - 0.45f, ytop, zc - seat, zc + seat, -1);
+            gx_face(b, x + seat, ytop - 0.45f, ytop, zc - seat, zc + seat, 1);
+            gy_face(b, x - seat, x + seat, ytop, zc - seat, zc + seat, 1);
+            v0 = b->vertex_count;
+            gothic_pinnacle(b, ph, p->seed + (unsigned)i +
+                            (sd > 0 ? 100u : 0u));
+            mb_transform_from(b, v0, 1.0f, 0.0f, x, ytop - 0.05f, zc);
+        }
+    }
+}
+
+void church_roof(MeshBuilder *b, const float *params, int count) {
+    ChurchPlan plan;
+    const ChurchPlan *p = &plan;
+    float pitch_t, wt, hwid, x_w, x_e, zn, y0;
+    int   i;
+
+    if (!b) return;
+    church_plan(&plan, params, count);
+    wt   = p->wall_t;
+    hwid = 0.5f * p->nave_w + p->aisle_w;
+    /* the High Gothic pitch, jittered per building */
+    pitch_t = tanf((52.0f + 6.0f * gothic_hash01(p->seed, LANE_PITCH, 0, 0))
+                   * (SOL_PI / 180.0f));
+    x_w = p->west_x + p->tower_d + (p->tower ? 0.05f : 0.0f);
+    x_e = p->east_x;
+    y0  = p->wall_h + 0.08f;            /* behind the parapet: the gutter */
+
+    /* the main roof: hall = ONE great roof over everything (the style
+       made visible); basilica/chapel = the nave's gable */
+    zn = (p->style == CHURCH_HALL ? hwid : 0.5f * p->nave_w) + 0.1f * wt;
+    {
+        float yr = y0 + zn * pitch_t;
+        /* the slabs tuck 2cm INSIDE their gables: the open slab ends
+           hide behind the gable slabs instead of reading as slots */
+        float sx0 = x_w + (p->tower ? 0.0f : 0.02f);
+        float sx1 = x_e - 0.02f;
+        roof_slope(b, sx0, sx1, -zn, y0, 0.0f, yr);
+        roof_slope(b, sx0, sx1,  zn, y0, 0.0f, yr);
+        if (!p->tower) roof_gable(b, x_w, -1.0f, -zn, zn, y0, yr);
+        if (p->apse_sides == 0)
+            roof_gable(b, x_e, 1.0f, -zn, zn, y0, yr);
+        else {                          /* the apse half-cone: its APEX
+               tucks INTO the gable, so the mouth-side facet edges lie
+               flat against the gable face — an apex over the apse
+               center leaves an open wedge of sky at the junction
+               (Fran's punch list, error7) */
+            float r   = 0.5411961f * p->nave_w;
+            float ya  = p->wall_h + 0.05f;
+            float ridge = y0 + zn * pitch_t;
+            float ay  = ya + 0.9f * r * pitch_t;
+            vec3  apex;
+            int   k;
+            if (ay > ridge - 0.3f) ay = ridge - 0.3f;
+            apex = vec3_make(x_e + 0.02f, ay, 0.0f);
+            roof_gable(b, x_e, 1.0f, -zn, zn, y0, ridge);
+            for (k = 0; k < 5; k++) {
+                float ax, az, bx, bz;
+                plan_apse_pier(p, k,     &ax, &az);
+                plan_apse_pier(p, k + 1, &bx, &bz);
+                tri3(b, vec3_make(bx, ya, bz), vec3_make(ax, ya, az), apex);
+            }
+        }
+    }
+
+    if (p->style == CHURCH_BASILICA) {  /* the lean-to aisle roofs */
+        float z_in  = 0.5f * p->nave_w + 0.5f * wt + 0.02f;
+        float z_out = hwid + 0.4f * wt;
+        float y_out = p->aisle_h + 0.06f;
+        float y_in  = p->clerest_h0 - 0.15f;
+        int   side;
+        if (y_in < y_out + 0.3f) y_in = y_out + 0.3f;
+        for (side = -1; side <= 1; side += 2) {
+            float zo = (float)side * z_out, zi = (float)side * z_in;
+            roof_slope(b, x_w, x_e, zo, y_out, zi, y_in);
+            {   /* the end closures: the slab's own edge band (top to
+                   underside) + the attic triangle UNDER the band — two
+                   pieces tiling the end plane, never overlapping */
+                float yo_u = y_out - ROOF_T, yi_u = y_in - ROOF_T;
+                vec3 t0w = vec3_make(x_w, y_out, zo), t1w = vec3_make(x_w, y_in, zi);
+                vec3 u0w = vec3_make(x_w, yo_u, zo),  u1w = vec3_make(x_w, yi_u, zi);
+                vec3 t0e = vec3_make(x_e, y_out, zo), t1e = vec3_make(x_e, y_in, zi);
+                vec3 u0e = vec3_make(x_e, yo_u, zo),  u1e = vec3_make(x_e, yi_u, zi);
+                vec3 w2 = vec3_make(x_w, yo_u, zi),   e2 = vec3_make(x_e, yo_u, zi);
+                if (side > 0) {
+                    quad3(b, t1w, t0w, u0w, u1w);
+                    quad3(b, t0e, t1e, u1e, u0e);
+                    tri3(b, u1w, u0w, w2);
+                    tri3(b, u0e, u1e, e2);
+                } else {
+                    quad3(b, t0w, t1w, u1w, u0w);
+                    quad3(b, t1e, t0e, u0e, u1e);
+                    tri3(b, u0w, u1w, w2);
+                    tri3(b, u1e, u0e, e2);
+                }
+            }
+        }
+    }
+
+    if (p->tower) {                     /* the spire over the tower */
+        float th   = p->wall_h * (2.0f + 0.4f *
+                     gothic_hash01(p->seed, LANE_TOWER_H, 0, 0));
+        float half = 0.5f * p->nave_w * 0.82f;
+        float cx   = p->west_x + 0.5f * p->tower_d - 0.25f * wt;
+        float roll = gothic_hash01(p->seed, LANE_SPIRE, 0, 0);
+        if (roll < 0.65f)               /* the broach spire */
+            gothic_spire(b, cx, 0.0f, half, th + 0.05f,
+                         half * 2.6f, 0.34f);
+        else {                          /* parapet-and-needle */
+            gothic_spire(b, cx, 0.0f, half * 0.45f, th + 0.05f,
+                         half * 1.7f, 0.30f);
+            for (i = 0; i < 4; i++) {
+                sol_u32 v0 = b->vertex_count;
+                float sx = (i & 1) ? half : -half;
+                float sz = (i & 2) ? half : -half;
+                gothic_pinnacle(b, 1.6f, p->seed + (unsigned)i + 40u);
+                mb_transform_from(b, v0, 1.0f, 0.0f, cx + sx, th + 0.05f, sz);
+            }
+        }
+    }
+    (void)i;
 }
