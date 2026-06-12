@@ -859,6 +859,105 @@ static void test_roof(void) {
     }
 }
 
+/* ---- 15: item 8 — the ruin & the worksite ---- */
+static void test_ruin(void) {
+    static const float LADDER[6] = { 0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f };
+    float params[8] = { 18, 30, 7, -1, 0, 1, 1, 0 };
+    int st, li, el, i, j;
+
+    for (st = 0; st <= 2; st++) {
+        params[3] = (float)st;
+        for (li = 0; li + 1 < 6; li++) {
+            ChurchPlan lo, hi;
+            params[4] = LADDER[li];     params[5] = 1.0f;
+            church_plan(&lo, params, 8);
+            params[4] = LADDER[li + 1];
+            church_plan(&hi, params, 8);
+            for (el = 0; el < ELEM_COUNT; el++)
+                for (i = 0; i <= lo.nbays; i++)
+                    for (j = 0; j < 6; j++) {
+                        float tl, th;
+                        int sl = church_survives(&lo, el, i, j, &tl);
+                        int sh = church_survives(&hi, el, i, j, &th);
+                        /* MONOTONICITY: more ruin never adds, and a
+                           kept fraction never grows */
+                        if (sh && !sl)
+                            { fail("ruin: raising ruin ADDED an element"); return; }
+                        if (sh && sl && th > tl + 1e-6f)
+                            { fail("ruin: raising ruin GREW a fragment"); return; }
+                    }
+            /* the same law for built, reversed */
+            params[4] = 0.0f; params[5] = LADDER[li];
+            church_plan(&lo, params, 8);
+            params[5] = LADDER[li + 1];
+            church_plan(&hi, params, 8);
+            for (el = 0; el < ELEM_COUNT; el++)
+                for (i = 0; i <= lo.nbays; i++)
+                    for (j = 0; j < 3; j++)
+                        if (church_survives(&lo, el, i, j, (float *)0) &&
+                            !church_survives(&hi, el, i, j, (float *)0))
+                            { fail("ruin: raising built REMOVED an element"); return; }
+            params[5] = 1.0f;
+        }
+    }
+
+    {   /* NO FLOATING MASONRY: every survivor's supports stand, and
+           the within-cell ladder holds (glass <= tracery <= wall) */
+        ChurchPlan p;
+        float r;
+        params[3] = 2.0f; params[5] = 1.0f;
+        for (r = 0.1f; r < 1.0f; r += 0.2f) {
+            params[4] = r;
+            church_plan(&p, params, 8);
+            for (i = 0; i < p.nbays; i++)
+                for (j = 0; j <= 2; j += 2) {
+                    float tw;
+                    if (church_survives(&p, ELEM_WEB, i, j, (float *)0) &&
+                        (!church_survives(&p, ELEM_PIER, i, j, (float *)0) ||
+                         !church_survives(&p, ELEM_PIER,
+                                          i + 1 > p.nbays ? p.nbays : i + 1,
+                                          j, (float *)0)))
+                        { fail("ruin: a web floats on a fallen pier"); return; }
+                    if (church_survives(&p, ELEM_FLYER, i, j, (float *)0) &&
+                        !church_survives(&p, ELEM_BUTTRESS, i, j, (float *)0))
+                        { fail("ruin: a flyer floats on a fallen buttress"); return; }
+                    if (church_survives(&p, ELEM_GLASS, i, j, (float *)0) &&
+                        !church_survives(&p, ELEM_TRACERY, i, j, (float *)0))
+                        { fail("ruin: glass without its tracery"); return; }
+                    if (church_survives(&p, ELEM_TRACERY, i, j, (float *)0) &&
+                        (!church_survives(&p, ELEM_WALL, i, j, &tw) ||
+                         tw < 0.96f))
+                        { fail("ruin: tracery in a broken wall"); return; }
+                }
+        }
+    }
+
+    {   /* the ruined builds: deterministic, audit-clean, and SMALLER */
+        static const float P6[8] = { 18, 30, 7, 2, 0.6f, 1, 1, 0 };
+        static const float P3[8] = { 18, 30, 7, 2, 0.3f, 1, 1, 0 };
+        static const float P0[8] = { 18, 30, 7, 2, 0.0f, 1, 1, 0 };
+        MeshBuilder rb, wb;
+        det_check("church_stone", P6, 8, 0.4f);
+        det_check("church_glass", P6, 8, 0.99f);
+        det_check("church_roof",  P3, 8, 0.9f);   /* at .6 every roof has
+                            honestly fallen — .12 is the first casualty */
+        det_check("church_floor", P6, 8, 0.99f);
+        mb_init(&rb); mb_init(&wb);
+        church_stone(&rb, P6, 8);
+        church_stone(&wb, P0, 8);
+        if (rb.index_count >= wb.index_count)
+            fail("ruin: a 0.6-ruin church should be smaller than whole");
+        audit_coplanar(&rb, "ruined basilica");
+        mb_free(&rb); mb_free(&wb);
+    }
+    {   /* the schema law for the fourth member */
+        const char *const *names; const float *defs;
+        int n = mesh_ref_schema("church_floor", &names, &defs);
+        if (n != 8 || memcmp(defs, gothic_church_defaults, 8 * sizeof(float)) != 0)
+            fail("church_floor: registry defaults drifted from the plan's");
+    }
+}
+
 int main(void) {
     test_square_is_box();
     test_miter();
@@ -875,6 +974,7 @@ int main(void) {
     test_tracery();
     test_spire_manifold();
     test_roof();
+    test_ruin();
     if (g_fail) { printf("gothic_test: FAILED\n"); return 1; }
     printf("gothic_test: OK\n");
     return 0;

@@ -784,6 +784,8 @@ void church_plan(ChurchPlan *p, const float *params, int count) {
 
     p->seed  = full[2] > 0.0f ? (unsigned)(full[2] + 0.5f) : 0u;
     p->acute = full[6] < 0.0f ? 0.0f : full[6];
+    p->ruin  = full[4] < 0.0f ? 0.0f : full[4] > 1.0f ? 1.0f : full[4];
+    p->built = full[5] < 0.0f ? 0.0f : full[5] > 1.0f ? 1.0f : full[5];
 
     /* 1. orientation: the nave runs the LONGER dimension; east = +X */
     pl = full[0]; pw = full[1];
@@ -1215,7 +1217,8 @@ static void buttress(MeshBuilder *b, float h_head, float bw, float d0,
    sub-plinth, capital (frustum + abacus) at the impost. h_cap 0 skips
    the capital (apse buttress-piers run sheer to their flat tops). */
 static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
-                 float rp, float top, int capital, float yaw_c, float yaw_s) {
+                 float rp, float top, int capital, float yaw_c, float yaw_s,
+                 float keep) {
     sol_u32 v0 = b->vertex_count;
     float sp = rp / 0.12f;             /* shaft profile scale            */
     float ap = rp * 0.9238795f;        /* the octagon's apothem          */
@@ -1223,6 +1226,11 @@ static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
     const ProfilePt *oct = gothic_profile(PROF_SHAFT_OCT, &pn);
     vec3  path[2];
     float shaft_top = capital ? p->impost_h - 0.45f : top;
+    if (keep < 0.999f) {               /* the BROKEN COLUMN: truncated,
+                                          capped flat at a course line */
+        shaft_top = p->plinth_h + keep * (shaft_top - p->plinth_h);
+        capital   = capital ? 2 : 0;   /* base yes, frustum/abacus no */
+    }
 
     if (capital) {                     /* square sub-plinth */
         float hs = rp + 0.10f;
@@ -1253,8 +1261,8 @@ static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
     path[0] = vec3_make(0.0f, capital ? p->plinth_h : 0.0f, 0.0f);
     path[1] = vec3_make(0.0f, shaft_top, 0.0f);
     gothic_sweep(b, oct, pn, path, 2, vec3_make(0.0f, 0.0f, 1.0f),
-                 sp, 0, capital ? 0 : 1);
-    if (capital) {
+                 sp, 0, capital == 1 ? 0 : 1);
+    if (capital == 1) {
         float aa = rp + 0.12f;                 /* abacus half-size  */
         float yf0 = shaft_top, yf1 = p->impost_h - 0.15f;
         int k;
@@ -1350,32 +1358,51 @@ static void stone_wall_run(MeshBuilder *b, const ChurchPlan *p, int side) {
     float yawc = side > 0 ? 1.0f : -1.0f;        /* outward = +-Z */
     float hloc = p->aisle_h - p->plinth_h;
     int   i, wallq = side > 0 ? WALL_AISLE_N : WALL_AISLE_S;
+    int   jl = side > 0 ? 2 : 0;
 
-    if (p->tower || p->porch > 0.0f) { /* nothing west of west_x but air */ }
-    if (p->tower)                       /* the blank flank beside the tower */
-        place_piece(b, p->tower_d + wt, hloc, wt, (const GothicOpening *)0,
-                    0.0f, p->plinth_h, WF_NO_BOTTOM | WF_NO_ENDS, yawc, 0.0f,
-                    p->west_x + 0.5f * (p->tower_d - wt), zc);
+    if (p->tower) {
+        float tk;
+        if (church_survives(p, ELEM_WALL, 0, jl, &tk))
+            place_piece(b, p->tower_d + wt,
+                        tk * hloc < 0.5f ? 0.5f : tk * hloc, wt,
+                        (const GothicOpening *)0,
+                        0.0f, p->plinth_h, WF_NO_BOTTOM | WF_NO_ENDS, yawc,
+                        0.0f, p->west_x + 0.5f * (p->tower_d - wt), zc);
+    }
     for (i = 0; i < p->nbays; i++) {
         GothicOpening o;
         float x0 = p->west_x + p->tower_d + (float)i * p->bay_l;
         float xc = x0 + 0.5f * p->bay_l, w = p->bay_l;
+        float tk, hk;
+        if (!church_survives(p, ELEM_WALL, i, jl, &tk)) continue;
+        hk = tk * hloc;
+        if (hk < 0.5f) continue;
         if (i == 0 && !p->tower) { w += wt; xc -= 0.5f * wt; }   /* corner */
         if (i == p->nbays - 1)   { w += wt; xc += 0.5f * wt; }
         plan_opening(p, wallq, i, &o);
-        place_piece(b, w, hloc, wt,
+        /* a window whose crown the break took is no window */
+        if (o.kind == GOTHIC_OPEN_WINDOW &&
+            o.spring + gothic_arch_y(o.w, o.acute, 0.0f)
+                > p->plinth_h + hk - 0.25f)
+            o.kind = GOTHIC_OPEN_NONE;
+        place_piece(b, w, hk, wt,
                     o.kind != GOTHIC_OPEN_NONE ? &o : (const GothicOpening *)0,
                     yawc > 0.0f ? o.cx - xc : xc - o.cx,
-                    p->plinth_h, WF_NO_BOTTOM | WF_NO_ENDS, yawc, 0.0f, xc, zc);
+                    p->plinth_h, WF_NO_BOTTOM | WF_NO_ENDS |
+                    (tk < 0.999f ? 0 : 0), yawc, 0.0f, xc, zc);
     }
-    /* the corner end faces (the exposed strips beside the west/east
-       walls — coplanar-ADJACENT with their faces, never overlapping);
-       the face helpers want ORDERED ranges, so sort the side's span */
+    /* the corner end faces, each tied to its extreme bay's kept height */
     {
         float za = (float)side * hwid, zb = (float)side * (hwid + wt);
         float z0 = za < zb ? za : zb, z1 = za < zb ? zb : za;
-        gx_face(b, p->west_x - wt, p->plinth_h, p->aisle_h, z0, z1, -1);
-        gx_face(b, p->east_x + wt, p->plinth_h, p->aisle_h, z0, z1,  1);
+        float tk;
+        if (church_survives(p, ELEM_WALL, 0, jl, &tk) && tk * hloc >= 0.5f)
+            gx_face(b, p->west_x - wt, p->plinth_h,
+                    p->plinth_h + tk * hloc, z0, z1, -1);
+        if (church_survives(p, ELEM_WALL, p->nbays - 1, jl, &tk) &&
+            tk * hloc >= 0.5f)
+            gx_face(b, p->east_x + wt, p->plinth_h,
+                    p->plinth_h + tk * hloc, z0, z1,  1);
     }
 }
 
@@ -1387,6 +1414,12 @@ static void stone_facade(MeshBuilder *b, const ChurchPlan *p) {
     float xc = p->west_x - 0.5f * wt;
     GothicOpening door, win;
     float h_split;
+    float tkf, kept_top;
+    int   whole;
+
+    if (!church_survives(p, ELEM_WALL, 0, 1, &tkf)) return;
+    kept_top = p->plinth_h + tkf * (p->wall_h - p->plinth_h);
+    whole    = tkf >= 0.96f;
 
     {   /* the split must clear the WIDEST order's crown, not the
            door's — three stepped orders crown half a meter above it,
@@ -1414,24 +1447,45 @@ static void stone_facade(MeshBuilder *b, const ChurchPlan *p) {
         int ords = p->style == CHURCH_BASILICA ? 3 :
                    p->style == CHURCH_HALL ? 2 : 1;
         int ef = p->aisles ? 0 : WF_NO_ENDS;
-        arched_orders(b, p->nave_w, h_split - p->plinth_h, wt, 0.0f,
-                      door.w, 0.0f, door.spring - p->plinth_h, door.acute,
-                      ords, 0.15f, 1,
-                      WF_NO_TOP | WF_NO_BOTTOM | WF_NO_SILL | ef);
-        mb_transform_from(b, v0, 0.0f, -1.0f, xc, p->plinth_h, 0.0f);
-        place_piece(b, p->nave_w, p->wall_h - h_split, wt,
-                    win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
-                    0.0f, h_split, WF_NO_BOTTOM | ef, 0.0f, -1.0f, xc, 0.0f);
+        if (kept_top > h_split + 0.3f) {     /* the portal zone stands */
+            arched_orders(b, p->nave_w, h_split - p->plinth_h, wt, 0.0f,
+                          door.w, 0.0f, door.spring - p->plinth_h, door.acute,
+                          ords, 0.15f, 1,
+                          WF_NO_TOP | WF_NO_BOTTOM | WF_NO_SILL | ef);
+            mb_transform_from(b, v0, 0.0f, -1.0f, xc, p->plinth_h, 0.0f);
+            if (win.kind == GOTHIC_OPEN_WINDOW &&
+                (win.spring + gothic_arch_y(win.w, win.acute, 0.0f)
+                     > kept_top - 0.25f))
+                win.kind = GOTHIC_OPEN_NONE;
+            place_piece(b, p->nave_w, kept_top - h_split, wt,
+                        win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
+                        0.0f, h_split,
+                        WF_NO_BOTTOM | (whole ? 0 : WF_NO_TOP * 0) | ef,
+                        0.0f, -1.0f, xc, 0.0f);
+        } else {                             /* broken low: one stump */
+            arched_orders(b, p->nave_w, kept_top - p->plinth_h, wt, 0.0f,
+                          door.w, 0.0f,
+                          door.spring - p->plinth_h, door.acute,
+                          1, 0.0f, 0,
+                          WF_NO_BOTTOM | WF_NO_SILL | ef);
+            mb_transform_from(b, v0, 0.0f, -1.0f, xc, p->plinth_h, 0.0f);
+        }
     }
     if (p->aisles) {
         float fz = 0.5f * (0.5f * p->nave_w + (0.5f * p->nave_w + p->aisle_w));
-        place_piece(b, p->aisle_w, p->aisle_h - p->plinth_h, wt,
-                    (const GothicOpening *)0, 0.0f, p->plinth_h,
-                    WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, -1.0f, xc, -fz);
-        place_piece(b, p->aisle_w, p->aisle_h - p->plinth_h, wt,
-                    (const GothicOpening *)0, 0.0f, p->plinth_h,
-                    WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, -1.0f, xc,  fz);
+        float ts, tn;
+        if (church_survives(p, ELEM_WALL, 0, 0, &ts) &&
+            ts * (p->aisle_h - p->plinth_h) >= 0.5f)
+            place_piece(b, p->aisle_w, ts * (p->aisle_h - p->plinth_h), wt,
+                        (const GothicOpening *)0, 0.0f, p->plinth_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, -1.0f, xc, -fz);
+        if (church_survives(p, ELEM_WALL, 0, 2, &tn) &&
+            tn * (p->aisle_h - p->plinth_h) >= 0.5f)
+            place_piece(b, p->aisle_w, tn * (p->aisle_h - p->plinth_h), wt,
+                        (const GothicOpening *)0, 0.0f, p->plinth_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, -1.0f, xc,  fz);
     }
+    if (kept_top > h_split + 0.3f)
     {   /* item 7: the LINTEL and TYMPANUM fill the innermost order's
            head — the slab that has carried sculpture nine centuries;
            ours takes the normal map and waits. Recessed from the back
@@ -1496,8 +1550,16 @@ static void stone_east(MeshBuilder *b, const ChurchPlan *p) {
     if (p->apse_sides == 0) {
         GothicOpening win;
         float wfull = p->aisles ? p->nave_w + 2.0f * p->aisle_w : p->nave_w;
+        float tke, hke;
+        if (!church_survives(p, ELEM_WALL, p->nbays, 1, &tke)) return;
+        hke = tke * (p->wall_h - p->plinth_h);
+        if (hke < 0.5f) return;
         plan_opening(p, WALL_EAST, 0, &win);
-        place_piece(b, p->nave_w, p->wall_h - p->plinth_h, wt,
+        if (win.kind == GOTHIC_OPEN_WINDOW &&
+            win.spring + gothic_arch_y(win.w, win.acute, 0.0f)
+                > p->plinth_h + hke - 0.25f)
+            win.kind = GOTHIC_OPEN_NONE;
+        place_piece(b, p->nave_w, hke, wt,
                     win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
                     0.0f, p->plinth_h,
                     WF_NO_BOTTOM | (p->aisles ? 0 : WF_NO_ENDS),
@@ -1518,13 +1580,18 @@ static void stone_east(MeshBuilder *b, const ChurchPlan *p) {
            slab's own; §1.2 — one author per region) */
         float cw = p->aisle_w - wt;
         float fz = 0.5f * p->nave_w + wt + 0.5f * cw;
+        float ts2, tn2;
         if (cw > 0.3f) {
-            place_piece(b, cw, p->aisle_h - p->plinth_h, wt,
-                        (const GothicOpening *)0, 0.0f, p->plinth_h,
-                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, 1.0f, xc, -fz);
-            place_piece(b, cw, p->aisle_h - p->plinth_h, wt,
-                        (const GothicOpening *)0, 0.0f, p->plinth_h,
-                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, 1.0f, xc,  fz);
+            if (church_survives(p, ELEM_WALL, p->nbays, 0, &ts2) &&
+                ts2 * (p->aisle_h - p->plinth_h) >= 0.5f)
+                place_piece(b, cw, ts2 * (p->aisle_h - p->plinth_h), wt,
+                            (const GothicOpening *)0, 0.0f, p->plinth_h,
+                            WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, 1.0f, xc, -fz);
+            if (church_survives(p, ELEM_WALL, p->nbays, 2, &tn2) &&
+                tn2 * (p->aisle_h - p->plinth_h) >= 0.5f)
+                place_piece(b, cw, tn2 * (p->aisle_h - p->plinth_h), wt,
+                            (const GothicOpening *)0, 0.0f, p->plinth_h,
+                            WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, 1.0f, xc,  fz);
         }
     }
     {   /* the chevet: five sides, a lancet each — walls span PIER FACE
@@ -1552,14 +1619,23 @@ static void stone_east(MeshBuilder *b, const ChurchPlan *p) {
                 win.w = len - 0.6f;
                 if (win.w < 0.3f) win.kind = GOTHIC_OPEN_NONE;
             }
-            /* ends EMITTED: the trimmed slabs' corners poke past the
-               piers' octagonal cover, and suppressed ends read as
-               slits into the choir (Fran's punch list, error8) — the
-               capped end buries in the pier and surfaces as a reveal */
-            place_piece(b, len, p->wall_h, wt,
-                        win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
-                        0.0f, 0.0f, 0,
-                        nz, nx, mx + nx * 0.5f * wt, mz + nz * 0.5f * wt);
+            {   /* survival per side (i = nbays, j = the side index) */
+                float tka, hka;
+                if (!church_survives(p, ELEM_WALL, p->nbays, k, &tka))
+                    continue;
+                hka = tka * p->wall_h;
+                if (hka < 0.5f) continue;
+                if (win.kind == GOTHIC_OPEN_WINDOW &&
+                    win.spring + gothic_arch_y(win.w, win.acute, 0.0f)
+                        > hka - 0.25f)
+                    win.kind = GOTHIC_OPEN_NONE;
+                /* ends EMITTED (punch list, error8): the capped end
+                   buries in the pier and surfaces as a reveal */
+                place_piece(b, len, hka, wt,
+                            win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
+                            0.0f, 0.0f, 0,
+                            nz, nx, mx + nx * 0.5f * wt, mz + nz * 0.5f * wt);
+            }
         }
     }
 }
@@ -1577,11 +1653,9 @@ static void stone_arcades(MeshBuilder *b, const ChurchPlan *p) {
     for (side = -1; side <= 1; side += 2) {
         float zc = (float)side * 0.5f * p->nave_w;
         float yawc = side > 0 ? 1.0f : -1.0f;
+        int ja = side > 0 ? 2 : 0;
         for (i = 0; i < p->nbays; i++) {
             float x0 = p->west_x + p->tower_d + (float)i * p->bay_l;
-            /* end bays die INTO the walls (engaged responds — no
-               freestanding pier collides with the wall footings);
-               an apse mouth keeps its own radial piers instead */
             float rap = 0.4f > 0.7f * wt ? 0.4f : 0.7f * wt;
             float xs = x0 + ((i == 0 && !p->tower) ? 0.0f : pfh);
             float xe = x0 + p->bay_l -
@@ -1589,6 +1663,8 @@ static void stone_arcades(MeshBuilder *b, const ChurchPlan *p) {
                             ? (p->apse_sides ? rap * 0.9238795f : 0.0f)
                             : pfh);
             int   fl = p->style == CHURCH_BASILICA ? WF_NO_TOP : 0;
+            if (!church_survives(p, ELEM_ARCADE, i, ja, (float *)0))
+                continue;
             place_arch(b, xe - xs, top, wt, p->impost_h,
                        p->acute, 0.0f, fl, yawc, 0.0f,
                        0.5f * (xs + xe), zc);
@@ -1597,6 +1673,9 @@ static void stone_arcades(MeshBuilder *b, const ChurchPlan *p) {
             float x = p->west_x + p->tower_d + (float)i * p->bay_l;
             int   fl = WF_NO_BOTTOM | WF_NO_ENDS |
                        (p->style == CHURCH_BASILICA ? WF_NO_TOP : 0);
+            if (!church_survives(p, ELEM_ARCADE, i, ja, (float *)0) &&
+                !church_survives(p, ELEM_ARCADE, i - 1, ja, (float *)0))
+                continue;                    /* both neighbors fell    */
             place_piece(b, 2.0f * pfh, top - p->impost_h, wt,
                         (const GothicOpening *)0, 0.0f, p->impost_h, fl,
                         yawc, 0.0f, x, zc);
@@ -1606,6 +1685,8 @@ static void stone_arcades(MeshBuilder *b, const ChurchPlan *p) {
                 GothicOpening o;
                 float x0 = p->west_x + p->tower_d + (float)i * p->bay_l;
                 float xc = x0 + 0.5f * p->bay_l;
+                if (!church_survives(p, ELEM_CLEREST, i, ja, (float *)0))
+                    continue;
                 plan_opening(p, side > 0 ? WALL_CLEREST_N : WALL_CLEREST_S,
                              i, &o);
                 place_piece(b, p->bay_l, p->wall_h - p->arcade_h, wt,
@@ -1671,9 +1752,18 @@ static void stone_course(MeshBuilder *b, const ChurchPlan *p) {
     plan_opening(p, WALL_WEST, 0, &door);
 
     for (half = -1; half <= 1; half += 2) {
-        /* south half walks -z first; the north half mirrors */
+        /* south half walks -z first; the north half mirrors. v1 ruin:
+           the whole half stands only while every wall it rides is
+           whole (a broken run drops its course — runs later) */
         float hs = (float)half;
-        int   n  = 0;
+        int   n  = 0, jc = half > 0 ? 2 : 0, bb, whole = 1;
+        float tkc;
+        for (bb = 0; bb < p->nbays; bb++)
+            if (!church_survives(p, ELEM_WALL, bb, jc, &tkc) || tkc < 0.96f)
+                whole = 0;
+        if (!church_survives(p, ELEM_WALL, 0, 1, &tkc) || tkc < 0.96f)
+            whole = 0;
+        if (!whole) continue;
         pt[n++] = vec3_make(xf, y, hs * (0.5f * door.w + 0.35f));
         if (p->aisles)                        /* facade buttress jog */
             n = course_jog(pt, n, hs * (0.5f * p->nave_w - 0.5f * bw),
@@ -1756,20 +1846,24 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
        east station only as the apse's own) */
     if (p->aisles)
         for (i = p->tower ? 0 : 1; i < p->nbays; i++) {
-            float x, z;
-            if (plan_pier(p, i, PIER_ROW_S_ARCADE, &x, &z))
-                pier(b, p, x, z, rp, 0.0f, 1, 1.0f, 0.0f);
-            if (plan_pier(p, i, PIER_ROW_N_ARCADE, &x, &z))
-                pier(b, p, x, z, rp, 0.0f, 1, 1.0f, 0.0f);
+            float x, z, tk;
+            if (plan_pier(p, i, PIER_ROW_S_ARCADE, &x, &z) &&
+                church_survives(p, ELEM_PIER, i, 0, &tk))
+                pier(b, p, x, z, rp, 0.0f, 1, 1.0f, 0.0f, tk);
+            if (plan_pier(p, i, PIER_ROW_N_ARCADE, &x, &z) &&
+                church_survives(p, ELEM_PIER, i, 2, &tk))
+                pier(b, p, x, z, rp, 0.0f, 1, 1.0f, 0.0f, tk);
         }
     if (p->apse_sides == 5) {
         float rap = 0.4f > 0.7f * wt ? 0.4f : 0.7f * wt;
         for (i = 0; i < 6; i++) {
-            float x, z, ang;
+            float x, z, ang, tk;
+            if (!church_survives(p, ELEM_PIER, p->nbays, i, &tk))
+                continue;
             plan_apse_pier(p, i, &x, &z);
             ang = (-112.5f + 45.0f * (float)i) * (SOL_PI / 180.0f);
-            pier(b, p, x, z, rap, p->wall_h + 0.25f, 0,
-                 cosf(ang), sinf(ang));
+            pier(b, p, x, z, rap, tk * (p->wall_h + 0.25f), 0,
+                 cosf(ang), sinf(ang), 1.0f);
         }
     }
 
@@ -1784,22 +1878,27 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
                                                : p->aisle_h;
         for (i = 1; i < p->nbays; i++) {
             float x = p->west_x + p->tower_d + (float)i * p->bay_l;
-            buttress(b, bh, bw, bd, st, p->aisle_h, 1.0f, 0.0f,
-                     x, -(hwid + wt));   /* south: the body already
-                                            extends -z; back on the face */
-            buttress(b, bh, bw, bd, st, p->aisle_h, -1.0f, 0.0f,
-                     x, hwid + wt);      /* north: flipped 180 */
+            if (church_survives(p, ELEM_BUTTRESS, i, 0, (float *)0))
+                buttress(b, bh, bw, bd, st, p->aisle_h, 1.0f, 0.0f,
+                         x, -(hwid + wt));
+            if (church_survives(p, ELEM_BUTTRESS, i, 2, (float *)0))
+                buttress(b, bh, bw, bd, st, p->aisle_h, -1.0f, 0.0f,
+                         x, hwid + wt);
         }
         if (p->aisles) {
-            buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, 1.0f,
-                     p->west_x - wt, -0.5f * p->nave_w);
-            buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, 1.0f,
-                     p->west_x - wt, 0.5f * p->nave_w);
+            if (church_survives(p, ELEM_BUTTRESS, 0, 0, (float *)0))
+                buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, 1.0f,
+                         p->west_x - wt, -0.5f * p->nave_w);
+            if (church_survives(p, ELEM_BUTTRESS, 0, 2, (float *)0))
+                buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, 1.0f,
+                         p->west_x - wt, 0.5f * p->nave_w);
             if (p->apse_sides == 0) {
-                buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, -1.0f,
-                         p->east_x + wt, -0.5f * p->nave_w);
-                buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, -1.0f,
-                         p->east_x + wt, 0.5f * p->nave_w);
+                if (church_survives(p, ELEM_BUTTRESS, p->nbays, 0, (float *)0))
+                    buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, -1.0f,
+                             p->east_x + wt, -0.5f * p->nave_w);
+                if (church_survives(p, ELEM_BUTTRESS, p->nbays, 2, (float *)0))
+                    buttress(b, p->wall_h, bw, bd, st, p->wall_h, 0.0f, -1.0f,
+                             p->east_x + wt, 0.5f * p->nave_w);
             }
         }
     }
@@ -1815,16 +1914,37 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
            trimmed between them, the clerestory band's own */
         float pw = 0.5f * wt;
         float zs = hwid + 0.5f * wt;
-        parapet_strip(b, p->west_x - wt, p->east_x + wt,
-                      -zs - 0.5f * pw, -zs + 0.5f * pw,
-                      p->aisle_h, p->aisle_h + p->parapet_h, 1, 0);
-        parapet_strip(b, p->west_x - wt, p->east_x + wt,
-                      zs - 0.5f * pw, zs + 0.5f * pw,
-                      p->aisle_h, p->aisle_h + p->parapet_h, 1, 0);
-        parapet_strip(b, p->west_x - wt, p->west_x - wt + pw,
-                      -(zs - 0.5f * pw), zs - 0.5f * pw,
-                      p->wall_h, p->wall_h + p->parapet_h, 0, 1);
-        if (p->apse_sides == 0)
+        float tkp;
+        int   sd2, rr0, ii2;
+        for (sd2 = -1; sd2 <= 1; sd2 += 2) {   /* aisle strips, per RUN */
+            float zc0 = (float)sd2 * zs;
+            int   jc2 = sd2 > 0 ? 2 : 0;
+            rr0 = -1;
+            for (ii2 = 0; ii2 <= p->nbays; ii2++) {
+                int up = ii2 < p->nbays &&
+                         church_survives(p, ELEM_WALL, ii2, jc2, &tkp) &&
+                         tkp >= 0.96f;
+                if (up && rr0 < 0) rr0 = ii2;
+                if (!up && rr0 >= 0) {
+                    float rx0 = p->west_x + p->tower_d
+                              + (float)rr0 * p->bay_l - (rr0 == 0 ? wt : 0.0f);
+                    float rx1 = p->west_x + p->tower_d
+                              + (float)ii2 * p->bay_l
+                              + (ii2 == p->nbays ? wt : 0.0f);
+                    parapet_strip(b, rx0, rx1, zc0 - 0.5f * pw,
+                                  zc0 + 0.5f * pw,
+                                  p->aisle_h, p->aisle_h + p->parapet_h,
+                                  1, 0);
+                    rr0 = -1;
+                }
+            }
+        }
+        if (church_survives(p, ELEM_WALL, 0, 1, &tkp) && tkp >= 0.96f)
+            parapet_strip(b, p->west_x - wt, p->west_x - wt + pw,
+                          -(zs - 0.5f * pw), zs - 0.5f * pw,
+                          p->wall_h, p->wall_h + p->parapet_h, 0, 1);
+        if (p->apse_sides == 0 &&
+            church_survives(p, ELEM_WALL, p->nbays, 1, &tkp) && tkp >= 0.96f)
             parapet_strip(b, p->east_x + wt - pw, p->east_x + wt,
                           -(zs - 0.5f * pw), zs - 0.5f * pw,
                           p->wall_h, p->wall_h + p->parapet_h, 0, 1);
@@ -1836,15 +1956,40 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
                                 : p->west_x - wt + pw + 0.012f;
             float x1 = p->apse_sides ? p->east_x
                                      : p->east_x + wt - pw - 0.012f;
-            parapet_strip(b, x0, x1, -0.5f * p->nave_w - 0.5f * pw,
-                          -0.5f * p->nave_w + 0.5f * pw,
-                          p->wall_h, p->wall_h + p->parapet_h, 1, 0);
-            parapet_strip(b, x0, x1, 0.5f * p->nave_w - 0.5f * pw,
-                          0.5f * p->nave_w + 0.5f * pw,
-                          p->wall_h, p->wall_h + p->parapet_h, 1, 0);
+            int rrc, iic;
+            for (sd2 = -1; sd2 <= 1; sd2 += 2) {
+                float zc0 = (float)sd2 * 0.5f * p->nave_w;
+                int   jc2 = sd2 > 0 ? 2 : 0;
+                rrc = -1;
+                for (iic = 0; iic <= p->nbays; iic++) {
+                    int up = iic < p->nbays &&
+                             church_survives(p, ELEM_CLEREST, iic, jc2,
+                                             (float *)0);
+                    if (up && rrc < 0) rrc = iic;
+                    if (!up && rrc >= 0) {
+                        float rx0 = p->west_x + p->tower_d
+                                  + (float)rrc * p->bay_l;
+                        float rx1 = p->west_x + p->tower_d
+                                  + (float)iic * p->bay_l;
+                        if (rrc == 0) rx0 = x0;
+                        if (iic == p->nbays) rx1 = x1;
+                        parapet_strip(b, rx0, rx1, zc0 - 0.5f * pw,
+                                      zc0 + 0.5f * pw,
+                                      p->wall_h, p->wall_h + p->parapet_h,
+                                      1, 0);
+                        rrc = -1;
+                    }
+                }
+            }
         }
     }
 
+    {
+        float tkt;
+        if (p->tower &&
+            (!church_survives(p, ELEM_WALL, 0, 1, &tkt) || tkt < 0.96f))
+            goto tower_done;
+    }
     if (p->tower) {   /* the shaft above the nave walls, belfry pairs */
         float th = p->wall_h * (2.0f + 0.4f *
                    gothic_hash01(p->seed, LANE_TOWER_H, 0, 0));
@@ -1897,6 +2042,7 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
                           th, th + p->parapet_h, 0, 1);
         }
     }
+tower_done:
     (void)pfh;
 }
 
@@ -2113,7 +2259,8 @@ static void flyer(MeshBuilder *b, float x, float z_in, float z_out,
    strip (z0..z1 wide), diagonals round, everything else level-crowned */
 static void vault_vessel(MeshBuilder *b, const ChurchPlan *p,
                          float x_w, int nbays, float z0, float z1,
-                         float spring, float rib_sc, int formerets) {
+                         float spring, float rib_sc, int formerets,
+                         int lane) {
     vec3  d1[GOTHIC_ARCH_MAX_PTS], d2[GOTHIC_ARCH_MAX_PTS];
     vec3  h1r[GOTHIC_ARCH_MAX_PTS], h2r[GOTHIC_ARCH_MAX_PTS];
     vec3  wr[GOTHIC_ARCH_MAX_PTS];
@@ -2126,36 +2273,75 @@ static void vault_vessel(MeshBuilder *b, const ChurchPlan *p,
 
     for (i = 0; i < nbays; i++) {
         float xa = x_w + (float)i * l, xb = xa + l;
-        int   nh;
+        float tk;
+        int   nh, web_up, rib_up;
+        web_up = church_survives(p, ELEM_WEB, i, lane, (float *)0);
+        rib_up = church_survives(p, ELEM_RIB, i, lane, &tk);
+        if (!web_up && !rib_up) continue;
         n = vault_path(d1, xa, z0, xb, z1, spring, 0.0f);
         if (n < 3) continue;
         vault_path(d2, xb, z0, xa, z1, spring, 0.0f);
         nh = (n - 1) / 2;
-        vault_rib(b, d1, n, rib_sc);
-        vault_rib(b, d2, n, rib_sc);
-        boss_knob(b, d1[nh], 0.16f + 0.05f * rib_sc);
-        for (k = 0; k <= nh; k++) {            /* reversed halves */
-            h1r[k] = d1[n - 1 - k];            /* from (xa, z1)   */
-            h2r[k] = d2[n - 1 - k];            /* from (xb, z1)   */
+        if (web_up) {
+            vault_rib(b, d1, n, rib_sc);
+            vault_rib(b, d2, n, rib_sc);
+            boss_knob(b, d1[nh], 0.16f + 0.05f * rib_sc);
+        } else {
+            /* SPRINGER STUBS on standing piers — the single most
+               recognizable ruin signature: each diagonal keeps tk of
+               its run from BOTH springers, ragged where it broke */
+            int ns = (int)(tk * (float)nh);
+            if (ns >= 2) {
+                vec3 st1[GOTHIC_ARCH_MAX_PTS];
+                int  q;
+                vault_rib(b, d1, ns + 1, rib_sc);
+                vault_rib(b, d2, ns + 1, rib_sc);
+                for (q = 0; q <= ns; q++) st1[q] = d1[n - 1 - q];
+                vault_rib(b, st1, ns + 1, rib_sc);
+                for (q = 0; q <= ns; q++) st1[q] = d2[n - 1 - q];
+                vault_rib(b, st1, ns + 1, rib_sc);
+            }
         }
-        web_cell(b, d1, d2, nh + 1, dome);     /* S: (xa,z0)+(xb,z0) */
-        web_cell(b, h1r, h2r, nh + 1, dome);   /* N — wait: h1r from
-              (xb,z1), h2r from (xa,z1): both rise to the boss */
-        web_cell(b, d1, h2r, nh + 1, dome);    /* W: (xa,z0)+(xa,z1) */
-        web_cell(b, d2, h1r, nh + 1, dome);    /* E: (xb,z0)+(xb,z1) */
-        if (formerets) {   /* wall ribs, slimmer, half-buried — the
-                              aisles skip theirs (budget; barely seen) */
-            n = vault_path(wr, xa, z0, xb, z0, spring, a_l);
-            vault_rib(b, wr, n, rib_sc * 0.65f);
-            n = vault_path(wr, xa, z1, xb, z1, spring, a_l);
-            vault_rib(b, wr, n, rib_sc * 0.65f);
+        if (web_up) {
+            for (k = 0; k <= nh; k++) {        /* reversed halves */
+                h1r[k] = d1[n - 1 - k];        /* from (xa, z1)   */
+                h2r[k] = d2[n - 1 - k];        /* from (xb, z1)   */
+            }
+            web_cell(b, d1, d2, nh + 1, dome);
+            web_cell(b, h1r, h2r, nh + 1, dome);
+            web_cell(b, d1, h2r, nh + 1, dome);
+            web_cell(b, d2, h1r, nh + 1, dome);
+            if (formerets) {
+                n = vault_path(wr, xa, z0, xb, z0, spring, a_l);
+                vault_rib(b, wr, n, rib_sc * 0.65f);
+                n = vault_path(wr, xa, z1, xb, z1, spring, a_l);
+                vault_rib(b, wr, n, rib_sc * 0.65f);
+            }
         }
     }
-    /* transverse arches at the stations (shared between bays) */
+    /* transverse arches at the stations (whole with EITHER adjacent
+       web, a stub on standing piers when both fell) */
     for (i = 0; i <= nbays; i++) {
         float x = x_w + (float)i * l;
+        float tk;
+        int   bay = i < nbays ? i : nbays - 1;
+        int   up  = church_survives(p, ELEM_WEB, bay, lane, (float *)0) ||
+                    (i > 0 && church_survives(p, ELEM_WEB, i - 1, lane,
+                                              (float *)0));
+        if (!church_survives(p, ELEM_RIB, bay, lane, &tk)) continue;
         n = vault_path(wr, x, z0, x, z1, spring, a_t);
-        vault_rib(b, wr, n, rib_sc * 1.1f);
+        if (up) {
+            vault_rib(b, wr, n, rib_sc * 1.1f);
+        } else {
+            int ns = (int)(tk * (float)((n - 1) / 2));
+            if (ns >= 2) {
+                vec3 st1[GOTHIC_ARCH_MAX_PTS];
+                int  q;
+                vault_rib(b, wr, ns + 1, rib_sc * 1.1f);
+                for (q = 0; q <= ns; q++) st1[q] = wr[n - 1 - q];
+                vault_rib(b, st1, ns + 1, rib_sc * 1.1f);
+            }
+        }
     }
 }
 
@@ -2170,12 +2356,12 @@ static void stone_vaults(MeshBuilder *b, const ChurchPlan *p) {
 
     /* skip the tower bay's high vault (the shaft is open to the top) */
     vault_vessel(b, p, x_w, p->nbays, -0.5f * p->nave_w, 0.5f * p->nave_w,
-                 spring_n, 1.0f, 1);
+                 spring_n, 1.0f, 1, 1);
     if (p->aisles) {
         vault_vessel(b, p, x_w, p->nbays, -hwid, -0.5f * p->nave_w,
-                     p->impost_h, 0.7f, 0);
+                     p->impost_h, 0.7f, 0, 0);
         vault_vessel(b, p, x_w, p->nbays, 0.5f * p->nave_w, hwid,
-                     p->impost_h, 0.7f, 0);
+                     p->impost_h, 0.7f, 0, 2);
     }
 
     if (p->apse_sides == 5) {       /* the radial half-vault */
@@ -2183,21 +2369,23 @@ static void stone_vaults(MeshBuilder *b, const ChurchPlan *p) {
         int   rn = 0, k;
         float r   = 0.5411961f * p->nave_w;
         float cxa = p->east_x + 0.3826834f * r;
+        int apse_web = church_survives(p, ELEM_WEB, p->nbays, 1, (float *)0);
         for (k = 0; k < 6; k++) {
             vec3  full[GOTHIC_ARCH_MAX_PTS];
-            float vx, vz;
-            int   n, j;
+            float vx, vz, tk;
+            int   n, j, ns;
             plan_apse_pier(p, k, &vx, &vz);
             n = vault_path(full, vx, vz, 2.0f * cxa - vx, -vz,
                            spring_n, 0.0f);
             if (n < 3) { rn = 0; break; }
             rn = (n - 1) / 2 + 1;
             for (j = 0; j < rn; j++) rr[k][j] = full[j];
-            /* the rib stops a station short too: six sweeps converging
-               at one point stack anti-parallel side faces through the
-               center — everything inside the half-boss yields to it */
-            vault_rib(b, rr[k], rn - 1, 0.8f);
+            if (!church_survives(p, ELEM_RIB, p->nbays, k, &tk)) continue;
+            /* whole (a station short of the half-boss), or a stub */
+            ns = apse_web ? rn - 1 : (int)(tk * (float)(rn - 1));
+            if (ns >= 2) vault_rib(b, rr[k], ns, 0.8f);
         }
+        if (!apse_web) rn = 0;             /* no webs, no half-boss */
         if (rn >= 3) {
             /* the radial cells stop one station short of the center —
                five shallow fans converging at one point congest into
@@ -2211,26 +2399,36 @@ static void stone_vaults(MeshBuilder *b, const ChurchPlan *p) {
     /* responds: the bundle's landing shafts (item 4's deferral cashed) */
     if (p->aisles) {
         for (i = p->tower ? 0 : 1; i < p->nbays; i++) {
-            float x, z;
-            if (plan_pier(p, i, PIER_ROW_S_ARCADE, &x, &z))
+            float x, z, tk;
+            if (plan_pier(p, i, PIER_ROW_S_ARCADE, &x, &z) &&
+                church_survives(p, ELEM_PIER, i, 0, &tk) && tk >= 0.999f)
                 respond(b, x, z, p->impost_h, spring_n,
                         0.4f * rp / 0.12f);
-            if (plan_pier(p, i, PIER_ROW_N_ARCADE, &x, &z))
+            if (plan_pier(p, i, PIER_ROW_N_ARCADE, &x, &z) &&
+                church_survives(p, ELEM_PIER, i, 2, &tk) && tk >= 0.999f)
                 respond(b, x, z, p->impost_h, spring_n,
                         0.4f * rp / 0.12f);
         }
         for (i = 1; i < p->nbays; i++) {       /* aisle wall responds */
             float x = x_w + (float)i * p->bay_l;
-            respond(b, x, -hwid, p->plinth_h, p->impost_h, 0.33f * rp / 0.12f);
-            respond(b, x,  hwid, p->plinth_h, p->impost_h, 0.33f * rp / 0.12f);
+            float tk;
+            if (church_survives(p, ELEM_WALL, i, 0, &tk) && tk >= 0.96f)
+                respond(b, x, -hwid, p->plinth_h, p->impost_h,
+                        0.33f * rp / 0.12f);
+            if (church_survives(p, ELEM_WALL, i, 2, &tk) && tk >= 0.96f)
+                respond(b, x,  hwid, p->plinth_h, p->impost_h,
+                        0.33f * rp / 0.12f);
         }
     } else {
         for (i = 1; i < p->nbays; i++) {       /* the chapel's wall shafts */
             float x = x_w + (float)i * p->bay_l;
-            respond(b, x, -0.5f * p->nave_w, p->plinth_h, spring_n,
-                    0.33f * rp / 0.12f);
-            respond(b, x,  0.5f * p->nave_w, p->plinth_h, spring_n,
-                    0.33f * rp / 0.12f);
+            float tk;
+            if (church_survives(p, ELEM_WALL, i, 0, &tk) && tk >= 0.96f)
+                respond(b, x, -0.5f * p->nave_w, p->plinth_h, spring_n,
+                        0.33f * rp / 0.12f);
+            if (church_survives(p, ELEM_WALL, i, 2, &tk) && tk >= 0.96f)
+                respond(b, x,  0.5f * p->nave_w, p->plinth_h, spring_n,
+                        0.33f * rp / 0.12f);
         }
     }
 
@@ -2245,6 +2443,9 @@ static void stone_vaults(MeshBuilder *b, const ChurchPlan *p) {
             for (side = -1; side <= 1; side += 2) {
                 float z_in  = (float)side * 0.5f * p->nave_w;
                 float z_out = (float)side * (hwid + wt + 0.25f);
+                if (!church_survives(p, ELEM_FLYER, i,
+                                     side > 0 ? 2 : 0, (float *)0))
+                    continue;
                 flyer(b, x, z_in, z_out, y_high, y_low);
             }
         }
@@ -2559,33 +2760,45 @@ static void church_windows(MeshBuilder *stone, MeshBuilder *glass,
     int   i;
 
     for (i = 0; i < p->nbays; i++) {
+        /* glass falls at .30 inside tracery standing to .42 — gate
+           each independently and the walker's NULLs do the rest */
+        MeshBuilder *st_s = church_survives(p, ELEM_TRACERY, i, 0, (float *)0) ? stone : (MeshBuilder *)0;
+        MeshBuilder *gl_s = church_survives(p, ELEM_GLASS,   i, 0, (float *)0) ? glass : (MeshBuilder *)0;
+        MeshBuilder *st_n = church_survives(p, ELEM_TRACERY, i, 2, (float *)0) ? stone : (MeshBuilder *)0;
+        MeshBuilder *gl_n = church_survives(p, ELEM_GLASS,   i, 2, (float *)0) ? glass : (MeshBuilder *)0;
         plan_opening(p, WALL_AISLE_S, i, &o);
-        if (o.kind == GOTHIC_OPEN_WINDOW)
-            emit_tracery(stone, glass, &o, divisor, 1.0f, 0.0f,
+        if (o.kind == GOTHIC_OPEN_WINDOW && (st_s || gl_s))
+            emit_tracery(st_s, gl_s, &o, divisor, 1.0f, 0.0f,
                          o.cx, -(hwid + 0.5f * wt));
         plan_opening(p, WALL_AISLE_N, i, &o);
-        if (o.kind == GOTHIC_OPEN_WINDOW)
-            emit_tracery(stone, glass, &o, divisor, 1.0f, 0.0f,
+        if (o.kind == GOTHIC_OPEN_WINDOW && (st_n || gl_n))
+            emit_tracery(st_n, gl_n, &o, divisor, 1.0f, 0.0f,
                          o.cx, hwid + 0.5f * wt);
         if (p->style == CHURCH_BASILICA) {
             plan_opening(p, WALL_CLEREST_S, i, &o);
-            if (o.kind == GOTHIC_OPEN_WINDOW)
-                emit_tracery(stone, glass, &o, divisor, 1.0f, 0.0f,
+            if (o.kind == GOTHIC_OPEN_WINDOW && (st_s || gl_s))
+                emit_tracery(st_s, gl_s, &o, divisor, 1.0f, 0.0f,
                              o.cx, -0.5f * p->nave_w);
             plan_opening(p, WALL_CLEREST_N, i, &o);
-            if (o.kind == GOTHIC_OPEN_WINDOW)
-                emit_tracery(stone, glass, &o, divisor, 1.0f, 0.0f,
+            if (o.kind == GOTHIC_OPEN_WINDOW && (st_n || gl_n))
+                emit_tracery(st_n, gl_n, &o, divisor, 1.0f, 0.0f,
                              o.cx, 0.5f * p->nave_w);
         }
     }
-    plan_opening(p, WALL_WEST, 1, &o);           /* the great window */
-    if (o.kind == GOTHIC_OPEN_WINDOW)
-        emit_tracery(stone, glass, &o, divisor, 0.0f, -1.0f,
-                     p->west_x - 0.5f * wt, 0.0f);
-    plan_opening(p, WALL_EAST, 0, &o);
-    if (o.kind == GOTHIC_OPEN_WINDOW)
-        emit_tracery(stone, glass, &o, divisor, 0.0f, 1.0f,
-                     p->east_x + 0.5f * wt, 0.0f);
+    {
+        MeshBuilder *st_w = church_survives(p, ELEM_TRACERY, 0, 1, (float *)0) ? stone : (MeshBuilder *)0;
+        MeshBuilder *gl_w = church_survives(p, ELEM_GLASS,   0, 1, (float *)0) ? glass : (MeshBuilder *)0;
+        MeshBuilder *st_e = church_survives(p, ELEM_TRACERY, p->nbays, 1, (float *)0) ? stone : (MeshBuilder *)0;
+        MeshBuilder *gl_e = church_survives(p, ELEM_GLASS,   p->nbays, 1, (float *)0) ? glass : (MeshBuilder *)0;
+        plan_opening(p, WALL_WEST, 1, &o);       /* the great window */
+        if (o.kind == GOTHIC_OPEN_WINDOW && (st_w || gl_w))
+            emit_tracery(st_w, gl_w, &o, divisor, 0.0f, -1.0f,
+                         p->west_x - 0.5f * wt, 0.0f);
+        plan_opening(p, WALL_EAST, 0, &o);
+        if (o.kind == GOTHIC_OPEN_WINDOW && (st_e || gl_e))
+            emit_tracery(st_e, gl_e, &o, divisor, 0.0f, 1.0f,
+                         p->east_x + 0.5f * wt, 0.0f);
+    }
     if (p->apse_sides == 5) {
         float rap   = 0.4f > 0.7f * wt ? 0.4f : 0.7f * wt;
         float inset = 0.83f * rap;
@@ -2605,9 +2818,15 @@ static void church_windows(MeshBuilder *stone, MeshBuilder *glass,
                 o.w = len - 0.6f;
                 if (o.w < 0.3f) continue;
             }
-            if (o.kind == GOTHIC_OPEN_WINDOW)
-                emit_tracery(stone, glass, &o, divisor, nz, nx,
-                             mx + nx * 0.5f * wt, mz + nz * 0.5f * wt);
+            if (o.kind == GOTHIC_OPEN_WINDOW) {
+                MeshBuilder *st_a = church_survives(p, ELEM_TRACERY,
+                    p->nbays, k, (float *)0) ? stone : (MeshBuilder *)0;
+                MeshBuilder *gl_a = church_survives(p, ELEM_GLASS,
+                    p->nbays, k, (float *)0) ? glass : (MeshBuilder *)0;
+                if (st_a || gl_a)
+                    emit_tracery(st_a, gl_a, &o, divisor, nz, nx,
+                                 mx + nx * 0.5f * wt, mz + nz * 0.5f * wt);
+            }
         }
     }
 }
@@ -2807,20 +3026,50 @@ void church_roof(MeshBuilder *b, const float *params, int count) {
     y0  = p->wall_h + 0.08f;            /* behind the parapet: the gutter */
 
     /* the main roof: hall = ONE great roof over everything (the style
-       made visible); basilica/chapel = the nave's gable */
+       made visible); basilica/chapel = the nave's gable. Per-bay RUNS:
+       fallen bays open the vault's extrados to the sky, and each run
+       break gets its slab edge bands. */
     zn = (p->style == CHURCH_HALL ? hwid : 0.5f * p->nave_w) + 0.1f * wt;
     {
         float yr = y0 + zn * pitch_t;
-        /* the slabs tuck 2cm INSIDE their gables: the open slab ends
-           hide behind the gable slabs instead of reading as slots */
-        float sx0 = x_w + (p->tower ? 0.0f : 0.02f);
-        float sx1 = x_e - 0.02f;
-        roof_slope(b, sx0, sx1, -zn, y0, 0.0f, yr);
-        roof_slope(b, sx0, sx1,  zn, y0, 0.0f, yr);
-        if (!p->tower) roof_gable(b, x_w, -1.0f, -zn, zn, y0, yr);
-        if (p->apse_sides == 0)
-            roof_gable(b, x_e, 1.0f, -zn, zn, y0, yr);
-        else {                          /* the apse half-cone: its APEX
+        int   r0 = -1;
+        for (i = 0; i <= p->nbays; i++) {
+            int up = i < p->nbays &&
+                     church_survives(p, ELEM_ROOF, i, 1, (float *)0);
+            if (up && r0 < 0) r0 = i;
+            if (!up && r0 >= 0) {
+                float sx0 = x_w + (float)r0 * p->bay_l
+                          + ((r0 == 0 && !p->tower) ? 0.02f : 0.0f);
+                float sx1 = x_w + (float)i * p->bay_l
+                          - (i == p->nbays ? 0.02f : 0.0f);
+                int   gw = r0 == 0 && !p->tower;
+                int   ge = i == p->nbays && p->apse_sides == 0;
+                roof_slope(b, sx0, sx1, -zn, y0, 0.0f, yr);
+                roof_slope(b, sx0, sx1,  zn, y0, 0.0f, yr);
+                if (gw) roof_gable(b, x_w, -1.0f, -zn, zn, y0, yr);
+                else {                        /* the run-break band */
+                    vec3 e0 = vec3_make(sx0, y0, -zn);
+                    vec3 rr = vec3_make(sx0, yr, 0.0f);
+                    vec3 e1 = vec3_make(sx0, y0, zn);
+                    vec3 dn = vec3_make(0.0f, -ROOF_T, 0.0f);
+                    quad3(b, e0, rr, vec3_add(rr, dn), vec3_add(e0, dn));
+                    quad3(b, rr, e1, vec3_add(e1, dn), vec3_add(rr, dn));
+                }
+                if (ge) roof_gable(b, x_e, 1.0f, -zn, zn, y0, yr);
+                else if (i < p->nbays || p->apse_sides != 0) {
+                    vec3 e0 = vec3_make(sx1, y0, -zn);
+                    vec3 rr = vec3_make(sx1, yr, 0.0f);
+                    vec3 e1 = vec3_make(sx1, y0, zn);
+                    vec3 dn = vec3_make(0.0f, -ROOF_T, 0.0f);
+                    quad3(b, rr, e0, vec3_add(e0, dn), vec3_add(rr, dn));
+                    quad3(b, e1, rr, vec3_add(rr, dn), vec3_add(e1, dn));
+                }
+                r0 = -1;
+            }
+        }
+        if (p->apse_sides != 0 &&
+            church_survives(p, ELEM_ROOF, p->nbays, 1, (float *)0))
+        {                               /* the apse half-cone: its APEX
                tucks INTO the gable, so the mouth-side facet edges lie
                flat against the gable face — an apex over the apse
                center leaves an open wedge of sky at the junction
@@ -2833,7 +3082,8 @@ void church_roof(MeshBuilder *b, const float *params, int count) {
             int   k;
             if (ay > ridge - 0.3f) ay = ridge - 0.3f;
             apex = vec3_make(x_e + 0.02f, ay, 0.0f);
-            roof_gable(b, x_e, 1.0f, -zn, zn, y0, ridge);
+            if (church_survives(p, ELEM_ROOF, p->nbays - 1, 1, (float *)0))
+                roof_gable(b, x_e, 1.0f, -zn, zn, y0, ridge);
             for (k = 0; k < 5; k++) {
                 float ax, az, bx, bz;
                 plan_apse_pier(p, k,     &ax, &az);
@@ -2852,32 +3102,49 @@ void church_roof(MeshBuilder *b, const float *params, int count) {
         if (y_in < y_out + 0.3f) y_in = y_out + 0.3f;
         for (side = -1; side <= 1; side += 2) {
             float zo = (float)side * z_out, zi = (float)side * z_in;
-            roof_slope(b, x_w, x_e, zo, y_out, zi, y_in);
-            {   /* the end closures: the slab's own edge band (top to
-                   underside) + the attic triangle UNDER the band — two
-                   pieces tiling the end plane, never overlapping */
+            {   /* per-bay runs like the nave; each run carries its
+                   own end closures (edge band + attic triangle) */
+                int r0 = -1, ii;
                 float yo_u = y_out - ROOF_T, yi_u = y_in - ROOF_T;
-                vec3 t0w = vec3_make(x_w, y_out, zo), t1w = vec3_make(x_w, y_in, zi);
-                vec3 u0w = vec3_make(x_w, yo_u, zo),  u1w = vec3_make(x_w, yi_u, zi);
-                vec3 t0e = vec3_make(x_e, y_out, zo), t1e = vec3_make(x_e, y_in, zi);
-                vec3 u0e = vec3_make(x_e, yo_u, zo),  u1e = vec3_make(x_e, yi_u, zi);
-                vec3 w2 = vec3_make(x_w, yo_u, zi),   e2 = vec3_make(x_e, yo_u, zi);
-                if (side > 0) {
-                    quad3(b, t1w, t0w, u0w, u1w);
-                    quad3(b, t0e, t1e, u1e, u0e);
-                    tri3(b, u1w, u0w, w2);
-                    tri3(b, u0e, u1e, e2);
-                } else {
-                    quad3(b, t0w, t1w, u1w, u0w);
-                    quad3(b, t1e, t0e, u0e, u1e);
-                    tri3(b, u0w, u1w, w2);
-                    tri3(b, u1e, u0e, e2);
+                for (ii = 0; ii <= p->nbays; ii++) {
+                    int up = ii < p->nbays &&
+                             church_survives(p, ELEM_ROOF, ii,
+                                             side > 0 ? 2 : 0, (float *)0);
+                    if (up && r0 < 0) r0 = ii;
+                    if (!up && r0 >= 0) {
+                        float rx0 = x_w + (float)r0 * p->bay_l;
+                        float rx1 = x_w + (float)ii * p->bay_l;
+                        vec3 t0w = vec3_make(rx0, y_out, zo);
+                        vec3 t1w = vec3_make(rx0, y_in, zi);
+                        vec3 u0w = vec3_make(rx0, yo_u, zo);
+                        vec3 u1w = vec3_make(rx0, yi_u, zi);
+                        vec3 t0e = vec3_make(rx1, y_out, zo);
+                        vec3 t1e = vec3_make(rx1, y_in, zi);
+                        vec3 u0e = vec3_make(rx1, yo_u, zo);
+                        vec3 u1e = vec3_make(rx1, yi_u, zi);
+                        vec3 w2 = vec3_make(rx0, yo_u, zi);
+                        vec3 e2 = vec3_make(rx1, yo_u, zi);
+                        roof_slope(b, rx0, rx1, zo, y_out, zi, y_in);
+                        if (side > 0) {
+                            quad3(b, t1w, t0w, u0w, u1w);
+                            quad3(b, t0e, t1e, u1e, u0e);
+                            tri3(b, u1w, u0w, w2);
+                            tri3(b, u0e, u1e, e2);
+                        } else {
+                            quad3(b, t0w, t1w, u1w, u0w);
+                            quad3(b, t1e, t0e, u0e, u1e);
+                            tri3(b, u0w, u1w, w2);
+                            tri3(b, u1e, u0e, e2);
+                        }
+                        r0 = -1;
+                    }
                 }
             }
         }
     }
 
-    if (p->tower) {                     /* the spire over the tower */
+    if (p->tower &&
+        church_survives(p, ELEM_SPIRE, 0, 1, (float *)0)) {
         float th   = p->wall_h * (2.0f + 0.4f *
                      gothic_hash01(p->seed, LANE_TOWER_H, 0, 0));
         float half = 0.5f * p->nave_w * 0.82f;
@@ -2899,4 +3166,250 @@ void church_roof(MeshBuilder *b, const float *params, int count) {
         }
     }
     (void)i;
+}
+
+/* ================== item 8: the ruin & the worksite ==================
+   Survival is a QUERY (see gothic.h): pure, deterministic, consulted
+   at every emitter site. No ruin pass, no mesh surgery, ever. */
+
+/* gothic's own value-noise twin (mesh.c's is static; §1.3's lanes
+   want gothic-owned noise anyway): smooth bilinear over a lattice
+   hashed through the lane system */
+static float gothic_vnoise(float x, float z, unsigned seed, int lane) {
+    int   ix = (int)floorf(x), iz = (int)floorf(z);
+    float fx = x - (float)ix, fz = z - (float)iz;
+    float sx = fx * fx * (3.0f - 2.0f * fx);
+    float sz = fz * fz * (3.0f - 2.0f * fz);
+    float a = gothic_hash01(seed, lane, ix,     iz);
+    float b = gothic_hash01(seed, lane, ix + 1, iz);
+    float c = gothic_hash01(seed, lane, ix,     iz + 1);
+    float d = gothic_hash01(seed, lane, ix + 1, iz + 1);
+    float ab = a + (b - a) * sx;
+    float cd = c + (d - c) * sx;
+    return ab + (cd - ab) * sz;
+}
+
+/* the decay field: noise BLENDED with a gradient toward one end
+   (LANE_RUIN_DIR) — collapse is spatially correlated, never
+   salt-and-pepper; ruins have plots */
+static float ruin_pressure(const ChurchPlan *p, int i, int j) {
+    float fi, grad, d, ruin = p->ruin;
+    if (ruin <= 0.0f) return 0.0f;
+    fi = (float)i / (float)(p->nbays > 1 ? p->nbays : 1);
+    grad = gothic_hash01(p->seed, LANE_RUIN_DIR, 0, 0) < 0.5f
+               ? fi : 1.0f - fi;
+    d = 0.55f * gothic_vnoise(0.7f * (float)i, 0.7f * (float)j,
+                              p->seed, LANE_RUIN)
+      + 0.45f * grad;
+    return ruin * (0.35f + 0.65f * d);
+}
+
+/* the ladder: fragility-ordered, APPEND-ONLY (TODO6 item 8, ruled) */
+static const float RUIN_T[ELEM_COUNT] = {
+    0.12f,   /* ROOF                                            */
+    0.28f,   /* WEB                                             */
+    0.30f,   /* GLASS                                           */
+    0.42f,   /* TRACERY  (> glass: the empty east frame)        */
+    0.45f,   /* CLEREST                                         */
+    0.50f,   /* RIB                                             */
+    0.55f,   /* FLYER                                           */
+    0.62f,   /* ARCADE                                          */
+    0.65f,   /* PINNACLE                                        */
+    0.70f,   /* WALL (upper; the lower courses hold to .95)     */
+    0.80f,   /* PIER                                            */
+    0.58f,   /* SPIRE (ladder position by VALUE, enum appended) */
+    0.80f    /* BUTTRESS (pier-tough)                           */
+};
+#define RUIN_T_WALL_LOW 0.95f       /* ground plans outlive everything */
+
+/* construction stages, east-to-west: 0 plinth, 1 piers+lower walls,
+   2 arcade+aisles, 3 clerestory, 4 high vaults, 5 roof, 6 ornament */
+static const int BUILT_STAGE[ELEM_COUNT] = {
+    5,       /* ROOF      */
+    4,       /* WEB       */
+    6,       /* GLASS     */
+    6,       /* TRACERY   */
+    3,       /* CLEREST   */
+    4,       /* RIB       */
+    4,       /* FLYER     */
+    2,       /* ARCADE    */
+    6,       /* PINNACLE  */
+    1,       /* WALL      */
+    1,       /* PIER      */
+    6,       /* SPIRE     */
+    1        /* BUTTRESS  */
+};
+
+static int built_allows(const ChurchPlan *p, int elem, int i) {
+    float stages, built = p->built;
+    int   avail;
+    if (built >= 1.0f) return 1;
+    if (built <= 0.0f) return 0;
+    stages = built * (6.0f + (float)p->nbays);
+    avail  = (int)(stages - (float)(p->nbays - 1 - i));  /* east first */
+    return BUILT_STAGE[elem] <= avail;
+}
+
+/* course-quantize a kept-height fraction (broken walls break along
+   their joints — snapped tops read as masonry, not torn paper) */
+static float quantize_keep(const ChurchPlan *p, float keep, float full_h) {
+    float courses = full_h / 0.4f;
+    float kept    = floorf(keep * courses + 0.5f);
+    (void)p;
+    if (kept < 1.0f) kept = 1.0f;
+    return kept / courses;
+}
+
+int church_survives(const ChurchPlan *p, int elem, int i, int j,
+                    float *t_keep) {
+    float pr, tk = 1.0f;
+    int   ok = 1;
+    if (t_keep) *t_keep = 1.0f;
+    if (!p || elem < 0 || elem >= ELEM_COUNT) return 0;
+    if (!built_allows(p, elem, i)) return 0;
+    pr = ruin_pressure(p, i, j);
+
+    switch (elem) {
+    case ELEM_WALL:
+        /* partial: whole under .70, lower courses hold to .95 */
+        if (pr >= RUIN_T_WALL_LOW) { tk = 0.12f; }
+        else if (pr >= RUIN_T[ELEM_WALL]) {
+            tk = 1.0f - 0.85f * (pr - RUIN_T[ELEM_WALL])
+                       / (RUIN_T_WALL_LOW - RUIN_T[ELEM_WALL]);
+        }
+        if (tk < 1.0f) {
+            tk = quantize_keep(p, tk, p->aisle_h);
+            if (tk > 0.96f) tk = 0.96f;     /* a broken wall stays broken */
+        }
+        break;
+    case ELEM_PIER:
+        if (pr >= RUIN_T[ELEM_PIER]) {      /* the broken column */
+            tk = 0.15f + 0.45f *
+                 gothic_hash01(p->seed, LANE_RUIN, 100 + i, j);
+            tk = quantize_keep(p, tk, p->impost_h);
+        }
+        break;
+    case ELEM_RIB: {
+        /* whole with its web; a springer stub on standing piers when
+           the web fell; nothing on fallen piers */
+        float dummy;
+        int piers = church_survives(p, ELEM_PIER, i, j, &dummy)
+                 && church_survives(p, ELEM_PIER,
+                                    i + 1 > p->nbays ? p->nbays : i + 1,
+                                    j, &dummy);
+        if (!piers) return 0;
+        if (!church_survives(p, ELEM_WEB, i, j, &dummy))
+            tk = 0.15f + 0.25f *
+                 gothic_hash01(p->seed, LANE_RUIN, 200 + i, j);
+        break;
+    }
+    case ELEM_WEB: {
+        float dummy;
+        ok = pr < RUIN_T[ELEM_WEB]
+          && pr < RUIN_T[ELEM_RIB]          /* its ribs' own rolls    */
+          && church_survives(p, ELEM_PIER, i, j, &dummy)
+          && church_survives(p, ELEM_PIER,
+                             i + 1 > p->nbays ? p->nbays : i + 1, j, &dummy);
+        break;
+    }
+    case ELEM_ROOF: {
+        float dummy;
+        ok = pr < RUIN_T[ELEM_ROOF]
+          && church_survives(p, ELEM_WEB, i, 1, &dummy);
+        break;
+    }
+    case ELEM_FLYER: {
+        float dummy;
+        int bay = i < p->nbays ? i : p->nbays - 1;
+        ok = pr < RUIN_T[ELEM_FLYER]
+          && church_survives(p, ELEM_CLEREST, bay, j, &dummy)
+          && church_survives(p, ELEM_BUTTRESS, i, j, &dummy);
+        break;
+    }
+    case ELEM_PINNACLE: {
+        float dummy;
+        ok = pr < RUIN_T[ELEM_PINNACLE]
+          && church_survives(p, ELEM_BUTTRESS, i, j, &dummy);
+        break;
+    }
+    case ELEM_ARCADE: {
+        float dummy;
+        ok = pr < RUIN_T[ELEM_ARCADE]
+          && church_survives(p, ELEM_PIER, i, j, &dummy)
+          && church_survives(p, ELEM_PIER,
+                             i + 1 > p->nbays ? p->nbays : i + 1, j, &dummy);
+        break;
+    }
+    case ELEM_GLASS: {
+        float dummy;
+        ok = pr < RUIN_T[ELEM_GLASS]
+          && church_survives(p, ELEM_TRACERY, i, j, &dummy);
+        break;
+    }
+    case ELEM_TRACERY: {
+        float tw;
+        ok = pr < RUIN_T[ELEM_TRACERY]
+          && church_survives(p, ELEM_WALL, i, j, &tw)
+          && tw >= 0.96f;                   /* its wall stands whole  */
+        break;
+    }
+    case ELEM_SPIRE: {
+        float tw;
+        ok = pr < RUIN_T[ELEM_SPIRE]
+          && church_survives(p, ELEM_WALL, 0, j, &tw)
+          && tw >= 0.96f;
+        break;
+    }
+    default:
+        ok = pr < RUIN_T[elem];
+        break;
+    }
+    if (!ok) return 0;
+    if (t_keep) *t_keep = tk;
+    return 1;
+}
+
+/* the pavement — the group's fourth member: per-bay slabs that the
+   ruin OMITS where the vault above fell (item 9 sinks the datum so
+   the island's grass becomes the floor of roofless bays) */
+void church_floor(MeshBuilder *b, const float *params, int count) {
+    ChurchPlan plan;
+    const ChurchPlan *p = &plan;
+    float y, hwid;
+    int   i, lane;
+
+    if (!b) return;
+    church_plan(&plan, params, count);
+    y    = p->plinth_h - 0.02f;        /* a course lip below the plinth */
+    hwid = 0.5f * p->nave_w + p->aisle_w;
+
+    for (i = 0; i < p->nbays; i++) {
+        float x0 = p->west_x + p->tower_d + (float)i * p->bay_l;
+        float x1 = x0 + p->bay_l;
+        for (lane = 0; lane <= 2; lane++) {
+            float z0, z1;
+            if (lane == 1) { z0 = -0.5f * p->nave_w; z1 = 0.5f * p->nave_w; }
+            else if (!p->aisles) continue;
+            else if (lane == 0) { z0 = -hwid; z1 = -0.5f * p->nave_w; }
+            else                { z0 = 0.5f * p->nave_w; z1 = hwid; }
+            if (!church_survives(p, ELEM_WEB, i, lane, (float *)0))
+                continue;
+            gy_face(b, x0, x1, y, z0, z1, 1);
+        }
+    }
+    if (p->tower &&
+        church_survives(p, ELEM_WEB, 0, 1, (float *)0))
+        gy_face(b, p->west_x, p->west_x + p->tower_d, y,
+                -0.5f * p->nave_w, 0.5f * p->nave_w, 1);
+    if (p->apse_sides == 5 &&
+        church_survives(p, ELEM_WEB, p->nbays, 1, (float *)0)) {
+        int k;
+        for (k = 0; k < 5; k++) {       /* a fan over the chevet floor */
+            float ax, az, bx, bz;
+            plan_apse_pier(p, k,     &ax, &az);
+            plan_apse_pier(p, k + 1, &bx, &bz);
+            tri3(b, vec3_make(p->east_x, y, 0.0f),
+                 vec3_make(ax, y, az), vec3_make(bx, y, bz));
+        }
+    }
 }

@@ -6806,6 +6806,15 @@ int main(void) {
                rel round-trip instead) */
             refs++;
             if (o->mesh.index_count > 0) solid++;
+            else {
+                /* item 8 made honest emptiness legal: a church_roof at
+                   ruin 0.6 builds NOTHING because every roof has fallen
+                   — that IS its reconstruction. The drift this check
+                   exists to catch is an unknown/broken ref, so a ref
+                   the registry still knows counts as reconstructed. */
+                const char *const *nm; const float *df;
+                if (mesh_ref_schema(o->mesh_ref, &nm, &df) >= 0) solid++;
+            }
         }
         scene_release_meshes(&check);     /* shared shapes go BACK, not down */
         /* counts may legitimately differ now: scene.stml can be the user's

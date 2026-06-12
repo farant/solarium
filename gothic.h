@@ -183,6 +183,9 @@ typedef struct {
     float    aisle_h, wall_h;  /* aisle / nave wall heads                  */
     float    parapet_h;        /* band above the wall head (item 4)        */
     float    acute;
+    float    ruin, built;      /* item 8's masks, clamped [0,1] — params
+                                  of the same schema, so every reader of
+                                  the plan reads the same entropy        */
     unsigned seed;
 } ChurchPlan;
 
@@ -304,5 +307,51 @@ void gothic_spire(MeshBuilder *b, float cx, float cz, float half,
 /* a pinnacle: Roriczer simplified — square shaft, four gablets, a
    slender pyramid, a finial knob. Stands on its local origin. */
 void gothic_pinnacle(MeshBuilder *b, float h, unsigned seed);
+
+/* ---- item 8: the ruin & the worksite — survival is a query ----
+   There is no ruin pass: every emitter call site asks church_survives
+   before emitting, so a ruined church is one where some answers were
+   no, and the same seed keeps its exact collapse forever. `ruin`
+   walks a spatially-correlated decay field down the threshold ladder;
+   `built` runs the same query against construction stages awarded
+   east-to-west (choir first — Cologne for six hundred years). The
+   two compose by intersection: a ruined abandoned worksite is free.
+
+   The class ladder is APPEND-ONLY and fragility-ordered — the values
+   are taste, the ORDER is structural (glass falls at .30 inside
+   tracery standing to .42: the empty east frame). Within one bay the
+   ladder alone orders collapse; the GRAPH (web needs its piers, the
+   flyer both ends, the pinnacle its buttress) binds across cells. */
+enum {
+    ELEM_ROOF = 0,     /* per bay                                   */
+    ELEM_WEB,          /* per bay per vessel (lane 0/1/2)           */
+    ELEM_GLASS,        /* per window                                */
+    ELEM_TRACERY,      /* per window                                */
+    ELEM_CLEREST,      /* the clerestory band, per bay per side     */
+    ELEM_RIB,          /* with its web, or a springer stub          */
+    ELEM_FLYER,        /* per station per side                      */
+    ELEM_ARCADE,       /* the open arch, per bay per side           */
+    ELEM_PINNACLE,     /* per station per side                      */
+    ELEM_WALL,         /* per bay per side — PARTIAL: t_keep is the
+                          kept height fraction, course-quantized     */
+    ELEM_PIER,         /* per station per row — PARTIAL: broken
+                          column, t_keep of the shaft               */
+    ELEM_SPIRE,        /* one                                       */
+    ELEM_BUTTRESS,     /* per station per side (pier-tough)         */
+    ELEM_COUNT
+};
+
+/* the verdict: 0 = falls/never built, 1 = stands. Partial classes
+   (WALL, PIER, RIB) report a keep fraction in *t_keep (1 = whole;
+   a rib's stub fraction; a wall's course-quantized height). i = bay
+   or station along the axis (the apse queries at i = nbays, the
+   facade/tower at i = 0); j = lane or side. */
+int church_survives(const ChurchPlan *p, int elem, int i, int j,
+                    float *t_keep);
+
+/* the pavement — the group's FOURTH member, arriving with the item
+   that needed something to omit: bays whose vaults fell lose their
+   paving (item 9 sinks the datum so the island grass shows through) */
+void church_floor(MeshBuilder *b, const float *params, int count);
 
 #endif /* GOTHIC_H */
