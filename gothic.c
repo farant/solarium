@@ -1134,8 +1134,11 @@ static void place_arch(MeshBuilder *b, float span, float hloc, float t,
         return;
     if (spring - ybase + gothic_arch_y(span, a, 0.0f) > hloc - 0.4f)
         a = gothic_arch_acuteness_for(span, room);   /* level-crown again */
+    /* WF_NO_SILL: an interior arch spans FLOOR, not a doorway — the
+       pavement (or the ruin's grass) owns that plane; the threshold
+       strip floated over dipping terrain once the pavement fell */
     arched_orders(b, span, hloc, t, 0.0f, span, 0.0f, spring - ybase, a,
-                  1, 0.0f, 0, flags | WF_NO_ENDS);
+                  1, 0.0f, 0, flags | WF_NO_ENDS | WF_NO_SILL);
     mb_transform_from(b, v0, c, s, tx, ybase, tz);
 }
 
@@ -3459,8 +3462,13 @@ static void stone_rubble(MeshBuilder *b, const ChurchPlan *p) {
                         float n = gothic_vnoise(2.0f * uu + (float)i,
                                                 2.0f * vv + (float)lane,
                                                 p->seed, LANE_RUIN);
+                        /* based at the FOUNDATION depth, the walls' own
+                           law — a mound rim above the slope floats;
+                           one that climbs from the skirt emerges */
                         q[k2] = vec3_make(cx + uu * rad,
-                                          -0.6f + (0.6f + hgt * (0.4f + 0.6f * n))
+                                          -GOTHIC_FOUNDATION
+                                          + (GOTHIC_FOUNDATION
+                                             + hgt * (0.4f + 0.6f * n))
                                               * fall,
                                           cz + vv * rad);
                     }

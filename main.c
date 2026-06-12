@@ -4431,7 +4431,62 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         sol_bool u_now = glfwGetKey(w, GLFW_KEY_U) == GLFW_PRESS;
         if (u_now && !st->u_was_down && st->current_terrain != 0) {
             SceneObject *isl = scene_get(&st->scene, st->current_terrain);
-            if (isl && isl->mesh_ref &&
+            sol_u32 had = 0;
+            if (isl && isl->nid) {     /* a church here already? then U
+                                          is the RUIN DIAL: walk the
+                                          ladder 0 -> .3 -> .6 -> .9 -> 0 */
+                sol_u32 ai;
+                for (ai = 0; ai < st->scene.count && !had; ai++) {
+                    SceneObject *a = &st->scene.objects[ai];
+                    const char *rt = scene_meta_get(&st->scene, a->handle,
+                                                    "room_type");
+                    const char *pl = scene_meta_get(&st->scene, a->handle,
+                                                    "plot");
+                    if (rt && strcmp(rt, "church") == 0 &&
+                        pl && strcmp(pl, isl->nid) == 0)
+                        had = a->handle;
+                }
+            }
+            if (had) {
+                float r = 0.0f, nr;
+                sol_u32 ci;
+                for (ci = 0; ci < st->scene.count; ci++) {
+                    SceneObject *c = &st->scene.objects[ci];
+                    if (c->parent != had || !c->mesh_ref) continue;
+                    if (c->mesh_param_count >= 5) r = c->mesh_params[4];
+                    break;
+                }
+                nr = r < 0.15f ? 0.3f : r < 0.45f ? 0.6f :
+                     r < 0.75f ? 0.9f : 0.0f;
+                for (ci = 0; ci < st->scene.count; ci++) {
+                    SceneObject *c = &st->scene.objects[ci];
+                    float np[5];
+                    char  okey[160];
+                    if (c->parent != had || !c->mesh_ref) continue;
+                    if (strncmp(c->mesh_ref, "church_", 7) != 0) continue;
+                    /* params are the mesh's IDENTITY (P4 item 4): give
+                       the old shape back to the registry BEFORE the
+                       params change, or resolve will see a mesh already
+                       present and keep the old stones standing */
+                    if (c->mesh.index_count != 0 &&
+                        mesh_asset_key(c, okey)) {
+                        asset_release(&g_mesh_assets, okey);
+                        memset(&c->mesh, 0, sizeof c->mesh);
+                    }
+                    np[0] = c->mesh_params[0];
+                    np[1] = c->mesh_params[1];
+                    np[2] = c->mesh_params[2];
+                    np[3] = -1.0f;            /* style: still derived  */
+                    np[4] = nr;
+                    scene_mesh_params_set(&st->scene, c->handle, np, 5);
+                }
+                scene_resolve_meshes(&st->scene);
+                collide_rebuild(&st->colliders, &st->scene);
+                scene_save(&st->scene, "scene.stml");
+                printf(nr > 0.0f
+                           ? "the church decays: ruin %.1f\n"
+                           : "the church stands whole again\n", nr);
+            } else if (isl && isl->mesh_ref &&
                 strcmp(isl->mesh_ref, "terrain") == 0) {
                 float cw = mesh_ref_param("terrain", isl->mesh_params,
                                           isl->mesh_param_count, "w");
@@ -4476,6 +4531,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                             vec3_make(0.0f, datum, 0.0f)),
                                    rot, one);
                 scene_meta_set(&st->scene, anchor, "room_type", "church");
+                if (isl->nid)            /* the dial finds it next press */
+                    scene_meta_set(&st->scene, anchor, "plot", isl->nid);
                 {
                     const char *nm = scene_meta_get(&st->scene, isl->handle,
                                                     "name");
