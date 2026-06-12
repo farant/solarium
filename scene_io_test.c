@@ -95,6 +95,15 @@ int main(void) {
         scene_material_set(&scene, box_h, bm);
     }
 
+    /* synthesized material (texture side-quest): kind + knob PREFIX ride
+       the same <mat> element — seed 3, the file's own two knobs only */
+    {
+        float tp[2];
+        tp[0] = 3.0f; tp[1] = 2.0f;
+        scene_tex_ref_set(&scene, box_h, "stone");
+        scene_tex_params_set(&scene, box_h, tp, 2);
+    }
+
     /* components (P4 item 6): a known type with a param prefix, and an
        UNKNOWN type that must survive the trip intact (forward compat).
        emit (item 7) rides along with a 5-param prefix — the 24-param
@@ -237,6 +246,19 @@ int main(void) {
                 return 1;
             }
             printf("material factors (color + roughness + emissive) round-trip: ok\n");
+            if (!bb->tex_ref || strcmp(bb->tex_ref, "stone") != 0 ||
+                bb->tex_param_count != 2 ||
+                bb->tex_params[0] != 3.0f || bb->tex_params[1] != 2.0f) {
+                printf("FAIL: synthesized material ref did not round-trip\n");
+                scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            if (bf->tex_ref) {
+                printf("FAIL: tex ref leaked onto an object that has none\n");
+                scene_free(&b); scene_free(&scene);
+                return 1;
+            }
+            printf("synthesized material (kind + knob prefix) round-trips: ok\n");
             if (bb->comp_count != 3 ||
                 strcmp(bb->components[0].type, "spin") != 0 ||
                 bb->components[0].param_count != 4 ||

@@ -10,6 +10,7 @@
 #include "rhi.h"                 /* the graphics seam — no GL above here */
 #include "mesh.h"
 #include "gothic.h"              /* the kit: church_plan + queries (P6) */
+#include "texgen.h"              /* synthesized material maps (texture side-quest) */
 #include "scene.h"
 #include "sol_math.h"
 #include "camera.h"
@@ -2931,13 +2932,135 @@ static void tex_asset_key(const char *path, sol_bool srgb, char *buf) {
 #endif
 }
 
+/* ---- synthesized materials through the registry (texture side-quest) ----
+   One entry per (kind, knob prefix) holding all three maps — albedo rides
+   sRGB, normal/ORM ride linear (colorspace stays part of identity, the
+   "t|" lesson). Key = "x|<kind>|<prefix over SCHEMA defaults>": the
+   materials.stml layer is a render-time VOICE, never identity (the
+   sounds.stml lesson) — editing it re-renders pixels behind the same
+   handles, and nobody rebinds. A knob explicitly set to its schema
+   default is identity-equal to leaving it unset (defaults-are-identity,
+   the mesh doctrine); the file layer then voices both alike. The payload
+   carries kind + prefix so the watcher re-renders without parsing keys. */
+typedef struct {
+    RhiTexture albedo, normal, orm;
+    int        kind;
+    float      prefix[TEXGEN_PARAMS];
+    int        count;
+} TexgenSet;
+
+static AssetStore g_texgen_assets;
+
+static void texgen_asset_destroy(void *payload, void *user) {
+    TexgenSet *t = (TexgenSet *)payload;
+    (void)user;
+    rhi_destroy_texture(t->albedo);
+    rhi_destroy_texture(t->normal);
+    rhi_destroy_texture(t->orm);
+}
+
+/* materials.stml: <materials><stone depth="0.8"/></materials> — knobs by
+   NAME over the kind defaults (the sounds.stml pattern verbatim; the tag
+   IS the kind). Layering: schema defaults < materials.stml < the
+   object's own <tex> knobs. */
+static float g_mat_over[TEXGEN_KIND_COUNT][TEXGEN_PARAMS];
+static int   g_mat_over_on[TEXGEN_KIND_COUNT];
+
+static void load_material_overrides(void) {
+    char     *src;
+    StmlNode *root, *top;
+    sol_u32   i;
+    memset(g_mat_over_on, 0, sizeof g_mat_over_on);
+    src = fs_read_file("materials.stml", 64L * 1024L, (long *)0, (int *)0);
+    if (src == NULL) return;                   /* no file = pure presets */
+    root = stml_parse(src);
+    free(src);
+    if (root == NULL) {
+        fprintf(stderr, "materials.stml: parse error — using presets\n");
+        return;
+    }
+    top = stml_child(root, "materials");
+    for (i = 0; top && i < top->child_count; i++) {
+        StmlNode          *n    = top->children[i];
+        int                kind = n->tag ? texgen_kind(n->tag) : -1;
+        const char *const *names;
+        const float       *defs;
+        int                k;
+        if (kind < 0) continue;
+        texgen_schema(kind, &names, &defs);
+        for (k = 0; k < TEXGEN_PARAMS; k++) {
+            const char *v = stml_attr(n, names[k]);
+            g_mat_over[kind][k] = v ? (float)atof(v) : defs[k];
+        }
+        g_mat_over_on[kind] = 1;
+    }
+    stml_free(root);
+}
+
+/* the full knob vector one render sees: the object's explicit prefix,
+   then the kind's current voice (file override or schema default) */
+static void texgen_compose(int kind, const float *prefix, int count,
+                           float *out) {
+    const float *defs;
+    int k;
+    texgen_schema(kind, (const char *const **)0, &defs);
+    for (k = 0; k < TEXGEN_PARAMS; k++)
+        out[k] = (k < count) ? prefix[k]
+               : (g_mat_over_on[kind] ? g_mat_over[kind][k] : defs[k]);
+}
+
+/* render the three maps for one knob vector and upload them; SOL_FALSE
+   leaves outputs untouched (fail-open, the watcher's rule) */
+static sol_bool texgen_mint(int kind, const float *knobs,
+                            RhiTexture *albedo, RhiTexture *normal,
+                            RhiTexture *orm) {
+    size_t         bytes = (size_t)TEXGEN_SIZE * TEXGEN_SIZE * 4;
+    unsigned char *ab, *nb, *ob;
+    sol_bool       ok;
+    ab = (unsigned char *)malloc(bytes);
+    nb = (unsigned char *)malloc(bytes);
+    ob = (unsigned char *)malloc(bytes);
+    ok = (ab && nb && ob)
+       ? texgen_render(kind, knobs, TEXGEN_PARAMS, ab, nb, ob)
+       : SOL_FALSE;
+    if (ok) {
+        *albedo = rhi_create_texture(ab, TEXGEN_SIZE, TEXGEN_SIZE, RHI_TEX_SRGB8);
+        *normal = rhi_create_texture(nb, TEXGEN_SIZE, TEXGEN_SIZE, RHI_TEX_RGBA8);
+        *orm    = rhi_create_texture(ob, TEXGEN_SIZE, TEXGEN_SIZE, RHI_TEX_RGBA8);
+    }
+    free(ab); free(nb); free(ob);
+    return ok;
+}
+
+/* the re-voice (a changed materials.stml): every live set re-renders
+   with its own prefix over the NEW voice — in place, same handles */
+static void texgen_revoice_visit(const char *key, void *payload, void *user) {
+    TexgenSet     *t     = (TexgenSet *)payload;
+    size_t         bytes = (size_t)TEXGEN_SIZE * TEXGEN_SIZE * 4;
+    float          knobs[TEXGEN_PARAMS];
+    unsigned char *ab, *nb, *ob;
+    (void)key; (void)user;
+    texgen_compose(t->kind, t->prefix, t->count, knobs);
+    ab = (unsigned char *)malloc(bytes);
+    nb = (unsigned char *)malloc(bytes);
+    ob = (unsigned char *)malloc(bytes);
+    if (ab && nb && ob &&
+        texgen_render(t->kind, knobs, TEXGEN_PARAMS, ab, nb, ob)) {
+        rhi_update_texture(t->albedo, ab, TEXGEN_SIZE, TEXGEN_SIZE, RHI_TEX_SRGB8);
+        rhi_update_texture(t->normal, nb, TEXGEN_SIZE, TEXGEN_SIZE, RHI_TEX_RGBA8);
+        rhi_update_texture(t->orm,    ob, TEXGEN_SIZE, TEXGEN_SIZE, RHI_TEX_RGBA8);
+    }
+    free(ab); free(nb); free(ob);
+}
+
 /* ---- the watcher (P4 item 4 piece 3c): hot reload by mtime ----
    A small watch list polled every half second. Textures re-decode through
    rhi_update_texture — same handle, new pixels, nobody rebinds; a changed
    glb re-imports its anchors through the registry; the .hdr re-runs the
    IBL bakes. FAIL-OPEN: a torn mid-save read keeps the old contents and
    retries next poll (the mtime is recorded only after a good reload). */
-typedef enum { WATCH_TEX_SRGB = 0, WATCH_GLB, WATCH_HDR, WATCH_SND } WatchKind;
+typedef enum { WATCH_TEX_SRGB = 0, WATCH_GLB, WATCH_HDR, WATCH_SND,
+               WATCH_MAT } WatchKind;
 typedef struct {
     char       path[200];
     long       mtime;
@@ -3117,6 +3240,33 @@ static sol_bool mesh_asset_key(const SceneObject *o, char *buf) {
     return SOL_TRUE;
 }
 
+/* The registry key for an object's synthesized material: kind + the
+   explicit prefix merged with SCHEMA defaults — the same defaults-are-
+   identity rule as meshes, and deliberately blind to materials.stml
+   (a voice change must not re-key the world). Callers pass char[200]. */
+static sol_bool texgen_asset_key(const SceneObject *o, char *buf) {
+    const float *defs;
+    int          kind, k;
+    size_t       len;
+    if (!o->tex_ref) return SOL_FALSE;
+    kind = texgen_kind(o->tex_ref);
+    if (kind < 0) return SOL_FALSE;
+    texgen_schema(kind, (const char *const **)0, &defs);
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    len = (size_t)sprintf(buf, "x|%s", o->tex_ref);
+    for (k = 0; k < TEXGEN_PARAMS; k++) {
+        float v = (k < o->tex_param_count) ? o->tex_params[k] : defs[k];
+        len += (size_t)sprintf(buf + len, "|%.9g", (double)v);
+    }
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+    return SOL_TRUE;
+}
+
 /* The mirror walk of scene_resolve_meshes: registry meshes go BACK to the
    store (each object carries everything its release needs — the key
    re-derives from ref + params); non-registry meshes — arrows, glb import
@@ -3128,7 +3278,18 @@ static void scene_release_meshes(Scene *s) {
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         char        key[160];
+        char        xkey[200];
         const char *akey;
+        if (o->tex_ref && o->material.albedo_tex.id &&
+            texgen_asset_key(o, xkey)) {   /* synthesized maps: same mirror —
+                                              the key re-derives, the store
+                                              destroys at zero */
+            asset_release(&g_texgen_assets, xkey);
+            o->material.albedo_tex.id = 0;
+            o->material.normal_tex.id = 0;
+            o->material.mr_tex.id     = 0;
+            o->material.ao_tex.id     = 0;
+        }
         if (o->mesh.index_count == 0) continue;
         akey = scene_meta_get(s, o->handle, "akey");
         if (akey) {                                /* a glb part: read its ticket */
@@ -4558,20 +4719,38 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                             if (co) {
                                 Material mm = material_default();
                                 if (r2 == 0) {
-                                    mm.base_color = vec3_make(0.62f, 0.60f, 0.55f);
-                                    mm.roughness  = 0.9f;
+                                    /* synthesized stone (texture side-quest):
+                                       the maps carry tone, the factors step
+                                       aside (the shader multiplies them in) */
+                                    mm.base_color = vec3_make(1.0f, 1.0f, 1.0f);
+                                    mm.roughness  = 1.0f;
+                                    mm.metallic   = 1.0f;
                                 } else if (r2 == 1) {
                                     mm.base_color = vec3_make(0.02f, 0.025f, 0.045f);
                                     mm.roughness  = 0.08f;
-                                    mm.emissive   = vec3_make(0.35f, 0.22f, 0.10f);
+                                    /* past 1.0 on purpose: that's what bloom
+                                       bites on — windows radiate, not paint */
+                                    mm.emissive   = vec3_make(1.8f, 1.12f, 0.5f);
                                 } else if (r2 == 2) {
                                     mm.base_color = vec3_make(0.30f, 0.32f, 0.36f);
                                     mm.roughness  = 0.55f;
                                 } else {
-                                    mm.base_color = vec3_make(0.52f, 0.50f, 0.47f);
-                                    mm.roughness  = 0.95f;
+                                    mm.base_color = vec3_make(1.0f, 1.0f, 1.0f);
+                                    mm.roughness  = 1.0f;
+                                    mm.metallic   = 1.0f;
                                 }
                                 co->material = mm;
+                            }
+                            if (r2 == 0) {
+                                scene_tex_ref_set(&st->scene, ch, "stone");
+                            } else if (r2 == 3) {
+                                /* the floor wears flagstones: its own seed,
+                                   paver-scale courses (knobs 0..3) */
+                                float fp[4];
+                                fp[0] = cseed + 7.0f;
+                                fp[1] = 2.4f; fp[2] = 0.8f; fp[3] = 0.8f;
+                                scene_tex_ref_set(&st->scene, ch, "stone");
+                                scene_tex_params_set(&st->scene, ch, fp, 4);
                             }
                         }
                     }
@@ -4994,6 +5173,12 @@ static void watch_poll(AppState *st) {
             audio_loops_restart();
             w->mtime = m;
             printf("sounds re-minted: %s\n", w->path);
+        } else if (w->kind == WATCH_MAT) {
+            load_material_overrides();        /* edit a knob, see the stone:
+                                                 the same moment for walls */
+            asset_store_visit(&g_texgen_assets, texgen_revoice_visit, NULL);
+            w->mtime = m;
+            printf("materials re-minted: %s\n", w->path);
         } else {
             hdr_reload(st, w->path);
             w->mtime = m;
@@ -5033,6 +5218,40 @@ static void scene_resolve_meshes(Scene *s) {
                     o->mesh_ref, o->nid ? o->nid : "(no nid)");
         }
         mb_free(&mb);
+    }
+
+    /* and the texture half (texture side-quest): realize maps for every
+       object whose tex ref names a kind and whose material is still bare.
+       Same acquire-first handshake — every church on every island borrows
+       ONE stone set. An unknown kind leaves the scalars (placed data must
+       outlive a missing generator), warned. */
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        char         xkey[200];
+        TexgenSet    ts;
+        float        knobs[TEXGEN_PARAMS];
+        int          k;
+        if (!o->tex_ref || o->material.albedo_tex.id) continue;
+        if (!texgen_asset_key(o, xkey)) {
+            fprintf(stderr, "scene: unknown material kind \"%s\" on %s — scalars only\n",
+                    o->tex_ref, o->nid ? o->nid : "(no nid)");
+            continue;
+        }
+        if (!asset_acquire(&g_texgen_assets, xkey, &ts, sizeof ts)) {
+            memset(&ts, 0, sizeof ts);
+            ts.kind  = texgen_kind(o->tex_ref);
+            ts.count = o->tex_param_count;
+            for (k = 0; k < o->tex_param_count && k < TEXGEN_PARAMS; k++)
+                ts.prefix[k] = o->tex_params[k];
+            texgen_compose(ts.kind, ts.prefix, ts.count, knobs);
+            if (!texgen_mint(ts.kind, knobs, &ts.albedo, &ts.normal, &ts.orm))
+                continue;                          /* fail-open: scalars only */
+            asset_store_add(&g_texgen_assets, xkey, &ts, sizeof ts);
+        }
+        o->material.albedo_tex = ts.albedo;
+        o->material.normal_tex = ts.normal;
+        o->material.mr_tex     = ts.orm;           /* ORM packed: G=rough B=metal */
+        o->material.ao_tex     = ts.orm;           /* R=occlusion, the shared-map idiom */
     }
 }
 
@@ -6640,13 +6859,15 @@ static void render(AppState *state) {
 
             /* the registry's instruments (P4 item 4): entries alive and refs
                held — the L-reload acceptance is these NOT moving */
-            sprintf(line, "assets %dm %dt (%d refs) snd %d",
+            sprintf(line, "assets %dm %dt %dx (%d refs) snd %d",
                     asset_live_count(&g_mesh_assets)
                         + asset_live_count(&g_glbpart_assets),
                     asset_live_count(&g_tex_assets),
+                    asset_live_count(&g_texgen_assets),
                     asset_ref_total(&g_mesh_assets)
                         + asset_ref_total(&g_glbpart_assets)
-                        + asset_ref_total(&g_tex_assets),
+                        + asset_ref_total(&g_tex_assets)
+                        + asset_ref_total(&g_texgen_assets),
                     g_loop_voices);    /* loops alive: wind + crackling flames */
 #ifdef __clang__
 #pragma clang diagnostic pop
@@ -6890,9 +7111,11 @@ int main(void) {
     AppState state = {0};
     double last;
 
-    asset_store_init(&g_mesh_assets,    mesh_asset_destroy, NULL);
-    asset_store_init(&g_tex_assets,     tex_asset_destroy,  NULL);
-    asset_store_init(&g_glbpart_assets, glb_part_destroy,   NULL);
+    asset_store_init(&g_mesh_assets,    mesh_asset_destroy,   NULL);
+    asset_store_init(&g_tex_assets,     tex_asset_destroy,    NULL);
+    asset_store_init(&g_glbpart_assets, glb_part_destroy,     NULL);
+    asset_store_init(&g_texgen_assets,  texgen_asset_destroy, NULL);
+    load_material_overrides();   /* the kinds' voice, before the first resolve */
 
     if (!glfwInit()) {
         fprintf(stderr, "glfwInit failed\n");
@@ -7036,6 +7259,7 @@ int main(void) {
         RhiTexture none;
         none.id = 0;
         watch_add("sounds.stml", WATCH_SND, none);
+        watch_add("materials.stml", WATCH_MAT, none);
     }
 
     last = glfwGetTime();
@@ -7150,6 +7374,7 @@ int main(void) {
     free(state.vis);
     asset_store_free(&g_mesh_assets);   /* sweeps the living, before rhi dies */
     asset_store_free(&g_glbpart_assets);
+    asset_store_free(&g_texgen_assets); /* synthesized maps: nobody names them */
     asset_store_free(&g_tex_assets);    /* textures LAST: parts may name them */
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
     if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);

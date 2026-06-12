@@ -10,6 +10,7 @@
 #include "scene.h"
 #include "stml.h"
 #include "mesh.h"      /* mesh_ref_schema: the registry names the param attrs (item 5) */
+#include "texgen.h"    /* texgen_schema: synthesized materials name their knobs the same way */
 #include "component.h" /* component_schema: behavior attrs by name (P4 item 6) */
 
 #include <stdio.h>
@@ -178,6 +179,25 @@ sol_bool scene_save(Scene *s, const char *path) {
                             (double)o->material.emissive.z);
                 fprintf(f, " />\n");
             }
+        }
+
+        if (o->tex_ref) {   /* synthesized material (texture side-quest):
+               its OWN element, the <mesh ref=...> pattern — the knob names
+               must not share <mat>'s attr namespace ("rough" collides).
+               The file's knob PREFIX only — absent knobs stay the kind's,
+               so old files survive a schema growing. An unknown kind's
+               knobs can't be named (the documented component edge). */
+            int kind = texgen_kind(o->tex_ref);
+            fprintf(f, "    <tex");
+            write_attr(f, "kind", o->tex_ref);
+            if (kind >= 0) {
+                const char *const *tn;
+                int tnum = texgen_schema(kind, &tn, (const float **)0);
+                int k;
+                for (k = 0; k < o->tex_param_count && k < tnum; k++)
+                    fprintf(f, " %s=\"%.9g\"", tn[k], (double)o->tex_params[k]);
+            }
+            fprintf(f, " />\n");
         }
 
         for (j = 0; j < o->comp_count; j++) {  /* components (P4 item 6): the
@@ -385,6 +405,29 @@ sol_bool scene_load(Scene *s, const char *path) {
                 mm.emissive.y   = attr_f(mat, "eg", 0.0f);
                 mm.emissive.z   = attr_f(mat, "eb", 0.0f);
                 scene_material_set(s, h, mm);
+            }
+        }
+
+        {   /* synthesized material (texture side-quest): kind + knob
+               PREFIX in its own element — the mesh-ref reader's shape */
+            StmlNode   *tn0  = stml_child(on, "tex");
+            const char *tref = tn0 ? stml_attr(tn0, "kind") : (const char *)0;
+            if (tref) {
+                int kind = texgen_kind(tref);
+                scene_tex_ref_set(s, h, tref);
+                if (kind >= 0) {
+                    const char *const *tn;
+                    const float       *td;
+                    int tnum = texgen_schema(kind, &tn, &td);
+                    float tp[TEX_REF_MAX_PARAMS];
+                    int   k, last = -1;
+                    for (k = 0; k < tnum && k < TEX_REF_MAX_PARAMS; k++) {
+                        tp[k] = attr_f(tn0, tn[k], td[k]);
+                        if (stml_attr(tn0, tn[k])) last = k;
+                    }
+                    if (last >= 0)
+                        scene_tex_params_set(s, h, tp, last + 1);
+                }
             }
         }
 

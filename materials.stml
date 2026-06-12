@@ -1,0 +1,27 @@
+<!-- materials.stml — the palace's surfaces, as knobs (texture side-quest).
+
+     Each element overrides knobs on that material kind; absent knobs
+     keep their preset values. Save the file and the watcher re-renders
+     every synthesized map within half a second — material design is
+     this file, your editor, and your eyes.
+
+     Kinds: stone plaster   (plaster is stone with course=0: no grid)
+     Knobs: seed                 (variation selector)
+            tile                 (meters covered by one repeat)
+            course stone joint   (masonry: course height, stone length,
+                                  mortar width — all meters; course 0.4
+                                  matches the ruin system's break lines)
+            depth                (relief amount 0..1: groove + proud/shy)
+            tone                 (base albedo value, linear)
+            warmth               (0 cool grey .. 1 warm buff)
+            weather              (large-scale patchiness 0..1)
+            rough                (roughness of dressed faces)
+
+     An object's own <tex> knobs override these; these override the
+     built-in presets. The examples below restate two preset values
+     verbatim — edit them and look. Delete an element to return that
+     kind to its preset. -->
+<materials>
+  <stone depth="0.6" weather="0.5" />
+  <plaster tone="0.52" />
+</materials>

@@ -38,6 +38,7 @@ static void scene_object_free(SceneObject *o) {
     free(o->content);
     free(o->nid);
     free(o->mesh_ref);
+    free(o->tex_ref);
 }
 
 void scene_free(Scene *s) {
@@ -68,6 +69,8 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     o->mesh_ref = NULL;
     o->mesh_param_count = 0;        /* 0 = registry defaults; count gates reads */
     o->material = material_default();
+    o->tex_ref = NULL;              /* maps-by-reference (the texture side-quest) */
+    o->tex_param_count = 0;
     o->meta = NULL; o->meta_count = 0; o->meta_cap = 0;
     o->relations = NULL; o->rel_count = 0; o->rel_cap = 0;
     o->content = NULL;
@@ -367,6 +370,26 @@ void scene_mesh_params_set(Scene *s, sol_u32 handle, const float *params, int co
     if (count > MESH_REF_MAX_PARAMS) count = MESH_REF_MAX_PARAMS;
     for (i = 0; i < count; i++) o->mesh_params[i] = params[i];
     o->mesh_param_count = count;
+}
+
+/* Maps-by-reference (the texture side-quest): the same pair as above —
+   a synthesized-material kind plus a knob PREFIX; the app resolves the
+   pixels, the file never holds a texture. */
+void scene_tex_ref_set(Scene *s, sol_u32 handle, const char *name) {
+    SceneObject *o = scene_get(s, handle);
+    if (!o) return;
+    free(o->tex_ref);
+    o->tex_ref = sol_strdup(name);
+}
+
+void scene_tex_params_set(Scene *s, sol_u32 handle, const float *params, int count) {
+    SceneObject *o = scene_get(s, handle);
+    int i;
+    if (!o) return;
+    if (count < 0) count = 0;
+    if (count > TEX_REF_MAX_PARAMS) count = TEX_REF_MAX_PARAMS;
+    for (i = 0; i < count; i++) o->tex_params[i] = params[i];
+    o->tex_param_count = count;
 }
 
 /* Attach a behavior (P4 item 6): the type string is COPIED (the object

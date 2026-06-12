@@ -36,3 +36,4 @@ compile_commands.json
 .DS_Store
 mirror_test_dir/
 /gothic_test
+/texgen_test

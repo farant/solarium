@@ -39,6 +39,9 @@ typedef enum {
     KIND_TOMBSTONE
 } ObjectKind;
 
+/* room for texgen's 10 knobs with slack — scene stays generic about kinds */
+#define TEX_REF_MAX_PARAMS 12
+
 /* One object in the scene. Identity is the stable `handle`, NOT the array
    index — that decoupling survives deletion/reload. */
 typedef struct {
@@ -54,6 +57,12 @@ typedef struct {
     float   mesh_params[MESH_REF_MAX_PARAMS];  /* the ref's parameters (item 5: room w/d/h...) */
     int     mesh_param_count;                  /* 0 = use the registry defaults */
     Material material; /* PBR material (item 8); texture handles shared, not owned */
+    char   *tex_ref;   /* synthesized-material kind ("stone"...); NULL = none.
+                          Maps-by-reference, the mesh_ref pattern: the file
+                          records (kind, knob prefix), the app resolves the
+                          pixels — texture handles stay runtime-only. */
+    float   tex_params[TEX_REF_MAX_PARAMS];    /* knob PREFIX over the kind's defaults */
+    int     tex_param_count;
 
     /* overbuilt slots — mostly empty this phase, serialized in 2.5 */
     MetaEntry *meta;       sol_u32 meta_count;  sol_u32 meta_cap;   /* string->string */
@@ -113,6 +122,8 @@ void        scene_rel_add(Scene *s, sol_u32 handle, const char *type, sol_u32 ta
 void        scene_content_set(Scene *s, sol_u32 handle, const char *path);
 void        scene_mesh_ref_set(Scene *s, sol_u32 handle, const char *name);
 void        scene_mesh_params_set(Scene *s, sol_u32 handle, const float *params, int count);
+void        scene_tex_ref_set(Scene *s, sol_u32 handle, const char *name);
+void        scene_tex_params_set(Scene *s, sol_u32 handle, const float *params, int count);
 void        scene_component_add(Scene *s, sol_u32 handle, const char *type,
                                 const float *params, int count);  /* P4 item 6 */
 void        scene_kind_set(Scene *s, sol_u32 handle, ObjectKind kind);
