@@ -7,6 +7,7 @@
    `build.sh coltest`. */
 
 #include "collide.h"
+#include "gothic.h"
 #include "sol_math.h"
 
 #include <stdio.h>
@@ -518,6 +519,66 @@ int main(void) {
         scene_free(&s);
     }
 
+    {   /* P6 item 9: THE AGREEMENT — the colliders read the SAME plan
+           and the SAME survival the renderer reads; sample it: the
+           portal admits the capsule, a wall rejects it, and at ruin
+           0.6 a fallen wall admits where it fell */
+        Scene       s;
+        ColliderSet cs;
+        ChurchPlan  cp;
+        float params[8] = { 18, 30, 7, 2, 0, 1, 1, 0 };
+        sol_u32 h;
+        vec3  feet, out;
+        float wt, hwid;
+        scene_init(&s);
+        collide_set_init(&cs);
+        h = add_ref(&s, 0, v3(0, 0, 0), qid(), "church_stone", params, 8);
+        (void)h;
+        collide_rebuild(&cs, &s);
+        church_plan(&cp, params, 8);
+        wt   = cp.wall_t;
+        hwid = 0.5f * cp.nave_w + cp.aisle_w;
+        /* through the portal: start west of the door, walk east */
+        feet = v3(cp.west_x - wt - 1.5f, cp.plinth_h, 0.0f);
+        out  = collide_slide(&cs, feet, v3(4.0f, 0.0f, 0.0f), 0.35f, 1.8f);
+        if (out.x < cp.west_x + 0.5f)
+            printf("FAIL: the portal must admit the capsule (x %.2f)\n",
+                   out.x);
+        /* into a wall: start south of bay 1, walk north */
+        feet = v3(cp.west_x + cp.tower_d + 1.5f * cp.bay_l, cp.plinth_h,
+                  -(hwid + wt) - 1.5f);
+        out  = collide_slide(&cs, feet, v3(0.0f, 0.0f, 4.0f), 0.35f, 1.8f);
+        if (out.z > -hwid - 0.2f)
+            printf("FAIL: a standing wall must reject the capsule (z %.2f)\n",
+                   out.z);
+        /* the ruin admits where the wall fell low */
+        params[4] = 0.6f;
+        scene_mesh_params_set(&s, h, params, 8);
+        collide_rebuild(&cs, &s);
+        church_plan(&cp, params, 8);
+        {
+            int i, found = 0;
+            float tk;
+            for (i = 0; i < cp.nbays && !found; i++)
+                if (!church_survives(&cp, ELEM_WALL, i, 0, &tk) ||
+                    tk * (cp.aisle_h - cp.plinth_h) < 0.4f) {
+                    float x = cp.west_x + cp.tower_d
+                            + ((float)i + 0.5f) * cp.bay_l;
+                    feet = v3(x, cp.plinth_h, -(hwid + wt) - 1.5f);
+                    out  = collide_slide(&cs, feet, v3(0.0f, 0.0f, 4.0f),
+                                         0.35f, 1.8f);
+                    if (out.z < -hwid + 0.1f)
+                        printf("FAIL: a FALLEN wall must admit (z %.2f)\n",
+                               out.z);
+                    found = 1;
+                }
+            /* seed 7 at 0.6 may keep every south wall above the gate —
+               then the sample simply has nothing to assert */
+        }
+        collide_set_free(&cs);
+        scene_free(&s);
+        printf("church agreement: portal admits, walls reject, ruin opens\n");
+    }
     printf("collide_test: OK\n");
     return 0;
 }

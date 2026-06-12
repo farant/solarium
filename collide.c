@@ -6,6 +6,9 @@
 
 #include <math.h>       /* sqrtf, cosf, sinf, atan2f */
 #include <stdlib.h>     /* realloc, free */
+#include "gothic.h"     /* the plan + survival: the church read a
+                           THIRD time — render and physics agree by
+                           construction (P6 item 9) */
 #include <string.h>     /* strcmp */
 
 #define COLLIDE_MAX_ITERS 3       /* push-outs per substep; a corner needs 2 */
@@ -175,6 +178,31 @@ vec3 collide_slide(const ColliderSet *cs, vec3 feet, vec3 move,
     return p;
 }
 
+float collide_stand(const ColliderSet *cs, vec3 feet, float radius) {
+    float best = -1e30f;
+    int   i;
+    if (cs == NULL) return best;
+    for (i = 0; i < cs->count; i++) {
+        const ColliderBox *b = &cs->boxes[i];
+        float dx, dz, lx, lz, qx, qz, ddx, ddz;
+        if (b->y1 > feet.y + COLLIDE_STEP_UP) continue;   /* a wall   */
+        if (b->y1 <= best) continue;                      /* not best */
+        dx = feet.x - b->cx;
+        dz = feet.z - b->cz;
+        lx = b->cyaw * dx - b->syaw * dz;
+        lz = b->syaw * dx + b->cyaw * dz;
+        qx = lx;
+        if (qx < -b->hx) qx = -b->hx; else if (qx > b->hx) qx = b->hx;
+        qz = lz;
+        if (qz < -b->hz) qz = -b->hz; else if (qz > b->hz) qz = b->hz;
+        ddx = lx - qx;
+        ddz = lz - qz;
+        if (ddx * ddx + ddz * ddz >= radius * radius) continue;
+        best = b->y1;
+    }
+    return best;
+}
+
 float collide_clamp_y(const ColliderSet *cs, vec3 feet, float dy,
                       float radius, float height) {
     int i;
@@ -227,6 +255,11 @@ float collide_clamp_y(const ColliderSet *cs, vec3 feet, float dy,
    column 0 is the world image of local +X (its XZ length is sx; its
    direction is the yaw, since R_y maps X to (cos, 0, -sin)), column 1's y
    is sy, column 2's XZ length is sz. */
+static void emit_local_box_yawed(ColliderSet *cs, mat4 m, sol_u32 source,
+                                 float lcx, float lcz, float lyaw,
+                                 float lhx, float lhz,
+                                 float ly0, float ly1);
+
 static void emit_local_box(ColliderSet *cs, mat4 m, sol_u32 source,
                            float lcx, float lcz, float lhx, float lhz,
                            float ly0, float ly1) {
@@ -234,6 +267,26 @@ static void emit_local_box(ColliderSet *cs, mat4 m, sol_u32 source,
     float sy  = m.m[5];
     float sz  = sqrtf(m.m[8] * m.m[8] + m.m[10] * m.m[10]);
     float yaw = atan2f(-m.m[2], m.m[0]);
+    vec3  c;
+    c.x = lcx;
+    c.y = (ly0 + ly1) * 0.5f;
+    c.z = lcz;
+    c = mat4_mul_point(m, c);
+    collide_set_add(cs, c.x, c.z, yaw, lhx * sx, lhz * sz,
+                    c.y - (ly1 - ly0) * 0.5f * sy,
+                    c.y + (ly1 - ly0) * 0.5f * sy, source);
+}
+
+/* the same, with an extra yaw INSIDE the object's frame — the apse's
+   angled walls (the cyaw/syaw fields were built for this day) */
+static void emit_local_box_yawed(ColliderSet *cs, mat4 m, sol_u32 source,
+                                 float lcx, float lcz, float lyaw,
+                                 float lhx, float lhz,
+                                 float ly0, float ly1) {
+    float sx  = sqrtf(m.m[0] * m.m[0] + m.m[2]  * m.m[2]);
+    float sy  = m.m[5];
+    float sz  = sqrtf(m.m[8] * m.m[8] + m.m[10] * m.m[10]);
+    float yaw = atan2f(-m.m[2], m.m[0]) + lyaw;
     vec3  c;
     c.x = lcx;
     c.y = (ly0 + ly1) * 0.5f;
@@ -307,6 +360,199 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
                                    (rx0 - lx1) * 0.5f, ht, oh, h);
                 /* the threshold is a top FACE at y=0 — no volume, nothing
                    to emit; laterally the step gate would ignore it anyway */
+            }
+
+        } else if (strcmp(o->mesh_ref, "church_stone") == 0) {
+            /* THE SAME church_plan + THE SAME church_survives the
+               renderer consults — walls box at their KEPT heights,
+               broken columns at theirs, the portal admits because the
+               jambs were boxed around the gap (never a hole cut) */
+            ChurchPlan cp;
+            mat4  m = scene_world_matrix(s, o);
+            float wt, hwid, hloc, F = GOTHIC_FOUNDATION;
+            float rp2, tk;
+            int   ci, sd;
+            church_plan(&cp, o->mesh_params, o->mesh_param_count);
+            wt   = cp.wall_t;
+            hwid = 0.5f * cp.nave_w + cp.aisle_w;
+            hloc = cp.aisle_h - cp.plinth_h;
+            rp2  = 0.18f + 0.035f * cp.nave_w;
+            for (ci = 0; ci < cp.nbays; ci++) {        /* S/N walls */
+                float x0 = cp.west_x + cp.tower_d + (float)ci * cp.bay_l;
+                float xc = x0 + 0.5f * cp.bay_l, hx = 0.5f * cp.bay_l;
+                if (ci == 0 && !cp.tower) { hx += 0.5f * wt; xc -= 0.5f * wt; }
+                if (ci == cp.nbays - 1)   { hx += 0.5f * wt; xc += 0.5f * wt; }
+                for (sd = 0; sd <= 2; sd += 2) {
+                    float zc = (sd ? 1.0f : -1.0f) * (hwid + 0.5f * wt);
+                    if (!church_survives(&cp, ELEM_WALL, ci, sd, &tk))
+                        continue;
+                    if (tk * hloc < 0.4f) continue;
+                    emit_local_box(cs, m, o->handle, xc, zc, hx, 0.5f * wt,
+                                   -F, cp.plinth_h + tk * hloc);
+                }
+            }
+            if (church_survives(&cp, ELEM_WALL, 0, 1, &tk)) {
+                /* the facade: jambs AROUND the portal, flanks beside */
+                GothicOpening door;
+                float xc = cp.west_x - 0.5f * wt;
+                float kept = cp.plinth_h + tk * (cp.wall_h - cp.plinth_h);
+                float hw2, jz;
+                plan_opening(&cp, WALL_WEST, 0, &door);
+                hw2 = 0.5f * door.w;
+                jz  = 0.5f * (hw2 + 0.5f * cp.nave_w);
+                emit_local_box(cs, m, o->handle, xc, -jz, 0.5f * wt,
+                               0.5f * (0.5f * cp.nave_w - hw2), -F, kept);
+                emit_local_box(cs, m, o->handle, xc,  jz, 0.5f * wt,
+                               0.5f * (0.5f * cp.nave_w - hw2), -F, kept);
+            }
+            for (sd = 0; sd <= 2; sd += 2) {            /* facade flanks */
+                float zc = (sd ? 1.0f : -1.0f)
+                         * 0.5f * (0.5f * cp.nave_w + hwid);
+                if (!cp.aisles) break;
+                if (!church_survives(&cp, ELEM_WALL, 0, sd, &tk)) continue;
+                if (tk * hloc < 0.4f) continue;
+                emit_local_box(cs, m, o->handle, cp.west_x - 0.5f * wt, zc,
+                               0.5f * wt, 0.5f * cp.aisle_w, -F,
+                               cp.plinth_h + tk * hloc);
+            }
+            if (cp.apse_sides == 0) {                   /* flat east */
+                if (church_survives(&cp, ELEM_WALL, cp.nbays, 1, &tk) &&
+                    tk * (cp.wall_h - cp.plinth_h) >= 0.4f)
+                    emit_local_box(cs, m, o->handle, cp.east_x + 0.5f * wt,
+                                   0.0f, 0.5f * wt, 0.5f * cp.nave_w, -F,
+                                   cp.plinth_h
+                                   + tk * (cp.wall_h - cp.plinth_h));
+                for (sd = 0; sd <= 2; sd += 2) {
+                    float zc = (sd ? 1.0f : -1.0f)
+                             * 0.5f * (0.5f * cp.nave_w + hwid);
+                    if (!cp.aisles) break;
+                    if (!church_survives(&cp, ELEM_WALL, cp.nbays, sd, &tk))
+                        continue;
+                    if (tk * hloc < 0.4f) continue;
+                    emit_local_box(cs, m, o->handle, cp.east_x + 0.5f * wt,
+                                   zc, 0.5f * wt, 0.5f * cp.aisle_w, -F,
+                                   cp.plinth_h + tk * hloc);
+                }
+            } else {                                    /* the chevet */
+                int k2;
+                for (k2 = 0; k2 < 5; k2++) {
+                    float ax, az, bx, bz, dx, dz, nl, len, mx, mz;
+                    plan_apse_pier(&cp, k2,     &ax, &az);
+                    plan_apse_pier(&cp, k2 + 1, &bx, &bz);
+                    dx = bx - ax; dz = bz - az;
+                    nl = sqrtf(dx * dx + dz * dz);
+                    if (nl < 1e-5f) continue;
+                    if (!church_survives(&cp, ELEM_WALL, cp.nbays, k2, &tk))
+                        continue;
+                    if (tk * cp.wall_h < 0.4f) continue;
+                    len = nl;
+                    mx = 0.5f * (ax + bx) + (dz / nl) * 0.5f * wt;
+                    mz = 0.5f * (az + bz) - (dx / nl) * 0.5f * wt;
+                    emit_local_box_yawed(cs, m, o->handle, mx, mz,
+                                         atan2f(-dz, dx), 0.5f * len,
+                                         0.5f * wt, -F, tk * cp.wall_h);
+                }
+                for (k2 = 0; k2 < 6; k2++) {            /* radial piers */
+                    float ax, az, rap;
+                    if (!church_survives(&cp, ELEM_PIER, cp.nbays, k2, &tk))
+                        continue;
+                    plan_apse_pier(&cp, k2, &ax, &az);
+                    rap = (0.4f > 0.7f * wt ? 0.4f : 0.7f * wt) * 0.924f;
+                    emit_local_box(cs, m, o->handle, ax, az, rap, rap,
+                                   -F, tk * (cp.wall_h + 0.25f));
+                }
+            }
+            if (cp.aisles)                              /* arcade piers */
+                for (ci = cp.tower ? 0 : 1; ci < cp.nbays; ci++) {
+                    float px, pz;
+                    for (sd = 0; sd <= 2; sd += 2) {
+                        int row = sd ? PIER_ROW_N_ARCADE : PIER_ROW_S_ARCADE;
+                        if (!plan_pier(&cp, ci, row, &px, &pz)) continue;
+                        if (!church_survives(&cp, ELEM_PIER, ci, sd, &tk))
+                            continue;
+                        emit_local_box(cs, m, o->handle, px, pz,
+                                       rp2 * 0.924f, rp2 * 0.924f, -F,
+                                       cp.plinth_h
+                                       + tk * (cp.impost_h - cp.plinth_h));
+                    }
+                }
+            {   /* buttresses + the porch steps */
+                float bd = cp.style == CHURCH_BASILICA ? 1.05f :
+                           cp.style == CHURCH_HALL ? 0.75f : 0.55f;
+                float bw = wt + 0.3f;
+                float bh = cp.style == CHURCH_BASILICA ? cp.aisle_h + 0.6f
+                                                       : cp.aisle_h;
+                for (ci = 1; ci < cp.nbays; ci++) {
+                    float x = cp.west_x + cp.tower_d + (float)ci * cp.bay_l;
+                    for (sd = 0; sd <= 2; sd += 2) {
+                        float zc = (sd ? 1.0f : -1.0f)
+                                 * (hwid + wt + 0.5f * bd);
+                        if (!church_survives(&cp, ELEM_BUTTRESS, ci, sd,
+                                             (float *)0))
+                            continue;
+                        emit_local_box(cs, m, o->handle, x, zc, 0.5f * bw,
+                                       0.5f * bd, -F, 0.93f * bh);
+                    }
+                }
+                if (church_survives(&cp, ELEM_WALL, 0, 1, &tk)) {
+                    GothicOpening door;
+                    float riser = 0.16f, tread = 0.34f;
+                    int   nstep = (int)(cp.plinth_h / riser), k3;
+                    float sw;
+                    plan_opening(&cp, WALL_WEST, 0, &door);
+                    sw = 0.5f * door.w + 0.7f;
+                    if (cp.porch > tread * (float)nstep * 0.5f)
+                        for (k3 = 1; k3 <= nstep; k3++) {
+                            float top = cp.plinth_h - riser * (float)k3;
+                            float xs0 = cp.west_x - wt
+                                      - tread * (float)k3;
+                            if (top <= 0.02f) break;
+                            emit_local_box(cs, m, o->handle,
+                                           xs0 + 0.5f * tread, 0.0f,
+                                           0.5f * tread, sw, -1.2f, top);
+                        }
+                }
+            }
+
+        } else if (strcmp(o->mesh_ref, "church_floor") == 0) {
+            /* pavement: thin top-claiming slabs per SURVIVING bay — the
+               step gate lifts you onto them; roofless bays have none,
+               so ground_under's terrain answer wins: the grass floor */
+            ChurchPlan cp;
+            mat4  m = scene_world_matrix(s, o);
+            float hwid, yt;
+            int   ci, lane;
+            church_plan(&cp, o->mesh_params, o->mesh_param_count);
+            hwid = 0.5f * cp.nave_w + cp.aisle_w;
+            yt   = cp.plinth_h - 0.02f;
+            for (ci = 0; ci < cp.nbays; ci++) {
+                float x0 = cp.west_x + cp.tower_d + (float)ci * cp.bay_l;
+                for (lane = 0; lane <= 2; lane++) {
+                    float zc, hz;
+                    if (lane == 1) { zc = 0.0f; hz = 0.5f * cp.nave_w; }
+                    else if (!cp.aisles) continue;
+                    else {
+                        zc = (lane ? 1.0f : -1.0f)
+                           * 0.5f * (0.5f * cp.nave_w + hwid);
+                        hz = 0.5f * cp.aisle_w;
+                    }
+                    if (!church_survives(&cp, ELEM_WEB, ci, lane, (float *)0))
+                        continue;
+                    emit_local_box(cs, m, o->handle, x0 + 0.5f * cp.bay_l,
+                                   zc, 0.5f * cp.bay_l, hz, yt - 0.1f, yt);
+                }
+            }
+            if (cp.tower &&
+                church_survives(&cp, ELEM_WEB, 0, 1, (float *)0))
+                emit_local_box(cs, m, o->handle,
+                               cp.west_x + 0.5f * cp.tower_d, 0.0f,
+                               0.5f * cp.tower_d, 0.5f * cp.nave_w,
+                               yt - 0.1f, yt);
+            if (cp.apse_sides == 5 &&
+                church_survives(&cp, ELEM_WEB, cp.nbays, 1, (float *)0)) {
+                float r = 0.5411961f * cp.nave_w;
+                emit_local_box(cs, m, o->handle, cp.east_x + 0.35f * r,
+                               0.0f, 0.35f * r, 0.85f * r, yt - 0.1f, yt);
             }
 
         } else if (strcmp(o->mesh_ref, "path") == 0) {

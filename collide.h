@@ -78,6 +78,14 @@ vec3 collide_slide(const ColliderSet *cs, vec3 feet, vec3 move,
 float collide_clamp_y(const ColliderSet *cs, vec3 feet, float dy,
                       float radius, float height);
 
+/* The treaty's standing half (P6 item 9): the highest box TOP the
+   capsule's plan circle overlaps that sits within STEP_UP of the feet
+   — pavement, porch steps, broken wall stumps. Walk ground is then
+   max(terrain, this): what ground may claim, walls must not resist,
+   and now architecture may claim too. Returns -1e30 when nothing
+   claims. */
+float collide_stand(const ColliderSet *cs, vec3 feet, float radius);
+
 /* Derive the collider set from the scene (TODO4 §1.3 — one author): reads
    the SAME refs through the SAME mesh_ref_param defaults-merge the renderer
    resolves, so render geometry and collision geometry cannot drift. Today's

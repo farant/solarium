@@ -1706,6 +1706,7 @@ typedef struct {
     /* the floor-plan overlay (P6 item 3): J toggles; the island underfoot
        is the plot, so every island shows its destined church */
     sol_bool    j_was_down;
+    sol_bool    u_was_down;        /* edge-detect mint-church (U, P6 item 9) */
     sol_bool    plan_on;
     sol_u32     plan_plot;         /* island the overlay was built for */
     Mesh        plan_mesh;         /* DERIVED, never serialized (arrows law) */
@@ -4420,6 +4421,114 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->j_was_down = j_now;
     }
 
+    /* U mints THE CHURCH on the island underfoot (P6 item 9): the
+       J-overlay's commission, built. The datum is the MAX of the pier
+       samples (ruled: the building must nowhere float); the group is
+       one anchor + four members sharing the island's identity, yawed
+       a quarter-turn when the plot is deeper than wide. room_type
+       makes it architecture — never draggable. */
+    {
+        sol_bool u_now = glfwGetKey(w, GLFW_KEY_U) == GLFW_PRESS;
+        if (u_now && !st->u_was_down && st->current_terrain != 0) {
+            SceneObject *isl = scene_get(&st->scene, st->current_terrain);
+            if (isl && isl->mesh_ref &&
+                strcmp(isl->mesh_ref, "terrain") == 0) {
+                float cw = mesh_ref_param("terrain", isl->mesh_params,
+                                          isl->mesh_param_count, "w");
+                float cd = mesh_ref_param("terrain", isl->mesh_params,
+                                          isl->mesh_param_count, "d");
+                float cseed = mesh_ref_param("terrain", isl->mesh_params,
+                                             isl->mesh_param_count, "seed");
+                float params[3];
+                ChurchPlan cp;
+                float datum = 0.0f, x, z;
+                int   i2, j2;
+                Mesh  empty;
+                vec3  one = vec3_make(1.0f, 1.0f, 1.0f);
+                quat  rot;
+                sol_u32 anchor;
+                params[0] = cw; params[1] = cd; params[2] = cseed;
+                church_plan(&cp, params, 3);
+                for (i2 = 0; i2 <= cp.nbays; i2++)        /* the datum */
+                    for (j2 = 0; j2 <= PIER_ROW_N_WALL; j2++) {
+                        float lx, lz, hgt;
+                        if (!plan_pier(&cp, i2, j2, &x, &z)) continue;
+                        plan_to_local(&cp, x, z, &lx, &lz);
+                        hgt = terrain_height(isl->mesh_params,
+                                             isl->mesh_param_count, lx, lz);
+                        if (hgt > datum) datum = hgt;
+                    }
+                for (i2 = 0; i2 < 6; i2++) {
+                    float lx, lz, hgt;
+                    if (!plan_apse_pier(&cp, i2, &x, &z)) continue;
+                    plan_to_local(&cp, x, z, &lx, &lz);
+                    hgt = terrain_height(isl->mesh_params,
+                                         isl->mesh_param_count, lx, lz);
+                    if (hgt > datum) datum = hgt;
+                }
+                rot = cp.swapped
+                    ? quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                           -0.5f * (float)SOL_PI)
+                    : quat_identity();
+                memset(&empty, 0, sizeof empty);
+                anchor = scene_add(&st->scene, 0, empty,
+                                   vec3_add(isl->pos,
+                                            vec3_make(0.0f, datum, 0.0f)),
+                                   rot, one);
+                scene_meta_set(&st->scene, anchor, "room_type", "church");
+                {
+                    const char *nm = scene_meta_get(&st->scene, isl->handle,
+                                                    "name");
+                    char title[96];
+                    snprintf(title, sizeof title, "the church of %s",
+                             nm ? nm : "the island");
+                    scene_meta_set(&st->scene, anchor, "name", title);
+                }
+                {
+                    static const char *refs[4] = {
+                        "church_stone", "church_glass",
+                        "church_roof",  "church_floor"
+                    };
+                    int r2;
+                    for (r2 = 0; r2 < 4; r2++) {
+                        sol_u32 ch = scene_add(&st->scene, anchor, empty,
+                                               vec3_make(0, 0, 0),
+                                               quat_identity(), one);
+                        scene_mesh_ref_set(&st->scene, ch, refs[r2]);
+                        scene_mesh_params_set(&st->scene, ch, params, 3);
+                        {
+                            SceneObject *co = scene_get(&st->scene, ch);
+                            if (co) {
+                                Material mm = material_default();
+                                if (r2 == 0) {
+                                    mm.base_color = vec3_make(0.62f, 0.60f, 0.55f);
+                                    mm.roughness  = 0.9f;
+                                } else if (r2 == 1) {
+                                    mm.base_color = vec3_make(0.02f, 0.025f, 0.045f);
+                                    mm.roughness  = 0.08f;
+                                    mm.emissive   = vec3_make(0.35f, 0.22f, 0.10f);
+                                } else if (r2 == 2) {
+                                    mm.base_color = vec3_make(0.30f, 0.32f, 0.36f);
+                                    mm.roughness  = 0.55f;
+                                } else {
+                                    mm.base_color = vec3_make(0.52f, 0.50f, 0.47f);
+                                    mm.roughness  = 0.95f;
+                                }
+                                co->material = mm;
+                            }
+                        }
+                    }
+                }
+                scene_resolve_meshes(&st->scene);
+                collide_rebuild(&st->colliders, &st->scene);
+                scene_save(&st->scene, "scene.stml");
+                printf("a church rises on the island (datum %.2f%s)\n",
+                       datum, cp.swapped ? ", turned to the long axis" : "");
+            }
+        }
+        st->u_was_down = u_now;
+    }
+
     /* O mints a LANTERN (P4 item 5): an ordinary draggable prop whose light
        is META — the light rides the object's transform, so carrying the
        lantern carries its pool of warmth. The body is the shared unit box
@@ -6890,6 +6999,15 @@ int main(void) {
         read_input(window, &in, dt, &state);          /* poll GLFW -> CameraInput */
         state.camera.ground_y = ground_under(&state, state.camera.pos,
                                              &state.current_terrain);
+        {   /* architecture may claim the ground too (P6 item 9): the
+               pavement above the island, the porch steps, a broken
+               wall stump — the highest top within the step treaty */
+            vec3  sfeet = state.camera.pos;
+            float gs;
+            sfeet.y -= CAMERA_EYE_HEIGHT;
+            gs = collide_stand(&state.colliders, sfeet, COLLIDE_RADIUS);
+            if (gs > state.camera.ground_y) state.camera.ground_y = gs;
+        }
         /* the plan overlay follows you island to island (P6 item 3);
            a reload's stale handle drops it, the next step rebuilds it */
         if (state.plan_on) {

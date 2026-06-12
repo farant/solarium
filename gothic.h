@@ -349,6 +349,14 @@ enum {
 int church_survives(const ChurchPlan *p, int elem, int i, int j,
                     float *t_keep);
 
+/* ---- item 9: ground truth ----
+   The foundation skirt: every grounded element extends this far BELOW
+   local y=0 — buried uphill, exposed footing downhill (kin to the
+   terrain's own skirt). The spawner sets the datum at the MAX of the
+   pier samples (ruled: the building must nowhere float), so the skirt
+   is what meets the slope. */
+#define GOTHIC_FOUNDATION 2.5f
+
 /* the pavement — the group's FOURTH member, arriving with the item
    that needed something to omit: bays whose vaults fell lose their
    paving (item 9 sinks the datum so the island grass shows through) */

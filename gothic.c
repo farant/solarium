@@ -1156,6 +1156,7 @@ static void buttress(MeshBuilder *b, float h_head, float bw, float d0,
     fr3[0] = 0.40f; fr3[1] = 0.68f; fr3[2] = 0.93f;
     fr = stages == 3 ? fr3 : fr2;
     if (stages != 3) stages = 2;
+    y0 = -GOTHIC_FOUNDATION;           /* the skirt (item 9) */
     for (k = 0; k < stages; k++) {
         float y1 = fr[k] * h_head;
         float dn = (k == stages - 1) ? 0.0f : dk * 0.65f;
@@ -1232,12 +1233,13 @@ static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
         capital   = capital ? 2 : 0;   /* base yes, frustum/abacus no */
     }
 
-    if (capital) {                     /* square sub-plinth */
+    if (capital) {                     /* square sub-plinth, skirted */
         float hs = rp + 0.10f;
-        gz_face(b, -hs, hs, 0.0f, p->plinth_h,  hs,  1);
-        gz_face(b, -hs, hs, 0.0f, p->plinth_h, -hs, -1);
-        gx_face(b, -hs, 0.0f, p->plinth_h, -hs, hs, -1);
-        gx_face(b,  hs, 0.0f, p->plinth_h, -hs, hs,  1);
+        float yb = -GOTHIC_FOUNDATION;
+        gz_face(b, -hs, hs, yb, p->plinth_h,  hs,  1);
+        gz_face(b, -hs, hs, yb, p->plinth_h, -hs, -1);
+        gx_face(b, -hs, yb, p->plinth_h, -hs, hs, -1);
+        gx_face(b,  hs, yb, p->plinth_h, -hs, hs,  1);
         gy_face(b, -hs, hs, p->plinth_h, -hs, hs, 1);   /* full top: the
                                           shaft and base stand ON it */
         {   /* the attic base: PR_BASE around the shaft on a square loop,
@@ -1258,7 +1260,8 @@ static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
                          sb, 0, 0);
         }
     }
-    path[0] = vec3_make(0.0f, capital ? p->plinth_h : 0.0f, 0.0f);
+    path[0] = vec3_make(0.0f, capital ? p->plinth_h : -GOTHIC_FOUNDATION,
+                        0.0f);
     path[1] = vec3_make(0.0f, shaft_top, 0.0f);
     gothic_sweep(b, oct, pn, path, 2, vec3_make(0.0f, 0.0f, 1.0f),
                  sp, 0, capital == 1 ? 0 : 1);
@@ -1303,20 +1306,22 @@ static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
    pair. Ends optional (suppressed where it abuts another strip). */
 static void plinth_strip(MeshBuilder *b, float x0, float x1, float z0,
                          float z1, float h, int ends, int zrun) {
+    float yb = -GOTHIC_FOUNDATION;     /* the skirt (item 9): buried
+                                          uphill, exposed footing down */
     gy_face(b, x0, x1, h, z0, z1, 1);
     if (!zrun) {
-        gz_face(b, x0, x1, 0.0f, h, z1,  1);
-        gz_face(b, x0, x1, 0.0f, h, z0, -1);
+        gz_face(b, x0, x1, yb, h, z1,  1);
+        gz_face(b, x0, x1, yb, h, z0, -1);
         if (ends) {
-            gx_face(b, x0, 0.0f, h, z0, z1, -1);
-            gx_face(b, x1, 0.0f, h, z0, z1,  1);
+            gx_face(b, x0, yb, h, z0, z1, -1);
+            gx_face(b, x1, yb, h, z0, z1,  1);
         }
     } else {
-        gx_face(b, x0, 0.0f, h, z0, z1, -1);
-        gx_face(b, x1, 0.0f, h, z0, z1,  1);
+        gx_face(b, x0, yb, h, z0, z1, -1);
+        gx_face(b, x1, yb, h, z0, z1,  1);
         if (ends) {
-            gz_face(b, x0, x1, 0.0f, h, z1,  1);
-            gz_face(b, x0, x1, 0.0f, h, z0, -1);
+            gz_face(b, x0, x1, yb, h, z1,  1);
+            gz_face(b, x0, x1, yb, h, z0, -1);
         }
     }
 }
@@ -1533,9 +1538,9 @@ static void stone_facade(MeshBuilder *b, const ChurchPlan *p) {
                 float xs1 = p->west_x - wt - tread * (float)(k - 1);
                 if (top <= 0.02f) break;
                 gy_face(b, xs0, xs1, top, -sw, sw, 1);
-                gx_face(b, xs0, 0.0f, top, -sw, sw, -1);
-                gz_face(b, xs0, xs1, 0.0f, top, -sw, -1);
-                gz_face(b, xs0, xs1, 0.0f, top,  sw,  1);
+                gx_face(b, xs0, -1.2f, top, -sw, sw, -1);
+                gz_face(b, xs0, xs1, -1.2f, top, -sw, -1);
+                gz_face(b, xs0, xs1, -1.2f, top,  sw,  1);
             }
         }
     }
@@ -1808,6 +1813,7 @@ static void stone_vaults(MeshBuilder *b, const ChurchPlan *p);  /* item 5,
 static void church_windows(MeshBuilder *stone, MeshBuilder *glass,
                            const ChurchPlan *p);            /* item 6 */
 static void stone_pinnacles(MeshBuilder *b, const ChurchPlan *p);
+static void stone_rubble(MeshBuilder *b, const ChurchPlan *p);
 
 void church_stone(MeshBuilder *b, const float *params, int count) {
     ChurchPlan plan;
@@ -1909,6 +1915,7 @@ void church_stone(MeshBuilder *b, const float *params, int count) {
                                                  masonry; the glass is
                                                  church_glass's */
     stone_course(b, p);
+    stone_rubble(b, p);             /* item 9: debris where vaults fell */
 
     {   /* parapets: aisle walls full length, facade and flat east
            trimmed between them, the clerestory band's own */
@@ -3412,4 +3419,53 @@ void church_floor(MeshBuilder *b, const float *params, int count) {
                  vec3_make(ax, y, az), vec3_make(bx, y, bz));
         }
     }
+}
+
+/* rubble (item 8's deferral, landing with the ground): low fBm mounds
+   in heavily-ruined bays, based below the pavement line so they meet
+   whatever slope the datum left — debris is masonry, into the stone */
+static void stone_rubble(MeshBuilder *b, const ChurchPlan *p) {
+    int i, lane;
+    float hwid = 0.5f * p->nave_w + p->aisle_w;
+    for (i = 0; i < p->nbays; i++)
+        for (lane = 0; lane <= 2; lane++) {
+            float pr, cx, cz, rad, hgt;
+            int   gx, gz;
+            if (lane != 1 && !p->aisles) continue;
+            if (church_survives(p, ELEM_WEB, i, lane, (float *)0)) continue;
+            pr = ruin_pressure(p, i, lane);
+            if (pr < 0.45f) continue;
+            cx = p->west_x + p->tower_d + ((float)i + 0.35f
+               + 0.3f * gothic_hash01(p->seed, LANE_RUIN, 300 + i, lane))
+               * p->bay_l;
+            cz = lane == 1 ? 0.0f
+               : (lane == 0 ? -1.0f : 1.0f) * 0.5f * (0.5f * p->nave_w + hwid);
+            cz += (gothic_hash01(p->seed, LANE_RUIN, 400 + i, lane) - 0.5f)
+                * 0.4f * p->bay_l;
+            rad = 0.7f + 0.9f * gothic_hash01(p->seed, LANE_RUIN, 500 + i, lane);
+            hgt = 0.35f + 0.35f * pr;
+            for (gx = 0; gx < 5; gx++)
+                for (gz = 0; gz < 5; gz++) {
+                    float u0 = -1.0f + 0.4f * (float)gx;
+                    float v0 = -1.0f + 0.4f * (float)gz;
+                    vec3  q[4];
+                    int   k2;
+                    for (k2 = 0; k2 < 4; k2++) {
+                        float uu = u0 + ((k2 == 1 || k2 == 2) ? 0.4f : 0.0f);
+                        float vv = v0 + (k2 >= 2 ? 0.4f : 0.0f);
+                        float rr = sqrtf(uu * uu + vv * vv);
+                        float fall = rr >= 1.0f ? 0.0f
+                                   : 0.5f * (1.0f + cosf(SOL_PI * rr));
+                        float n = gothic_vnoise(2.0f * uu + (float)i,
+                                                2.0f * vv + (float)lane,
+                                                p->seed, LANE_RUIN);
+                        q[k2] = vec3_make(cx + uu * rad,
+                                          -0.6f + (0.6f + hgt * (0.4f + 0.6f * n))
+                                              * fall,
+                                          cz + vv * rad);
+                    }
+                    web_quad(b, q[0], q[1], q[2], q[3],
+                             vec3_make(cx, 8.0f, cz));
+                }
+        }
 }
