@@ -504,17 +504,30 @@ static void ladder_strip(MeshBuilder *b, float ox0, float oy0, float ox1,
             0.0f, 0.0f, 1.0f);
 }
 
+/* abutment flags (item 4): a piece sitting on a plinth suppresses its
+   bottom; a piece under another suppresses its top; a piece ending at a
+   pier or another wall suppresses its end faces — faces where pieces
+   abut are SKIPPED, the flat emitter's law at composition scale */
+#define WF_NO_TOP    1
+#define WF_NO_BOTTOM 2
+#define WF_NO_ENDS   4
+#define WF_NO_SILL   8   /* the threshold/sill ledge: a plinth or floor
+                            below already claims that plane */
+
 /* the shared core: N recessed orders, widest at the FRONT (+z) face,
    sharing center cx, springing height and acuteness. Around the gap,
    slab by slab: each order owns its sub-thickness's jamb reveals,
    intrados strips, threshold/top/bottom strips; the wall's front face
    reads the widest arch, the back face the narrowest; step faces
    connect consecutive orders (jamb rectangles + the curved ladder).
-   Impossible parameters (crown above the top, opening past the wall)
-   emit nothing — the plan (item 3) never asks for them. */
+   sill > 0 makes the opening a WINDOW: jamb reveals start at the sill,
+   the threshold becomes the sill ledge, and a solid band fills the wall
+   below (single-order only). Impossible parameters (crown above the
+   top, opening past the wall) emit nothing — the plan never asks. */
 static void arched_orders(MeshBuilder *b, float w, float h, float t,
-                          float cx, float ow, float spring_h, float a,
-                          int orders, float step, int archivolts) {
+                          float cx, float ow, float sill, float spring_h,
+                          float a, int orders, float step, int archivolts,
+                          int flags) {
     vec3  arch[GOTHIC_MAX_ORDERS][GOTHIC_ARCH_MAX_PTS];
     float x0[GOTHIC_MAX_ORDERS], x1[GOTHIC_MAX_ORDERS];
     float hw = 0.5f * w, zf, dt;
@@ -524,7 +537,9 @@ static void arched_orders(MeshBuilder *b, float w, float h, float t,
     if (orders > GOTHIC_MAX_ORDERS) orders = GOTHIC_MAX_ORDERS;
     if (step < 0.0f) step = 0.0f;
     if (t < 0.01f) t = 0.01f;
-    if (spring_h < 0.0f) spring_h = 0.0f;
+    if (sill < 0.0f) sill = 0.0f;
+    if (sill > 0.0f) orders = 1;             /* windows are single-order */
+    if (spring_h < sill + 0.05f) spring_h = sill + 0.05f;
     zf = 0.5f * t;
     dt = t / (float)orders;
 
@@ -548,27 +563,48 @@ static void arched_orders(MeshBuilder *b, float w, float h, float t,
     has_r = x1[0] <  hw - 1e-5f;
 
     /* outer ends: once, full height by full thickness */
-    if (has_l) gx_face(b, -hw, 0.0f, h, -zf, zf, -1);
-    if (has_r) gx_face(b,  hw, 0.0f, h, -zf, zf,  1);
+    if (!(flags & WF_NO_ENDS)) {
+        if (has_l) gx_face(b, -hw, 0.0f, h, -zf, zf, -1);
+        if (has_r) gx_face(b,  hw, 0.0f, h, -zf, zf,  1);
+    }
 
     for (k = 0; k < orders; k++) {
         float zk_f = zf - dt * (float)k;
         float zk_b = (k == orders - 1) ? -zf : zf - dt * (float)(k + 1);
 
         if (has_l) {
-            gy_face(b, -hw, x0[k], h,    zk_b, zk_f,  1);    /* panel tops    */
-            gy_face(b, -hw, x0[k], 0.0f, zk_b, zk_f, -1);    /* panel bottoms */
+            if (!(flags & WF_NO_TOP))
+                gy_face(b, -hw, x0[k], h,    zk_b, zk_f,  1);  /* panel tops */
+            if (!(flags & WF_NO_BOTTOM))
+                gy_face(b, -hw, x0[k], 0.0f, zk_b, zk_f, -1);
         }
         if (has_r) {
-            gy_face(b, x1[k], hw, h,    zk_b, zk_f,  1);
-            gy_face(b, x1[k], hw, 0.0f, zk_b, zk_f, -1);
+            if (!(flags & WF_NO_TOP))
+                gy_face(b, x1[k], hw, h,    zk_b, zk_f,  1);
+            if (!(flags & WF_NO_BOTTOM))
+                gy_face(b, x1[k], hw, 0.0f, zk_b, zk_f, -1);
         }
-        gy_face(b, x0[k], x1[k], h,    zk_b, zk_f, 1);       /* head top      */
-        gy_face(b, x0[k], x1[k], 0.0f, zk_b, zk_f, 1);       /* the THRESHOLD */
-        gx_face(b, x0[k], 0.0f, spring_h, zk_b, zk_f,  1);   /* jamb reveals  */
-        gx_face(b, x1[k], 0.0f, spring_h, zk_b, zk_f, -1);
-        if (!has_l) gx_face(b, x0[k], spring_h, h, zk_b, zk_f, -1);  /* flush */
-        if (!has_r) gx_face(b, x1[k], spring_h, h, zk_b, zk_f,  1);
+        if (!(flags & WF_NO_TOP))
+            gy_face(b, x0[k], x1[k], h, zk_b, zk_f, 1);      /* head top      */
+        if (!(flags & WF_NO_SILL))
+            gy_face(b, x0[k], x1[k], sill, zk_b, zk_f, 1);   /* threshold or
+                                                                the sill ledge */
+        /* jamb reveals — except on a FLUSH endless side, where the
+           reveal IS an end face (it would z-fight the abutting wall) */
+        if (has_l || !(flags & WF_NO_ENDS))
+            gx_face(b, x0[k], sill, spring_h, zk_b, zk_f,  1);
+        if (has_r || !(flags & WF_NO_ENDS))
+            gx_face(b, x1[k], sill, spring_h, zk_b, zk_f, -1);
+        if (!has_l && !(flags & WF_NO_ENDS))
+            gx_face(b, x0[k], spring_h, h, zk_b, zk_f, -1);  /* flush head end */
+        if (!has_r && !(flags & WF_NO_ENDS))
+            gx_face(b, x1[k], spring_h, h, zk_b, zk_f,  1);
+        if (sill > 0.0f) {                   /* the band below the window */
+            gz_face(b, x0[k], x1[k], 0.0f, sill,  zf,  1);
+            gz_face(b, x0[k], x1[k], 0.0f, sill, -zf, -1);
+            if (!(flags & WF_NO_BOTTOM))
+                gy_face(b, x0[k], x1[k], 0.0f, zk_b, zk_f, -1);
+        }
 
         {                                  /* the intrados, strip by strip */
             float u = 0.0f;
@@ -655,15 +691,16 @@ void gothic_wall_arched(MeshBuilder *b, float w, float h, float t,
         gy_face(b, -hw, hw, 0.0f, -zf, zf, -1);
         return;
     }
-    arched_orders(b, w, h, t, -hw + ox + 0.5f * ow, ow, spring_h, a,
-                  1, 0.0f, 0);
+    arched_orders(b, w, h, t, -hw + ox + 0.5f * ow, ow, 0.0f, spring_h, a,
+                  1, 0.0f, 0, 0);
 }
 
 void gothic_wall_portal(MeshBuilder *b, float w, float h, float t,
                         float ow, float spring_h, float a,
                         int orders, float step, int archivolts) {
     if (!b || w <= 0.0f || h <= 0.0f || ow <= 1e-5f) return;
-    arched_orders(b, w, h, t, 0.0f, ow, spring_h, a, orders, step, archivolts);
+    arched_orders(b, w, h, t, 0.0f, ow, 0.0f, spring_h, a,
+                  orders, step, archivolts, 0);
 }
 
 /* ================== item 3: the plan function ==================
@@ -684,9 +721,9 @@ float gothic_hash01(unsigned seed, int lane, int i, int j) {
     return (float)(h & 0xFFFFFFu) / 16777216.0f;   /* 24 bits: mantissa-exact */
 }
 
-/* the church ref schema's defaults — item 4's registry rows must carry
-   these same values (gothictest will assert the two tables agree) */
-static const float CHURCH_DEFAULTS[8] =
+/* the church ref schema's defaults — mesh.c's registry rows carry the
+   same values (gothictest asserts the two tables agree) */
+const float gothic_church_defaults[8] =
     { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f };
 
 /* the 5/8 apse: 5 sides of an octagon whose mouth chord equals the nave
@@ -701,7 +738,7 @@ void church_plan(ChurchPlan *p, const float *params, int count) {
 
     memset(p, 0, sizeof *p);                /* padding too: memcmp-clean */
     for (k = 0; k < 8; k++)
-        full[k] = (params && k < count) ? params[k] : CHURCH_DEFAULTS[k];
+        full[k] = (params && k < count) ? params[k] : gothic_church_defaults[k];
 
     p->seed  = full[2] > 0.0f ? (unsigned)(full[2] + 0.5f) : 0u;
     p->acute = full[6] < 0.0f ? 0.0f : full[6];
@@ -794,6 +831,7 @@ void church_plan(ChurchPlan *p, const float *params, int count) {
         float r4 = gothic_hash01(p->seed, LANE_ELEV, 4, 0);
         float r5 = gothic_hash01(p->seed, LANE_ELEV, 5, 0);
         float r6 = gothic_hash01(p->seed, LANE_ELEV, 6, 0);
+        float r7 = gothic_hash01(p->seed, LANE_ELEV, 7, 0);
         float arc_span = 0.8f * p->bay_l;       /* arcade clear span */
 
         p->plinth_h = 0.4f + 0.15f * r1;
@@ -823,6 +861,7 @@ void church_plan(ChurchPlan *p, const float *params, int count) {
             p->wall_h     = p->clerest_h1 + 0.5f;
             p->aisle_h    = p->arcade_h + 0.4f;
         }
+        p->parapet_h = 0.4f + 0.2f * r7;
     }
 }
 
@@ -939,7 +978,754 @@ void plan_opening(const ChurchPlan *p, int wall, int i, GothicOpening *out) {
             opening_fit(out, limit);
         }
         break;
+    case WALL_EAST:                          /* the flat east end's window */
+        if (p->apse_sides != 0 || i != 0) return;
+        out->kind   = GOTHIC_OPEN_WINDOW;
+        out->cx     = 0.0f;
+        out->w      = 0.5f * p->nave_w;
+        out->sill   = p->sill_h + 0.4f;
+        limit       = p->wall_h - 0.8f;
+        head        = limit - out->sill;
+        if (head < 0.8f) { out->kind = GOTHIC_OPEN_NONE; return; }
+        out->spring = out->sill + 0.4f * head;
+        opening_fit(out, limit);
+        break;
+    case WALL_APSE:                          /* one lancet per chevet side */
+        if (p->apse_sides != 5 || i < 0 || i > 4) return;
+        clear = 0.7653669f * 0.5411961f * p->nave_w;     /* the side length */
+        out->kind   = GOTHIC_OPEN_WINDOW;
+        out->cx     = 0.0f;
+        out->w      = 0.42f * clear;
+        out->sill   = p->sill_h;
+        limit       = p->wall_h - 0.8f;
+        head        = limit - out->sill;
+        if (head < 0.8f) { out->kind = GOTHIC_OPEN_NONE; return; }
+        out->spring = out->sill + 0.45f * head;
+        opening_fit(out, limit);
+        break;
     default:
         break;
     }
+}
+
+/* ================== item 4: the stone shell ==================
+   The plan's first full reader: everything load-bearing and opaque, one
+   mesh. Pieces are emitted in a LOCAL frame (x along the wall, y up
+   from the piece's base, thickness centered) and placed by yaw+
+   translate — tangents are computed at upload, after placement, so
+   rotation is safe. Abutment is the composition's whole discipline:
+   walls sit on plinths bottomless, pieces meet piers endless, stacked
+   bands suppress their facing tops/bottoms (§1.2: the plan owns
+   abutment; faces where pieces abut are SKIPPED). */
+
+/* rotate about +Y (cos c, sin s) then translate — positions AND normals */
+static void mb_transform_from(MeshBuilder *b, sol_u32 v0, float c, float s,
+                              float tx, float ty, float tz) {
+    sol_u32 i;
+    for (i = v0; i < b->vertex_count; i++) {
+        sol_f32 *v = b->vertices + (size_t)i * 12;
+        float x = v[0], z = v[2], nx = v[3], nz = v[5];
+        v[0] = c * x + s * z + tx;
+        v[2] = -s * x + c * z + tz;
+        v[1] += ty;
+        v[3] = c * nx + s * nz;
+        v[5] = -s * nx + c * nz;
+    }
+}
+
+/* a solid wall piece — the blank stretches between openings */
+static void solid_wall(MeshBuilder *b, float w, float h, float t, int flags) {
+    float hw = 0.5f * w, zf = 0.5f * t;
+    if (w <= 1e-5f || h <= 1e-5f) return;
+    gz_face(b, -hw, hw, 0.0f, h,  zf,  1);
+    gz_face(b, -hw, hw, 0.0f, h, -zf, -1);
+    if (!(flags & WF_NO_ENDS)) {
+        gx_face(b, -hw, 0.0f, h, -zf, zf, -1);
+        gx_face(b,  hw, 0.0f, h, -zf, zf,  1);
+    }
+    if (!(flags & WF_NO_TOP))    gy_face(b, -hw, hw, h,    -zf, zf,  1);
+    if (!(flags & WF_NO_BOTTOM)) gy_face(b, -hw, hw, 0.0f, -zf, zf, -1);
+}
+
+/* one placed wall piece. Local heights: the piece's base is ybase in
+   building coords, so opening heights arrive absolute and shed ybase
+   here. cx_op = opening center in the piece's local x. */
+static void place_piece(MeshBuilder *b, float w, float hloc, float t,
+                        const GothicOpening *o, float cx_op, float ybase,
+                        int flags, float c, float s, float tx, float tz) {
+    sol_u32 v0 = b->vertex_count;
+    if (o && o->kind == GOTHIC_OPEN_WINDOW)
+        arched_orders(b, w, hloc, t, cx_op, o->w, o->sill - ybase,
+                      o->spring - ybase, o->acute, 1, 0.0f, 0, flags);
+    else if (o && o->kind == GOTHIC_OPEN_DOOR)
+        arched_orders(b, w, hloc, t, cx_op, o->w, 0.0f,
+                      o->spring - ybase, o->acute, 1, 0.0f, 0, flags);
+    else
+        solid_wall(b, w, hloc, t, flags);
+    mb_transform_from(b, v0, c, s, tx, ybase, tz);
+}
+
+/* a flush arch piece (arcade / transverse): the opening IS the span */
+static void place_arch(MeshBuilder *b, float span, float hloc, float t,
+                       float spring, float acute, float ybase, int flags,
+                       float c, float s, float tx, float tz) {
+    sol_u32 v0 = b->vertex_count;
+    float a = acute;
+    float room = hloc - 0.4f - (spring - ybase);
+    if (room < 0.5f * span)                      /* cannot even go round */
+        return;
+    if (spring - ybase + gothic_arch_y(span, a, 0.0f) > hloc - 0.4f)
+        a = gothic_arch_acuteness_for(span, room);   /* level-crown again */
+    arched_orders(b, span, hloc, t, 0.0f, span, 0.0f, spring - ybase, a,
+                  1, 0.0f, 0, flags | WF_NO_ENDS);
+    mb_transform_from(b, v0, c, s, tx, ybase, tz);
+}
+
+/* the stepped buttress, emitted facing -Z with its back on z=0 (the
+   wall's outer face), then placed. Stages step back, each topped by a
+   WEATHERING slope (two sloped quads' worth: one quad + side
+   triangles) — exposed faces only, the back never emitted. */
+static void buttress(MeshBuilder *b, float h_head, float bw, float d0,
+                     int stages, float c, float s, float tx, float tz) {
+    sol_u32 v0 = b->vertex_count;
+    float hx = 0.5f * bw;
+    float fr2[2]; float fr3[3]; const float *fr;
+    float y0 = 0.0f, dk = d0;
+    int k;
+    fr2[0] = 0.52f; fr2[1] = 0.93f;
+    fr3[0] = 0.40f; fr3[1] = 0.68f; fr3[2] = 0.93f;
+    fr = stages == 3 ? fr3 : fr2;
+    if (stages != 3) stages = 2;
+    for (k = 0; k < stages; k++) {
+        float y1 = fr[k] * h_head;
+        float dn = (k == stages - 1) ? 0.0f : dk * 0.65f;
+        float rise = (dk - dn) * 1.1f;
+        sol_u32 ia, ib, ic, id;
+        /* the stage box: front + sides (no back, no bottom, no top —
+           the weathering closes it) */
+        gz_face(b, -hx, hx, y0, y1, -dk, -1);
+        gx_face(b, -hx, y0, y1, -dk, 0.0f, -1);
+        gx_face(b,  hx, y0, y1, -dk, 0.0f,  1);
+        /* the weathering: slope from the front-top edge back-up */
+        {
+            float ny = dk - dn, nz = -rise;
+            float nl = sqrtf(ny * ny + nz * nz);
+            ny /= nl; nz /= nl;
+            ia = mb_push_vertex(b,  hx, y1, -dk, 0.0f, ny, nz, hx, 0.0f);
+            ib = mb_push_vertex(b, -hx, y1, -dk, 0.0f, ny, nz, -hx, 0.0f);
+            ic = mb_push_vertex(b, -hx, y1 + rise, -dn, 0.0f, ny, nz, -hx, 1.0f);
+            id = mb_push_vertex(b,  hx, y1 + rise, -dn, 0.0f, ny, nz, hx, 1.0f);
+            mb_push_triangle(b, ia, ib, ic);
+            mb_push_triangle(b, ia, ic, id);
+        }
+        {   /* side triangles under the slope */
+            sol_u32 t0, t1, t2;
+            t0 = mb_push_vertex(b, -hx, y1, -dk, -1.0f, 0.0f, 0.0f, -dk, y1);
+            t1 = mb_push_vertex(b, -hx, y1, -dn, -1.0f, 0.0f, 0.0f, -dn, y1);
+            t2 = mb_push_vertex(b, -hx, y1 + rise, -dn, -1.0f, 0.0f, 0.0f, -dn, y1 + rise);
+            mb_push_triangle(b, t0, t1, t2);
+            t0 = mb_push_vertex(b, hx, y1, -dk, 1.0f, 0.0f, 0.0f, -dk, y1);
+            t1 = mb_push_vertex(b, hx, y1 + rise, -dn, 1.0f, 0.0f, 0.0f, -dn, y1 + rise);
+            t2 = mb_push_vertex(b, hx, y1, -dn, 1.0f, 0.0f, 0.0f, -dn, y1);
+            mb_push_triangle(b, t0, t1, t2);
+        }
+        y0 = y1 + rise;
+        dk = dn;
+    }
+    mb_transform_from(b, v0, c, s, tx, 0.0f, tz);
+}
+
+/* the pier: octagonal shaft through an attic-base collar on a square
+   sub-plinth, capital (frustum + abacus) at the impost. h_cap 0 skips
+   the capital (apse buttress-piers run sheer to their flat tops). */
+static void pier(MeshBuilder *b, const ChurchPlan *p, float px, float pz,
+                 float rp, float top, int capital, float yaw_c, float yaw_s) {
+    sol_u32 v0 = b->vertex_count;
+    float sp = rp / 0.12f;             /* shaft profile scale            */
+    float ap = rp * 0.9238795f;        /* the octagon's apothem          */
+    int   pn;
+    const ProfilePt *oct = gothic_profile(PROF_SHAFT_OCT, &pn);
+    vec3  path[2];
+    float shaft_top = capital ? p->impost_h - 0.45f : top;
+
+    if (capital) {                     /* square sub-plinth */
+        float hs = rp + 0.10f;
+        gz_face(b, -hs, hs, 0.0f, p->plinth_h,  hs,  1);
+        gz_face(b, -hs, hs, 0.0f, p->plinth_h, -hs, -1);
+        gx_face(b, -hs, 0.0f, p->plinth_h, -hs, hs, -1);
+        gx_face(b,  hs, 0.0f, p->plinth_h, -hs, hs,  1);
+        gy_face(b, -hs, hs, p->plinth_h, -hs, hs, 1);   /* full top: the
+                                          shaft and base stand ON it */
+        {   /* the attic base: PR_BASE around the shaft on a square loop,
+               seam mid-side (item 1's closed-loop lesson) */
+            int bn;
+            const ProfilePt *bp = gothic_profile(PROF_BASE, &bn);
+            float sb = sp * 0.85f;
+            vec3 loop[6];
+            /* walk +X first so o = cross(+Y, d) points OUTWARD; the
+               seam closes mid-side (item 1's closed-loop lesson) */
+            loop[0] = vec3_make(0.0f, p->plinth_h, -ap);
+            loop[1] = vec3_make( ap,  p->plinth_h, -ap);
+            loop[2] = vec3_make( ap,  p->plinth_h,  ap);
+            loop[3] = vec3_make(-ap,  p->plinth_h,  ap);
+            loop[4] = vec3_make(-ap,  p->plinth_h, -ap);
+            loop[5] = vec3_make(0.0f, p->plinth_h, -ap);
+            gothic_sweep(b, bp, bn, loop, 6, vec3_make(0.0f, 1.0f, 0.0f),
+                         sb, 0, 0);
+        }
+    }
+    path[0] = vec3_make(0.0f, capital ? p->plinth_h : 0.0f, 0.0f);
+    path[1] = vec3_make(0.0f, shaft_top, 0.0f);
+    gothic_sweep(b, oct, pn, path, 2, vec3_make(0.0f, 0.0f, 1.0f),
+                 sp, 0, capital ? 0 : 1);
+    if (capital) {
+        float aa = rp + 0.12f;                 /* abacus half-size  */
+        float yf0 = shaft_top, yf1 = p->impost_h - 0.15f;
+        int k;
+        for (k = 0; k < 8; k++) {              /* the frustum: 8 quads */
+            float a0 = (22.5f + 45.0f * (float)k) * (SOL_PI / 180.0f);
+            float a1 = (22.5f + 45.0f * (float)(k + 1)) * (SOL_PI / 180.0f);
+            float x0 = rp * cosf(a0), z0 = rp * sinf(a0);
+            float x1 = rp * cosf(a1), z1 = rp * sinf(a1);
+            float xu0 = aa * cosf(a0), zu0 = aa * sinf(a0);
+            float xu1 = aa * cosf(a1), zu1 = aa * sinf(a1);
+            float mx = cosf(0.5f * (a0 + a1)), mz = sinf(0.5f * (a0 + a1));
+            float fl = sqrtf((yf1 - yf0) * (yf1 - yf0) + 0.05f);
+            sol_u32 q0, q1, q2, q3;
+            vec3 n = vec3_normalize(vec3_make(mx * (yf1 - yf0), 0.22f, mz * (yf1 - yf0)));
+            (void)fl;
+            q0 = mb_push_vertex(b, x0, yf0, z0, n.x, n.y, n.z, 0.0f, 0.0f);
+            q1 = mb_push_vertex(b, x1, yf0, z1, n.x, n.y, n.z, 1.0f, 0.0f);
+            q2 = mb_push_vertex(b, xu1, yf1, zu1, n.x, n.y, n.z, 1.0f, 1.0f);
+            q3 = mb_push_vertex(b, xu0, yf1, zu0, n.x, n.y, n.z, 0.0f, 1.0f);
+            mb_push_triangle(b, q0, q2, q1);
+            mb_push_triangle(b, q0, q3, q2);
+        }
+        /* the abacus slab: full bottom and top (anything stacked above
+           is thinner — smaller-on-larger keeps both legal) */
+        gz_face(b, -aa, aa, yf1, p->impost_h,  aa,  1);
+        gz_face(b, -aa, aa, yf1, p->impost_h, -aa, -1);
+        gx_face(b, -aa, yf1, p->impost_h, -aa, aa, -1);
+        gx_face(b,  aa, yf1, p->impost_h, -aa, aa,  1);
+        gy_face(b, -aa, aa, p->impost_h, -aa, aa,  1);
+        gy_face(b, -aa, aa, yf1, -aa, aa, -1);
+    }
+    mb_transform_from(b, v0, yaw_c, yaw_s, px, 0.0f, pz);
+}
+
+/* the plinth strip: a footing box projecting beyond both wall faces —
+   full top (walls stand on it bottomless), no bottom. zrun says the
+   strip RUNS along z: long faces are then the x pair, end caps the z
+   pair. Ends optional (suppressed where it abuts another strip). */
+static void plinth_strip(MeshBuilder *b, float x0, float x1, float z0,
+                         float z1, float h, int ends, int zrun) {
+    gy_face(b, x0, x1, h, z0, z1, 1);
+    if (!zrun) {
+        gz_face(b, x0, x1, 0.0f, h, z1,  1);
+        gz_face(b, x0, x1, 0.0f, h, z0, -1);
+        if (ends) {
+            gx_face(b, x0, 0.0f, h, z0, z1, -1);
+            gx_face(b, x1, 0.0f, h, z0, z1,  1);
+        }
+    } else {
+        gx_face(b, x0, 0.0f, h, z0, z1, -1);
+        gx_face(b, x1, 0.0f, h, z0, z1,  1);
+        if (ends) {
+            gz_face(b, x0, x1, 0.0f, h, z1,  1);
+            gz_face(b, x0, x1, 0.0f, h, z0, -1);
+        }
+    }
+}
+
+/* a parapet band: a thin solid strip ON a wall head (no bottom);
+   zrun as above */
+static void parapet_strip(MeshBuilder *b, float x0, float x1, float z0,
+                          float z1, float y0, float y1, int ends, int zrun) {
+    gy_face(b, x0, x1, y1, z0, z1, 1);
+    if (!zrun) {
+        gz_face(b, x0, x1, y0, y1, z1,  1);
+        gz_face(b, x0, x1, y0, y1, z0, -1);
+        if (ends) {
+            gx_face(b, x0, y0, y1, z0, z1, -1);
+            gx_face(b, x1, y0, y1, z0, z1,  1);
+        }
+    } else {
+        gx_face(b, x0, y0, y1, z0, z1, -1);
+        gx_face(b, x1, y0, y1, z0, z1,  1);
+        if (ends) {
+            gz_face(b, x0, x1, y0, y1, z1,  1);
+            gz_face(b, x0, x1, y0, y1, z0, -1);
+        }
+    }
+}
+
+/* pier sizing shared by walls (spans stop at pier faces) and piers */
+static float stone_pier_r(const ChurchPlan *p) {
+    return 0.18f + 0.035f * p->nave_w;
+}
+
+/* one aisle-wall run (side -1 = south, +1 = north): per-bay pieces with
+   their windows, a blank stretch over the tower flank, west/east corner
+   extensions — all bottomless on the plinth, endless between bays */
+static void stone_wall_run(MeshBuilder *b, const ChurchPlan *p, int side) {
+    float wt   = p->wall_t;
+    float hwid = 0.5f * p->nave_w + p->aisle_w;
+    float zc   = (float)side * (hwid + 0.5f * wt);
+    float yawc = side > 0 ? 1.0f : -1.0f;        /* outward = +-Z */
+    float hloc = p->aisle_h - p->plinth_h;
+    int   i, wallq = side > 0 ? WALL_AISLE_N : WALL_AISLE_S;
+
+    if (p->tower || p->porch > 0.0f) { /* nothing west of west_x but air */ }
+    if (p->tower)                       /* the blank flank beside the tower */
+        place_piece(b, p->tower_d + wt, hloc, wt, (const GothicOpening *)0,
+                    0.0f, p->plinth_h, WF_NO_BOTTOM | WF_NO_ENDS, yawc, 0.0f,
+                    p->west_x + 0.5f * (p->tower_d - wt), zc);
+    for (i = 0; i < p->nbays; i++) {
+        GothicOpening o;
+        float x0 = p->west_x + p->tower_d + (float)i * p->bay_l;
+        float xc = x0 + 0.5f * p->bay_l, w = p->bay_l;
+        if (i == 0 && !p->tower) { w += wt; xc -= 0.5f * wt; }   /* corner */
+        if (i == p->nbays - 1)   { w += wt; xc += 0.5f * wt; }
+        plan_opening(p, wallq, i, &o);
+        place_piece(b, w, hloc, wt,
+                    o.kind != GOTHIC_OPEN_NONE ? &o : (const GothicOpening *)0,
+                    yawc > 0.0f ? o.cx - xc : xc - o.cx,
+                    p->plinth_h, WF_NO_BOTTOM | WF_NO_ENDS, yawc, 0.0f, xc, zc);
+    }
+    /* the corner end faces (the exposed strips beside the west/east
+       walls — coplanar-ADJACENT with their faces, never overlapping);
+       the face helpers want ORDERED ranges, so sort the side's span */
+    {
+        float za = (float)side * hwid, zb = (float)side * (hwid + wt);
+        float z0 = za < zb ? za : zb, z1 = za < zb ? zb : za;
+        gx_face(b, p->west_x - wt, p->plinth_h, p->aisle_h, z0, z1, -1);
+        gx_face(b, p->east_x + wt, p->plinth_h, p->aisle_h, z0, z1,  1);
+    }
+}
+
+/* the west facade: stepped — a nave-width center (portal below the
+   springline course, great window above, both from the plan) rising to
+   wall_h, blank aisle-width flanks rising to aisle_h */
+static void stone_facade(MeshBuilder *b, const ChurchPlan *p) {
+    float wt = p->wall_t;
+    float xc = p->west_x - 0.5f * wt;
+    GothicOpening door, win;
+    float h_split;
+
+    plan_opening(p, WALL_WEST, 0, &door);
+    plan_opening(p, WALL_WEST, 1, &win);
+    h_split = door.spring + gothic_arch_y(door.w, door.acute, 0.0f) + 0.3f;
+
+    {   /* the portal: recessed orders by style, archivolt-dressed.
+           A chapel's facade ends abut the long walls' inner faces (no
+           flanks stand beside it) — ends suppressed; aisled facades
+           keep theirs, exposed above the flanks. */
+        sol_u32 v0 = b->vertex_count;
+        int ords = p->style == CHURCH_BASILICA ? 3 :
+                   p->style == CHURCH_HALL ? 2 : 1;
+        int ef = p->aisles ? 0 : WF_NO_ENDS;
+        arched_orders(b, p->nave_w, h_split - p->plinth_h, wt, 0.0f,
+                      door.w, 0.0f, door.spring - p->plinth_h, door.acute,
+                      ords, 0.15f, 1,
+                      WF_NO_TOP | WF_NO_BOTTOM | WF_NO_SILL | ef);
+        mb_transform_from(b, v0, 0.0f, -1.0f, xc, p->plinth_h, 0.0f);
+        place_piece(b, p->nave_w, p->wall_h - h_split, wt,
+                    win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
+                    0.0f, h_split, WF_NO_BOTTOM | ef, 0.0f, -1.0f, xc, 0.0f);
+    }
+    if (p->aisles) {
+        float fz = 0.5f * (0.5f * p->nave_w + (0.5f * p->nave_w + p->aisle_w));
+        place_piece(b, p->aisle_w, p->aisle_h - p->plinth_h, wt,
+                    (const GothicOpening *)0, 0.0f, p->plinth_h,
+                    WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, -1.0f, xc, -fz);
+        place_piece(b, p->aisle_w, p->aisle_h - p->plinth_h, wt,
+                    (const GothicOpening *)0, 0.0f, p->plinth_h,
+                    WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, -1.0f, xc,  fz);
+    }
+}
+
+/* the east end: a flat wall with its great window, or the aisle
+   closures + the five chevet sides with their lancets */
+static void stone_east(MeshBuilder *b, const ChurchPlan *p) {
+    float wt = p->wall_t;
+    float xc = p->east_x + 0.5f * wt;
+
+    if (p->apse_sides == 0) {
+        GothicOpening win;
+        float wfull = p->aisles ? p->nave_w + 2.0f * p->aisle_w : p->nave_w;
+        plan_opening(p, WALL_EAST, 0, &win);
+        place_piece(b, p->nave_w, p->wall_h - p->plinth_h, wt,
+                    win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
+                    0.0f, p->plinth_h,
+                    WF_NO_BOTTOM | (p->aisles ? 0 : WF_NO_ENDS),
+                    0.0f, 1.0f, xc, 0.0f);
+        if (p->aisles) {
+            float fz = 0.5f * (0.5f * p->nave_w + 0.5f * wfull);
+            place_piece(b, p->aisle_w, p->aisle_h - p->plinth_h, wt,
+                        (const GothicOpening *)0, 0.0f, p->plinth_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, 1.0f, xc, -fz);
+            place_piece(b, p->aisle_w, p->aisle_h - p->plinth_h, wt,
+                        (const GothicOpening *)0, 0.0f, p->plinth_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, 1.0f, xc,  fz);
+        }
+        return;
+    }
+    if (p->aisles) {                    /* the aisle east closures stop
+           where the apse mouth side's slab begins (its corner is the
+           slab's own; §1.2 — one author per region) */
+        float cw = p->aisle_w - wt;
+        float fz = 0.5f * p->nave_w + wt + 0.5f * cw;
+        if (cw > 0.3f) {
+            place_piece(b, cw, p->aisle_h - p->plinth_h, wt,
+                        (const GothicOpening *)0, 0.0f, p->plinth_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, 1.0f, xc, -fz);
+            place_piece(b, cw, p->aisle_h - p->plinth_h, wt,
+                        (const GothicOpening *)0, 0.0f, p->plinth_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, 1.0f, xc,  fz);
+        }
+    }
+    {   /* the chevet: five sides, a lancet each — walls span PIER FACE
+           to pier face (§1.2: trimmed at both ends, the radial piers
+           cover the joints; untrimmed slabs overlap in a kite at every
+           vertex, the audit's first real catch) */
+        float rap   = 0.4f > 0.7f * wt ? 0.4f : 0.7f * wt;
+        float inset = 0.83f * rap;
+        int k;
+        for (k = 0; k < 5; k++) {
+            float ax, az, bx, bz, mx, mz, dx, dz, len, nx, nz, nl;
+            GothicOpening win;
+            plan_apse_pier(p, k,     &ax, &az);
+            plan_apse_pier(p, k + 1, &bx, &bz);
+            mx = 0.5f * (ax + bx); mz = 0.5f * (az + bz);
+            dx = bx - ax; dz = bz - az;
+            nl = sqrtf(dx * dx + dz * dz);
+            len = nl - 2.0f * inset;
+            if (len < 0.5f || nl < 1e-6f) continue;
+            nx = dz / nl; nz = -dx / nl;     /* the chord's outward
+                perpendicular — the vertex walk is south-to-north around
+                the east, so (dz,-dx) faces away from the apse */
+            plan_opening(p, WALL_APSE, k, &win);
+            if (win.kind == GOTHIC_OPEN_WINDOW && win.w > len - 0.6f) {
+                win.w = len - 0.6f;
+                if (win.w < 0.3f) win.kind = GOTHIC_OPEN_NONE;
+            }
+            place_piece(b, len, p->wall_h, wt,
+                        win.kind == GOTHIC_OPEN_WINDOW ? &win : (const GothicOpening *)0,
+                        0.0f, 0.0f, WF_NO_ENDS,
+                        nz, nx, mx + nx * 0.5f * wt, mz + nz * 0.5f * wt);
+        }
+    }
+}
+
+/* arcades, the clerestory band, spandrels over the piers, and the
+   tower's transverse arch — the nave boundary planes at +-nave_w/2 */
+static void stone_arcades(MeshBuilder *b, const ChurchPlan *p) {
+    float wt  = p->wall_t;
+    float rp  = stone_pier_r(p);
+    float pfh = rp * 0.9238795f;
+    float top = p->style == CHURCH_BASILICA ? p->arcade_h : p->wall_h;
+    int   side, i;
+
+    if (!p->aisles) return;
+    for (side = -1; side <= 1; side += 2) {
+        float zc = (float)side * 0.5f * p->nave_w;
+        float yawc = side > 0 ? 1.0f : -1.0f;
+        for (i = 0; i < p->nbays; i++) {
+            float x0 = p->west_x + p->tower_d + (float)i * p->bay_l;
+            /* end bays die INTO the walls (engaged responds — no
+               freestanding pier collides with the wall footings);
+               an apse mouth keeps its own radial piers instead */
+            float rap = 0.4f > 0.7f * wt ? 0.4f : 0.7f * wt;
+            float xs = x0 + ((i == 0 && !p->tower) ? 0.0f : pfh);
+            float xe = x0 + p->bay_l -
+                       (i == p->nbays - 1
+                            ? (p->apse_sides ? rap * 0.9238795f : 0.0f)
+                            : pfh);
+            int   fl = p->style == CHURCH_BASILICA ? WF_NO_TOP : 0;
+            place_arch(b, xe - xs, top, wt, p->impost_h,
+                       p->acute, 0.0f, fl, yawc, 0.0f,
+                       0.5f * (xs + xe), zc);
+        }
+        for (i = 1; i < p->nbays; i++) {     /* spandrels over the piers */
+            float x = p->west_x + p->tower_d + (float)i * p->bay_l;
+            int   fl = WF_NO_BOTTOM | WF_NO_ENDS |
+                       (p->style == CHURCH_BASILICA ? WF_NO_TOP : 0);
+            place_piece(b, 2.0f * pfh, top - p->impost_h, wt,
+                        (const GothicOpening *)0, 0.0f, p->impost_h, fl,
+                        yawc, 0.0f, x, zc);
+        }
+        if (p->style == CHURCH_BASILICA) {   /* the clerestory band */
+            for (i = 0; i < p->nbays; i++) {
+                GothicOpening o;
+                float x0 = p->west_x + p->tower_d + (float)i * p->bay_l;
+                float xc = x0 + 0.5f * p->bay_l;
+                plan_opening(p, side > 0 ? WALL_CLEREST_N : WALL_CLEREST_S,
+                             i, &o);
+                place_piece(b, p->bay_l, p->wall_h - p->arcade_h, wt,
+                            o.kind != GOTHIC_OPEN_NONE ? &o : (const GothicOpening *)0,
+                            yawc > 0.0f ? o.cx - xc : xc - o.cx,
+                            p->arcade_h, WF_NO_BOTTOM | WF_NO_ENDS,
+                            yawc, 0.0f, xc, zc);
+            }
+        }
+        if (p->tower)                        /* the tower-bay side arch */
+            place_arch(b, p->tower_d - 2.0f * pfh,
+                       p->style == CHURCH_BASILICA ? p->wall_h : p->wall_h,
+                       wt, p->impost_h, p->acute, 0.0f,
+                       p->tower ? WF_NO_TOP : 0, yawc, 0.0f,
+                       p->west_x + 0.5f * p->tower_d, zc);
+    }
+    if (p->tower)                            /* the transverse arch east
+                                                of the tower bay */
+        place_arch(b, p->nave_w - 2.0f * pfh, p->wall_h, wt, p->impost_h,
+                   p->acute, 0.0f, WF_NO_TOP, 0.0f, 1.0f,
+                   p->west_x + p->tower_d, 0.0f);
+}
+
+/* the string course: PROF_STRING swept just below the sills, jogging
+   OUT and around every buttress (the miter machinery earning its keep)
+   — an open run from the portal's south jamb around the building to
+   its north jamb, ending early at the apse mouth when there is one */
+#define COURSE_MAX_PTS 192
+static int course_jog(vec3 *pt, int n, float along0, float along1,
+                      float depth, float y, int axis, float fixed, int neg) {
+    /* four points stepping out around a buttress; axis 0 = run along x
+       at z = fixed (depth grows -z when neg), axis 1 = run along z */
+    float d = neg ? -depth : depth;
+    if (n + 4 > COURSE_MAX_PTS) return n;
+    if (axis == 0) {
+        pt[n++] = vec3_make(along0, y, fixed);
+        pt[n++] = vec3_make(along0, y, fixed + d);
+        pt[n++] = vec3_make(along1, y, fixed + d);
+        pt[n++] = vec3_make(along1, y, fixed);
+    } else {
+        pt[n++] = vec3_make(fixed, y, along0);
+        pt[n++] = vec3_make(fixed + d, y, along0);
+        pt[n++] = vec3_make(fixed + d, y, along1);
+        pt[n++] = vec3_make(fixed, y, along1);
+    }
+    return n;
+}
+
+static void stone_course(MeshBuilder *b, const ChurchPlan *p) {
+    vec3  pt[COURSE_MAX_PTS];
+    float wt   = p->wall_t;
+    float hwid = 0.5f * p->nave_w + p->aisle_w;
+    float y    = p->sill_h - 0.25f;
+    float xf   = p->west_x - wt;            /* facade outer face        */
+    float xe   = p->east_x + wt;            /* east outer face          */
+    float bd   = (p->style == CHURCH_BASILICA ? 1.05f :
+                  p->style == CHURCH_HALL ? 0.75f : 0.55f);
+    float bw   = wt + 0.3f;
+    GothicOpening door;
+    int   half, i, n_str;
+    const ProfilePt *prof = gothic_profile(PROF_STRING, &n_str);
+
+    plan_opening(p, WALL_WEST, 0, &door);
+
+    for (half = -1; half <= 1; half += 2) {
+        /* south half walks -z first; the north half mirrors */
+        float hs = (float)half;
+        int   n  = 0;
+        pt[n++] = vec3_make(xf, y, hs * (0.5f * door.w + 0.35f));
+        if (p->aisles)                        /* facade buttress jog */
+            n = course_jog(pt, n, hs * (0.5f * p->nave_w - 0.5f * bw),
+                           hs * (0.5f * p->nave_w + 0.5f * bw),
+                           bd, y, 1, xf, 1);
+        pt[n++] = vec3_make(xf, y, hs * (hwid + wt));     /* the corner */
+        for (i = 1; i < p->nbays; i++) {      /* along the aisle wall */
+            float x = p->west_x + p->tower_d + (float)i * p->bay_l;
+            n = course_jog(pt, n, x - 0.5f * bw, x + 0.5f * bw,
+                           bd, y, 0, hs * (hwid + wt), half < 0);
+        }
+        if (p->apse_sides == 0) {
+            pt[n++] = vec3_make(xe, y, hs * (hwid + wt)); /* east corner */
+            n = course_jog(pt, n, hs * (0.5f * p->nave_w + 0.5f * bw),
+                           hs * (0.5f * p->nave_w - 0.5f * bw),
+                           bd, y, 1, xe, 0);
+            if (n + 1 <= COURSE_MAX_PTS)
+                pt[n++] = vec3_make(xe, y, hs * 0.18f);   /* meet mid-east */
+        } else {
+            pt[n++] = vec3_make(xe, y, hs * (hwid + wt));
+            if (n + 1 <= COURSE_MAX_PTS)      /* end at the apse mouth */
+                pt[n++] = vec3_make(xe, y, hs * (0.5f * p->nave_w + 0.3f));
+        }
+        if (half < 0) {                       /* south runs portal->east */
+            gothic_sweep(b, prof, n_str, pt, n,
+                         vec3_make(0.0f, 1.0f, 0.0f), 0.8f, 1, 1);
+        } else {                              /* north mirrors: REVERSE so
+                                                 o still points outward */
+            vec3 rev[COURSE_MAX_PTS];
+            for (i = 0; i < n; i++) rev[i] = pt[n - 1 - i];
+            gothic_sweep(b, prof, n_str, rev, n,
+                         vec3_make(0.0f, 1.0f, 0.0f), 0.8f, 1, 1);
+        }
+    }
+}
+
+void church_stone(MeshBuilder *b, const float *params, int count) {
+    ChurchPlan plan;
+    const ChurchPlan *p = &plan;
+    float wt, hwid, rp, pfh, proj;
+    int   i;
+
+    if (!b) return;
+    church_plan(&plan, params, count);
+    wt   = p->wall_t;
+    hwid = 0.5f * p->nave_w + p->aisle_w;
+    rp   = stone_pier_r(p);
+    pfh  = rp * 0.9238795f;
+    proj = 0.12f;
+
+    /* plinths first: S/N full length, west/east trimmed between them
+       (their end faces abut and are skipped — the S/N inner faces win) */
+    plinth_strip(b, p->west_x - wt - proj, p->east_x + wt + proj,
+                 -(hwid + wt + proj), -(hwid - proj), p->plinth_h, 1, 0);
+    plinth_strip(b, p->west_x - wt - proj, p->east_x + wt + proj,
+                 hwid - proj, hwid + wt + proj, p->plinth_h, 1, 0);
+    plinth_strip(b, p->west_x - wt - proj, p->west_x + proj,
+                 -(hwid - proj), hwid - proj, p->plinth_h, 0, 1);
+    if (p->apse_sides == 0)
+        plinth_strip(b, p->east_x - proj, p->east_x + wt + proj,
+                     -(hwid - proj), hwid - proj, p->plinth_h, 0, 1);
+
+    stone_wall_run(b, p, -1);
+    stone_wall_run(b, p,  1);
+    stone_facade(b, p);
+    stone_east(b, p);
+    stone_arcades(b, p);
+
+    /* freestanding arcade piers at INTERIOR stations; the end arches
+       die into the walls (station 0 stands only behind a tower, the
+       east station only as the apse's own) */
+    if (p->aisles)
+        for (i = p->tower ? 0 : 1; i < p->nbays; i++) {
+            float x, z;
+            if (plan_pier(p, i, PIER_ROW_S_ARCADE, &x, &z))
+                pier(b, p, x, z, rp, 0.0f, 1, 1.0f, 0.0f);
+            if (plan_pier(p, i, PIER_ROW_N_ARCADE, &x, &z))
+                pier(b, p, x, z, rp, 0.0f, 1, 1.0f, 0.0f);
+        }
+    if (p->apse_sides == 5) {
+        float rap = 0.4f > 0.7f * wt ? 0.4f : 0.7f * wt;
+        for (i = 0; i < 6; i++) {
+            float x, z, ang;
+            plan_apse_pier(p, i, &x, &z);
+            ang = (-112.5f + 45.0f * (float)i) * (SOL_PI / 180.0f);
+            pier(b, p, x, z, rap, p->wall_h + 0.25f, 0,
+                 cosf(ang), sinf(ang));
+        }
+    }
+
+    {   /* buttresses: interior stations on both aisle walls, a pair
+           flanking the facade, a pair on a flat east end */
+        float bd = (p->style == CHURCH_BASILICA ? 1.05f :
+                    p->style == CHURCH_HALL ? 0.75f : 0.55f);
+        float bw = wt + 0.3f;
+        int   st = p->style == CHURCH_BASILICA ? 3 : 2;
+        for (i = 1; i < p->nbays; i++) {
+            float x = p->west_x + p->tower_d + (float)i * p->bay_l;
+            buttress(b, p->aisle_h, bw, bd, st, 1.0f, 0.0f,
+                     x, -(hwid + wt));   /* south: the body already
+                                            extends -z; back on the face */
+            buttress(b, p->aisle_h, bw, bd, st, -1.0f, 0.0f,
+                     x, hwid + wt);      /* north: flipped 180 */
+        }
+        if (p->aisles) {
+            buttress(b, p->wall_h, bw, bd, st, 0.0f, 1.0f,
+                     p->west_x - wt, -0.5f * p->nave_w);
+            buttress(b, p->wall_h, bw, bd, st, 0.0f, 1.0f,
+                     p->west_x - wt, 0.5f * p->nave_w);
+            if (p->apse_sides == 0) {
+                buttress(b, p->wall_h, bw, bd, st, 0.0f, -1.0f,
+                         p->east_x + wt, -0.5f * p->nave_w);
+                buttress(b, p->wall_h, bw, bd, st, 0.0f, -1.0f,
+                         p->east_x + wt, 0.5f * p->nave_w);
+            }
+        }
+    }
+
+    stone_course(b, p);
+
+    {   /* parapets: aisle walls full length, facade and flat east
+           trimmed between them, the clerestory band's own */
+        float pw = 0.5f * wt;
+        float zs = hwid + 0.5f * wt;
+        parapet_strip(b, p->west_x - wt, p->east_x + wt,
+                      -zs - 0.5f * pw, -zs + 0.5f * pw,
+                      p->aisle_h, p->aisle_h + p->parapet_h, 1, 0);
+        parapet_strip(b, p->west_x - wt, p->east_x + wt,
+                      zs - 0.5f * pw, zs + 0.5f * pw,
+                      p->aisle_h, p->aisle_h + p->parapet_h, 1, 0);
+        parapet_strip(b, p->west_x - wt, p->west_x - wt + pw,
+                      -(zs - 0.5f * pw), zs - 0.5f * pw,
+                      p->wall_h, p->wall_h + p->parapet_h, 0, 1);
+        if (p->apse_sides == 0)
+            parapet_strip(b, p->east_x + wt - pw, p->east_x + wt,
+                          -(zs - 0.5f * pw), zs - 0.5f * pw,
+                          p->wall_h, p->wall_h + p->parapet_h, 0, 1);
+        if (p->style == CHURCH_BASILICA) {
+            float x0 = p->west_x + p->tower_d, x1 = p->east_x;
+            parapet_strip(b, x0, x1, -0.5f * p->nave_w - 0.5f * pw,
+                          -0.5f * p->nave_w + 0.5f * pw,
+                          p->wall_h, p->wall_h + p->parapet_h, 1, 0);
+            parapet_strip(b, x0, x1, 0.5f * p->nave_w - 0.5f * pw,
+                          0.5f * p->nave_w + 0.5f * pw,
+                          p->wall_h, p->wall_h + p->parapet_h, 1, 0);
+        }
+    }
+
+    if (p->tower) {   /* the shaft above the nave walls, belfry pairs */
+        float th = p->wall_h * (2.0f + 0.4f *
+                   gothic_hash01(p->seed, LANE_TOWER_H, 0, 0));
+        float x0 = p->west_x - wt, x1 = p->west_x + p->tower_d + 0.5f * wt;
+        float sill = th - 2.2f, spring = th - 1.2f;
+        float hloc = th - p->wall_h;
+        int   f;
+        for (f = -1; f <= 1; f += 2) {        /* the side faces */
+            float zc = (float)f * 0.5f * p->nave_w;
+            float half_w = 0.5f * (x1 - x0);
+            float xm = 0.5f * (x0 + x1);
+            GothicOpening bo;
+            bo.kind = GOTHIC_OPEN_WINDOW; bo.cx = 0.0f;
+            bo.w = 0.4f * half_w; bo.sill = sill; bo.spring = spring;
+            bo.acute = p->acute;
+            opening_fit(&bo, th - 0.4f);
+            place_piece(b, half_w, hloc, wt, &bo, 0.0f, p->wall_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, (float)f, 0.0f,
+                        xm - 0.25f * (x1 - x0), zc);
+            place_piece(b, half_w, hloc, wt, &bo, 0.0f, p->wall_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, (float)f, 0.0f,
+                        xm + 0.25f * (x1 - x0), zc);
+        }
+        for (f = 0; f < 2; f++) {             /* west & east faces */
+            float xc = f ? p->west_x + p->tower_d : p->west_x - 0.5f * wt;
+            float yc = f ? 1.0f : -1.0f;
+            float half_w = 0.5f * p->nave_w - 0.5f * wt;
+            GothicOpening bo;
+            bo.kind = GOTHIC_OPEN_WINDOW; bo.cx = 0.0f;
+            bo.w = 0.4f * half_w; bo.sill = sill; bo.spring = spring;
+            bo.acute = p->acute;
+            opening_fit(&bo, th - 0.4f);
+            place_piece(b, half_w, hloc, wt, &bo, 0.0f, p->wall_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, yc,
+                        xc, -0.25f * p->nave_w);
+            place_piece(b, half_w, hloc, wt, &bo, 0.0f, p->wall_h,
+                        WF_NO_BOTTOM | WF_NO_ENDS, 0.0f, yc,
+                        xc, 0.25f * p->nave_w);
+        }
+        {   /* the tower's parapet ring */
+            float pw = 0.5f * wt;
+            float zs = 0.5f * p->nave_w + 0.5f * wt;
+            parapet_strip(b, x0, x1, -zs - 0.5f * pw, -zs + 0.5f * pw,
+                          th, th + p->parapet_h, 1, 0);
+            parapet_strip(b, x0, x1, zs - 0.5f * pw, zs + 0.5f * pw,
+                          th, th + p->parapet_h, 1, 0);
+            parapet_strip(b, x0, x0 + pw, -(zs - 0.5f * pw), zs - 0.5f * pw,
+                          th, th + p->parapet_h, 0, 1);
+            parapet_strip(b, x1 - pw, x1, -(zs - 0.5f * pw), zs - 0.5f * pw,
+                          th, th + p->parapet_h, 0, 1);
+        }
+    }
+    (void)pfh;
 }

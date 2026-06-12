@@ -181,6 +181,7 @@ typedef struct {
     float    arcade_h;         /* top of the arcade band                   */
     float    clerest_h0, clerest_h1;  /* clerestory band (basilica only)   */
     float    aisle_h, wall_h;  /* aisle / nave wall heads                  */
+    float    parapet_h;        /* band above the wall head (item 4)        */
     float    acute;
     unsigned seed;
 } ChurchPlan;
@@ -216,7 +217,9 @@ enum { GOTHIC_OPEN_NONE = 0, GOTHIC_OPEN_WINDOW, GOTHIC_OPEN_DOOR };
 enum {
     WALL_AISLE_S = 0, WALL_AISLE_N,
     WALL_CLEREST_S,   WALL_CLEREST_N,
-    WALL_WEST
+    WALL_WEST,
+    WALL_EAST,        /* the flat east end's window (apse_sides == 0)  */
+    WALL_APSE         /* one lancet per chevet side, i = 0..4          */
 };
 typedef struct {
     int   kind;
@@ -231,5 +234,19 @@ void plan_opening(const ChurchPlan *p, int wall, int i, GothicOpening *out);
    item 5 registers flyer/web edges, item 8 traverses them. The element
    id encoding is deferred until those classes exist — nothing reads it
    yet, and an unread encoding is a guess. */
+
+/* ---- item 4: the stone shell — the plan's first full reader ----
+   Everything load-bearing and opaque in ONE mesh: perimeter walls with
+   their windows, open arcades, the clerestory band, the split west
+   front (portal below, great window above), the flat east or the
+   chevet, piers (octagonal shaft, attic base, capital), stepped
+   weathered buttresses, the string course jogging around them,
+   parapets, and the tower with paired belfry lights. ruin/built params
+   are carried but idle until item 8. */
+void church_stone(MeshBuilder *b, const float *params, int count);
+
+/* the shared ref-schema defaults — mesh.c's registry rows must carry
+   these same values (gothictest asserts the two tables agree) */
+extern const float gothic_church_defaults[8];
 
 #endif /* GOTHIC_H */

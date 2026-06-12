@@ -12,6 +12,7 @@
 #include "sol_math.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -70,8 +71,15 @@ static void check_consistency(const MeshBuilder *b, float min_dot, const char *w
                 g_fail = 1; return;
             }
             if (vec3_dot(gn, n) < min_dot) {
-                printf("FAIL: %s: winding disagrees with normal on tri %u (dot %.3f)\n",
-                       who, (unsigned)t, vec3_dot(gn, n));
+                vec3 p0 = vpos(b, b->indices[t * 3]);
+                vec3 p1 = vpos(b, b->indices[t * 3 + 1]);
+                vec3 p2 = vpos(b, b->indices[t * 3 + 2]);
+                printf("FAIL: %s: winding vs normal tri %u (dot %.3f)"
+                       " v0(%.2f %.2f %.2f) v1(%.2f %.2f %.2f)"
+                       " v2(%.2f %.2f %.2f) n(%.2f %.2f %.2f)\n",
+                       who, (unsigned)t, vec3_dot(gn, n),
+                       p0.x, p0.y, p0.z, p1.x, p1.y, p1.z,
+                       p2.x, p2.y, p2.z, n.x, n.y, n.z);
                 g_fail = 1; return;
             }
         }
@@ -517,6 +525,158 @@ static void test_plan(void) {
     }
 }
 
+/* ---- 12: item 4 — the stone shell ---- */
+
+/* the coplanarity audit (TODO6 item 4): no two triangles may be
+   coplanar AND overlapping — the shimmering-checkerboard defense,
+   automated. Triangles bucket by their canonical plane; within a
+   bucket, each pair is SAT-tested in 2D after shrinking toward their
+   centroids (shared edges and adjacency pass; true overlap fails). */
+typedef struct { long kx, ky, kz, kd; sol_u32 tri; } AuditEnt;
+
+static int audit_cmp(const void *pa, const void *pb) {
+    const AuditEnt *a = (const AuditEnt *)pa, *b = (const AuditEnt *)pb;
+    if (a->kx != b->kx) return a->kx < b->kx ? -1 : 1;
+    if (a->ky != b->ky) return a->ky < b->ky ? -1 : 1;
+    if (a->kz != b->kz) return a->kz < b->kz ? -1 : 1;
+    if (a->kd != b->kd) return a->kd < b->kd ? -1 : 1;
+    return 0;
+}
+
+static int sat_separated(float A[3][2], float B[3][2]) {
+    int i, j;
+    for (i = 0; i < 3; i++) {
+        float ex = A[(i + 1) % 3][0] - A[i][0];
+        float ey = A[(i + 1) % 3][1] - A[i][1];
+        float nx = -ey, ny = ex;
+        float minA = 1e30f, maxA = -1e30f, minB = 1e30f, maxB = -1e30f;
+        for (j = 0; j < 3; j++) {
+            float pa = nx * A[j][0] + ny * A[j][1];
+            float pb = nx * B[j][0] + ny * B[j][1];
+            if (pa < minA) minA = pa;
+            if (pa > maxA) maxA = pa;
+            if (pb < minB) minB = pb;
+            if (pb > maxB) maxB = pb;
+        }
+        if (maxB <= minA || maxA <= minB) return 1;
+    }
+    return 0;
+}
+
+/* project tri t onto the plane's dominant axes, shrunk toward centroid */
+static void audit_project(const MeshBuilder *b, sol_u32 t, vec3 n,
+                          float out[3][2]) {
+    int ax0 = 0, ax1 = 1, k;
+    float cx = 0.0f, cy = 0.0f;
+    float anx = fabsf(n.x), any = fabsf(n.y), anz = fabsf(n.z);
+    if (anx >= any && anx >= anz)      { ax0 = 1; ax1 = 2; }
+    else if (any >= anx && any >= anz) { ax0 = 0; ax1 = 2; }
+    for (k = 0; k < 3; k++) {
+        vec3 p = vpos(b, b->indices[t * 3 + k]);
+        const float *pp = &p.x;
+        out[k][0] = pp[ax0]; out[k][1] = pp[ax1];
+        cx += out[k][0] / 3.0f; cy += out[k][1] / 3.0f;
+    }
+    for (k = 0; k < 3; k++) {           /* shrink: adjacency passes */
+        float dx = cx - out[k][0], dy = cy - out[k][1];
+        float l = sqrtf(dx * dx + dy * dy);
+        if (l > 1e-3f) { out[k][0] += dx / l * 1e-3f; out[k][1] += dy / l * 1e-3f; }
+    }
+}
+
+static void audit_coplanar(const MeshBuilder *b, const char *who) {
+    sol_u32 nt = b->index_count / 3, t;
+    AuditEnt *ents = (AuditEnt *)malloc((size_t)nt * sizeof(AuditEnt));
+    sol_u32 i0, i1;
+    int bad = 0;
+    if (!ents) { fail("audit: out of memory"); return; }
+    for (t = 0; t < nt; t++) {
+        vec3 n = tri_gnormal(b, t);
+        float d = vec3_dot(n, vpos(b, b->indices[t * 3]));
+        /* canonical sign: opposite-facing coincident planes must share
+           a bucket — that is exactly the z-fight pair */
+        if (n.x < -1e-6f || (fabsf(n.x) <= 1e-6f && n.y < -1e-6f) ||
+            (fabsf(n.x) <= 1e-6f && fabsf(n.y) <= 1e-6f && n.z < 0.0f)) {
+            n = vec3_scale(n, -1.0f); d = -d;
+        }
+        ents[t].kx = (long)floor(n.x * 512.0 + 0.5);
+        ents[t].ky = (long)floor(n.y * 512.0 + 0.5);
+        ents[t].kz = (long)floor(n.z * 512.0 + 0.5);
+        ents[t].kd = (long)floor(d * 512.0 + 0.5);
+        ents[t].tri = t;
+    }
+    qsort(ents, (size_t)nt, sizeof(AuditEnt), audit_cmp);
+    for (i0 = 0; i0 < nt && !bad; i0 = i1) {
+        sol_u32 a, c;
+        i1 = i0 + 1;
+        while (i1 < nt && audit_cmp(&ents[i0], &ents[i1]) == 0) i1++;
+        for (a = i0; a < i1 && !bad; a++)
+            for (c = a + 1; c < i1 && !bad; c++) {
+                float A[3][2], B[3][2];
+                vec3 n = tri_gnormal(b, ents[a].tri);
+                audit_project(b, ents[a].tri, n, A);
+                audit_project(b, ents[c].tri, n, B);
+                if (!sat_separated(A, B) && !sat_separated(B, A)) {
+                    int q;
+                    printf("FAIL: %s: coplanar overlap, tris %u and %u\n",
+                           who, (unsigned)ents[a].tri, (unsigned)ents[c].tri);
+                    for (q = 0; q < 3; q++) {
+                        vec3 pa = vpos(b, b->indices[ents[a].tri * 3 + q]);
+                        vec3 pc = vpos(b, b->indices[ents[c].tri * 3 + q]);
+                        printf("  A(%.3f %.3f %.3f)  B(%.3f %.3f %.3f)\n",
+                               pa.x, pa.y, pa.z, pc.x, pc.y, pc.z);
+                    }
+                    g_fail = 1; bad = 1;
+                }
+            }
+    }
+    free(ents);
+}
+
+static void test_church_stone(void) {
+    static const float SEEDS[3] = { 1.0f, 7.0f, 23.0f };
+    int s, st;
+
+    {   /* the schema-agreement law: the registry row's defaults ARE the
+           plan's (two tables, one truth — asserted, not hoped) */
+        const char *const *names; const float *defs;
+        int n = mesh_ref_schema("church_stone", &names, &defs);
+        if (n != 8 || memcmp(defs, gothic_church_defaults, 8 * sizeof(float)) != 0)
+            fail("church_stone: registry defaults drifted from the plan's");
+    }
+    det_check("church_stone", (const float *)0, 0, 0.4f);
+
+    for (st = 0; st <= 2; st++)
+        for (s = 0; s < 3; s++) {
+            float params[8];
+            MeshBuilder b;
+            params[0] = 18.0f; params[1] = 30.0f; params[2] = SEEDS[s];
+            params[3] = (float)st; params[4] = 0.0f; params[5] = 1.0f;
+            params[6] = 1.0f; params[7] = 0.0f;
+            mb_init(&b);
+            church_stone(&b, params, 8);
+            if (b.index_count == 0) { fail("church_stone: emitted nothing"); mb_free(&b); return; }
+            check_consistency(&b, 0.4f, "church_stone");
+            audit_coplanar(&b, st == 0 ? "chapel" : st == 1 ? "hall" : "basilica");
+            mb_free(&b);
+            if (g_fail) return;
+        }
+
+    {   /* the budget: a long basilica shell within ~60k triangles */
+        float params[8] = { 26.0f, 58.0f, 3.0f, 2.0f, 0.0f, 1.0f, 1.0f, 0.0f };
+        MeshBuilder b;
+        mb_init(&b);
+        church_stone(&b, params, 8);
+        if (b.index_count / 3 >= 60000)
+            fail("church_stone: basilica shell over the 60k budget");
+        if (b.index_count / 3 < 1000)
+            fail("church_stone: basilica suspiciously empty");
+        printf("church_stone: basilica shell %u tris\n",
+               (unsigned)(b.index_count / 3));
+        mb_free(&b);
+    }
+}
+
 int main(void) {
     test_square_is_box();
     test_miter();
@@ -529,7 +689,9 @@ int main(void) {
     test_wall_arched();
     test_portal();
     test_plan();
+    test_church_stone();
     if (g_fail) { printf("gothic_test: FAILED\n"); return 1; }
     printf("gothic_test: OK\n");
     return 0;
 }
+

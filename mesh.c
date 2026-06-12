@@ -759,6 +759,9 @@ static void emit_portal(MeshBuilder *b, const float *p) {
     gothic_wall_portal(b, p[0], p[1], p[2], p[3], p[4], p[5],
                        (int)(p[6] + 0.5f), p[7], 1);
 }
+static void emit_church_stone(MeshBuilder *b, const float *p) {
+    church_stone(b, p, MESH_REF_MAX_PARAMS);
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -803,7 +806,13 @@ static const MeshRefEntry REGISTRY[] = {
     { "wall_arched", 7, { "w", "h", "ox", "ow", "spring", "acute", "t" },
       { 4.0f, 3.5f, 1.25f, 1.5f, 1.4f, 1.0f, 0.3f }, emit_wall_arched },
     { "portal", 8, { "w", "h", "t", "ow", "spring", "acute", "orders", "step" },
-      { 6.0f, 5.0f, 0.9f, 1.6f, 2.2f, 1.0f, 3.0f, 0.18f }, emit_portal }
+      { 6.0f, 5.0f, 0.9f, 1.6f, 2.2f, 1.0f, 3.0f, 0.18f }, emit_portal },
+    /* the church (P6 §1.7): a GROUP of sub-refs sharing this schema —
+       stone lands with item 4; floor/glass/roof follow their items.
+       Defaults MUST equal gothic_church_defaults (gothictest asserts). */
+    { "church_stone", 8,
+      { "w", "d", "seed", "style", "ruin", "built", "acute", "reserved" },
+      { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_stone }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 
