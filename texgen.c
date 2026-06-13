@@ -46,9 +46,12 @@ static const float tg_stone_def[TEXGEN_PARAMS] = {
 static const float tg_plaster_def[TEXGEN_PARAMS] = {
     0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.25f, 0.52f, 0.4f, 0.6f, 0.9f
 };
+static const float tg_bark_def[TEXGEN_PARAMS] = {
+    0.0f, 1.5f, 0.0f, 0.0f, 0.0f, 0.55f, 0.16f, 0.8f, 0.4f, 0.85f
+};
 
 static const char *const tg_kind_names[TEXGEN_KIND_COUNT] = {
-    "stone", "plaster"
+    "stone", "plaster", "bark"
 };
 
 int texgen_kind(const char *name) {
@@ -69,6 +72,7 @@ int texgen_schema(int kind, const char *const **names,
     if (kind < 0 || kind >= TEXGEN_KIND_COUNT) return -1;
     if (names)    *names = tg_names;
     if (defaults) *defaults = (kind == TEXGEN_PLASTER) ? tg_plaster_def
+                            : (kind == TEXGEN_BARK)    ? tg_bark_def
                                                        : tg_stone_def;
     return TEXGEN_PARAMS;
 }
@@ -112,6 +116,43 @@ static float tg_vnoise(sol_u32 seed, float u, float v, int p, sol_u32 ch) {
     ab = a + (b - a) * sx;
     cd = c + (d - c) * sx;
     return ab + (cd - ab) * sy;
+}
+
+/* the ANISOTROPIC pair (bark, P7 item 3): separate integer periods per
+   axis — sampling a stretched field would break the wrap on one axis,
+   so the LATTICE stretches instead and tiling survives by construction */
+static float tg_vnoise2(sol_u32 seed, float u, float v, int px2, int py2,
+                        sol_u32 ch) {
+    float x, y, fx, fy, a, b, c, d, sx, sy, ab, cd;
+    int   ix, iy, x0, y0, x1, y1;
+    x  = u * (float)px2;  y = v * (float)py2;
+    ix = (int)floorf(x); iy = (int)floorf(y);
+    fx = x - (float)ix;  fy = y - (float)iy;
+    x0 = ((ix % px2) + px2) % px2;  y0 = ((iy % py2) + py2) % py2;
+    x1 = (x0 + 1) % px2;            y1 = (y0 + 1) % py2;
+    a  = tg_hash01(seed, x0, y0, ch);
+    b  = tg_hash01(seed, x1, y0, ch);
+    c  = tg_hash01(seed, x0, y1, ch);
+    d  = tg_hash01(seed, x1, y1, ch);
+    sx = tg_smooth(fx);  sy = tg_smooth(fy);
+    ab = a + (b - a) * sx;
+    cd = c + (d - c) * sx;
+    return ab + (cd - ab) * sy;
+}
+
+static float tg_fbm2(sol_u32 seed, float u, float v, int px2, int py2,
+                     int oct, sol_u32 ch) {
+    float sum = 0.0f, amp = 0.5f, norm = 0.0f;
+    int   i, ppx = px2, ppy = py2;
+    for (i = 0; i < oct; i++) {
+        sum  += amp * tg_vnoise2(seed, u, v, ppx, ppy,
+                                 ch + (sol_u32)i * 101u);
+        norm += amp;
+        amp  *= 0.5f;
+        ppx  *= 2;
+        ppy  *= 2;
+    }
+    return sum / norm;
 }
 
 /* octaves double the lattice period — each stays integer, so the sum
@@ -238,6 +279,19 @@ sol_bool texgen_render(int kind, const float *params, int count,
             h   += (fine - 0.5f) * (grid_on ? 0.0035f : 0.006f)
                    * (0.5f + depth);
             wfbm = tg_fbm(seed, u, v, 3, 3, 17u);   /* the weather wash */
+            if (kind == TEXGEN_BARK) {  /* the anisotropic kind: furrows
+                   running with the grain. face doubles as the plateau
+                   mask, so the ORM's cavity logic reads grooves free. */
+                float rfbm  = tg_fbm2(seed, u, v, 20, 5, 3, 31u);
+                float strip = tg_fbm2(seed, u, v, 8, 2, 2, 37u);
+                float ridge = 1.0f
+                    - (float)fabs((double)(2.0f * rfbm - 1.0f));
+                h    = (0.5f - ridge) * 0.016f * depth
+                     + (fine - 0.5f) * 0.0025f;
+                face = 1.0f - 0.75f * ridge;
+                sval = (0.78f + 0.45f * strip) * (0.62f + 0.38f * face);
+                shue = strip;
+            }
             hf[py * TEXGEN_SIZE + px] = h;
 
             /* albedo (linear, then sRGB-encoded at the write) */

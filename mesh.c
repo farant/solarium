@@ -3,6 +3,7 @@
 
 #include "mesh.h"
 #include "gothic.h"     /* the kit's emitters — registry rows compose them */
+#include "flora.h"      /* the trees (P7 item 3): species refs over tree_plan */
 #include "sol_math.h"   /* SOL_PI + sol_smoothstep (the codex emitters) */
 
 #include <stdlib.h>
@@ -789,6 +790,18 @@ static void emit_balustrade(MeshBuilder *b, const float *p) {
 static void emit_cross(MeshBuilder *b, const float *p) {
     gothic_cross(b, p[0]);
 }
+static void emit_oak(MeshBuilder *b, const float *p) {
+    flora_tree_wood(b, FLORA_OAK, p, 8);
+}
+static void emit_pine(MeshBuilder *b, const float *p) {
+    flora_tree_wood(b, FLORA_PINE, p, 8);
+}
+static void emit_birch(MeshBuilder *b, const float *p) {
+    flora_tree_wood(b, FLORA_BIRCH, p, 8);
+}
+static void emit_cypress(MeshBuilder *b, const float *p) {
+    flora_tree_wood(b, FLORA_CYPRESS, p, 8);
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -862,7 +875,24 @@ static const MeshRefEntry REGISTRY[] = {
       { 2.0f, 0.16f, 0.34f, 8.0f }, emit_stair },
     { "balustrade", 4, { "len", "h", "seed", "ruin" },
       { 3.0f, 1.0f, 7.0f, 0.0f }, emit_balustrade },
-    { "cross", 1, { "h" }, { 3.2f }, emit_cross }
+    { "cross", 1, { "h" }, { 3.2f }, emit_cross },
+    /* the trees (P7 item 3): species are REFS — the registry's per-ref
+       defaults express the presets (the church-group pattern, your
+       ruling). The 8-param prefix exposes the silhouette knobs; the
+       deeper schema (twist/taper/gens/leaf...) stays species-fixed v1.
+       Defaults MUST equal flora_schema's first 8 (floratest asserts). */
+    { "oak", 8, { "seed", "age", "height", "girth",
+                  "apical", "splits", "spread", "droop" },
+      { 0.0f, 1.0f, 7.0f, 0.28f, 0.15f, 3.0f, 42.0f, 0.10f }, emit_oak },
+    { "pine", 8, { "seed", "age", "height", "girth",
+                   "apical", "splits", "spread", "droop" },
+      { 0.0f, 1.0f, 11.0f, 0.26f, 0.92f, 4.0f, 68.0f, 0.60f }, emit_pine },
+    { "birch", 8, { "seed", "age", "height", "girth",
+                    "apical", "splits", "spread", "droop" },
+      { 0.0f, 1.0f, 9.0f, 0.16f, 0.70f, 2.0f, 32.0f, -0.05f }, emit_birch },
+    { "cypress", 8, { "seed", "age", "height", "girth",
+                      "apical", "splits", "spread", "droop" },
+      { 0.0f, 1.0f, 7.0f, 0.20f, 0.90f, 5.0f, 24.0f, -0.55f }, emit_cypress }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 

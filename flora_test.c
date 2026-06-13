@@ -8,6 +8,7 @@
    defaults-are-identity. Pure CPU — `build.sh floratest`. */
 
 #include "flora.h"
+#include "mesh.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -187,6 +188,60 @@ int main(void) {
             fail("bad species not refused");
     }
     printf("truncation: ok\n");
+
+    /* ---- item 3: the wood ---- */
+    {
+        MeshBuilder w1, w2;
+        for (sp = 0; sp < FLORA_SPECIES_COUNT; sp++) {
+            mb_init(&w1); mb_init(&w2);
+            flora_tree_wood(&w1, sp, (const float *)0, 0);
+            flora_tree_wood(&w2, sp, (const float *)0, 0);
+            if (w1.index_count == 0)
+                fail("wood: a default tree emitted nothing");
+            if (w1.vertex_count != w2.vertex_count ||
+                memcmp(w1.vertices, w2.vertices,
+                       (size_t)w1.vertex_count * 12 * sizeof(sol_f32)) != 0)
+                fail("wood: not deterministic");
+            if (w1.index_count / 3 > 6000)
+                fail("wood: over the 6k budget");
+            mb_free(&w1); mb_free(&w2);
+        }
+        printf("the wood: ok\n");
+    }
+
+    {   /* trunk dims read the SAME plan the wood grew from */
+        float r, top;
+        n = flora_tree_plan(FLORA_OAK, (const float *)0, 0, A, FLORA_MAX_SEG);
+        flora_trunk_dims(FLORA_OAK, (const float *)0, 0, &r, &top);
+        if (r != A[0].r0) fail("trunk dims: radius is not the plan's");
+        if (top < A[0].p1.y - 1e-5f)
+            fail("trunk dims: top below the first segment");
+        if (top > 9.0f) fail("trunk dims: top above any oak");
+        flora_trunk_dims(99, (const float *)0, 0, &r, &top);
+        if (r != 0.0f || top != 0.0f)
+            fail("trunk dims: bad species not zeroed");
+        printf("trunk dims: ok\n");
+    }
+
+    {   /* the registry rows: 8-param prefix MUST equal flora's defaults
+           (the gothic_church_defaults law) — and the rows build */
+        for (sp = 0; sp < FLORA_SPECIES_COUNT; sp++) {
+            const char *const *names;
+            const float       *rdefs, *fdefs;
+            MeshBuilder        mb;
+            int nr = mesh_ref_schema(flora_species_name(sp), &names, &rdefs);
+            flora_schema(sp, (const char *const **)0, &fdefs);
+            if (nr != 8) { fail("registry: tree row not 8 params"); continue; }
+            if (memcmp(rdefs, fdefs, 8 * sizeof(float)) != 0)
+                fail("registry: row defaults drifted from flora's");
+            mb_init(&mb);
+            if (!mesh_ref_build(flora_species_name(sp), (const float *)0,
+                                0, &mb) || mb.index_count == 0)
+                fail("registry: tree ref refused or empty");
+            mb_free(&mb);
+        }
+        printf("registry rows: ok\n");
+    }
 
     if (g_fail) { printf("flora_test: FAILED\n"); return 1; }
     printf("flora_test: OK\n");

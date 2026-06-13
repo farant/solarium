@@ -11,6 +11,7 @@
 #define FLORA_H
 
 #include "sol_types.h"   /* vec3 */
+#include "mesh.h"        /* MeshBuilder (the wood emitter, item 3) */
 
 #define FLORA_PARAMS  16     /* one shared knob vector (species = presets) */
 #define FLORA_MAX_SEG 256    /* the arena cap: a budget enforced, not hoped */
@@ -68,5 +69,26 @@ typedef struct {
    count. 0 on a bad species or arena. */
 int flora_tree_plan(int species, const float *params, int count,
                     FloraSeg *out, int max_seg);
+
+/* ---- item 3: the wood ----
+   THE SAUSAGE RULING: every segment is its own 2-station tapered sweep
+   — a straight line is planar by definition, so the lathe's planarity
+   law holds with zero new machinery. Children sink slightly INTO their
+   parents (the overlap hides the seam under bark); the trunk sinks
+   FLORA_ROOT_SINK below origin so trees plant convincingly on slopes
+   (the foundation-skirt law, organically). Caps at tips only. The
+   profile is flora's own uncreased unit octagon — roll normals read
+   round; the one inherent seam (the closed profile's endpoint pair)
+   hides under bark, flagged for the 3D-frame refinement. UVs come from
+   the lathe world-scale: ridges run with the grain trunk-to-twig free. */
+#define FLORA_ROOT_SINK 0.45f
+void flora_tree_wood(MeshBuilder *b, int species, const float *params,
+                     int count);
+
+/* the trunk the COLLIDERS read (one formula, two readers — the §1.2
+   law): radius at the base and the top of the climbable mass (the
+   thickest-child chain walked while it still blocks a capsule) */
+void flora_trunk_dims(int species, const float *params, int count,
+                      float *r, float *top);
 
 #endif /* FLORA_H */

@@ -21,6 +21,7 @@
    Buds expand BFS, so the arena cap also truncates youngest-first. */
 
 #include "flora.h"
+#include "sweep.h"      /* the lathe: the wood rides it (item 3) */
 #include "sol_math.h"
 
 #include <math.h>
@@ -294,4 +295,78 @@ int flora_tree_plan(int species, const float *params, int count,
             out[k].tip = (out[k].tip == 2) ? 0 : 1;
     }
     return n_seg;
+}
+
+/* ================== item 3: the wood ================== */
+
+/* flora's own profile: a unit octagon, UNCREASED (roll normals read
+   round under bark), closed by repeating point 0. The endpoint pair is
+   the lathe's one inherent normal seam — bark masks it; the 3D-frame
+   sweep is the flagged refinement. */
+static const ProfilePt FL_ROUND[9] = {
+    { 1.0f,        0.0f,        0 },
+    { 0.7071068f,  0.7071068f,  0 },
+    { 0.0f,        1.0f,        0 },
+    { -0.7071068f, 0.7071068f,  0 },
+    { -1.0f,       0.0f,        0 },
+    { -0.7071068f, -0.7071068f, 0 },
+    { 0.0f,        -1.0f,       0 },
+    { 0.7071068f,  -0.7071068f, 0 },
+    { 1.0f,        0.0f,        0 }
+};
+
+void flora_tree_wood(MeshBuilder *b, int species, const float *params,
+                     int count) {
+    FloraSeg s[FLORA_MAX_SEG];
+    int      n, i;
+    if (!b) return;
+    n = flora_tree_plan(species, params, count, s, FLORA_MAX_SEG);
+    for (i = 0; i < n; i++) {
+        vec3  d, t1, t2, path[2];
+        float scales[2], len, sink;
+        d   = vec3_sub(s[i].p1, s[i].p0);
+        len = sqrtf(vec3_dot(d, d));
+        if (len < 1e-6f) continue;
+        d = vec3_scale(d, 1.0f / len);
+        if (s[i].parent < 0) {
+            sink = FLORA_ROOT_SINK;     /* planted, not perched */
+        } else {
+            sink = s[s[i].parent].r1 * 0.9f;
+            if (sink > len * 0.3f) sink = len * 0.3f;
+        }
+        path[0] = vec3_sub(s[i].p0, vec3_scale(d, sink));
+        path[1] = s[i].p1;
+        scales[0] = s[i].r0;
+        scales[1] = s[i].r1;
+        fl_frame(d, &t1, &t2);
+        (void)t2;
+        sweep_extrude(b, FL_ROUND, 9, path, 2, t1, 1.0f, scales,
+                      0, s[i].tip ? 1 : 0);
+    }
+}
+
+void flora_trunk_dims(int species, const float *params, int count,
+                      float *r, float *top) {
+    FloraSeg s[FLORA_MAX_SEG];
+    int      n, cur, i;
+    float    block;
+    if (r)   *r = 0.0f;
+    if (top) *top = 0.0f;
+    n = flora_tree_plan(species, params, count, s, FLORA_MAX_SEG);
+    if (n < 1) return;
+    if (r) *r = s[0].r0;
+    block = s[0].r0 * 0.45f;        /* thinner than this stops nobody */
+    cur = 0;
+    for (;;) {                      /* the thickest-child chain */
+        int   next = -1;
+        float best = 0.0f;
+        for (i = cur + 1; i < n; i++)
+            if (s[i].parent == cur && s[i].r0 > best) {
+                best = s[i].r0;
+                next = i;
+            }
+        if (next < 0 || s[next].r0 < block) break;
+        cur = next;
+    }
+    if (top) *top = s[cur].p1.y;
 }

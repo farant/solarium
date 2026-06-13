@@ -7,6 +7,7 @@
    `build.sh coltest`. */
 
 #include "collide.h"
+#include "flora.h"
 #include "gothic.h"
 #include "sol_math.h"
 
@@ -640,6 +641,44 @@ int main(void) {
         scene_free(&s);
         printf("follies agreement: stair climbs+stands, fragment admits, "
                "column reads the cut\n");
+    }
+
+    {   /* P7 item 3: THE TREE — the trunk blocks the capsule, the
+           boughs admit it (the canopy is never solid), and the box top
+           is the SAME chain walk the plan grew */
+        Scene       s;
+        ColliderSet cs;
+        sol_u32     ht;
+        vec3        feet, out;
+        float       r, top;
+        int         i, found = 0;
+        scene_init(&s);
+        collide_set_init(&cs);
+        ht = add_ref(&s, 0, v3(0, 0, 0), qid(), "oak", (const float *)0, 0);
+        collide_rebuild(&cs, &s);
+        flora_trunk_dims(FLORA_OAK, (const float *)0, 0, &r, &top);
+        for (i = 0; i < cs.count; i++)
+            if (cs.boxes[i].source == ht &&
+                approx(cs.boxes[i].y1, top, 0.001f) &&
+                approx(cs.boxes[i].hx, r, 0.001f)) found = 1;
+        if (!found)
+            printf("FAIL: tree collider diverged from flora_trunk_dims\n");
+        /* into the trunk: walk straight at it */
+        feet = v3(-2.0f, 0.0f, 0.0f);
+        out  = collide_slide(&cs, feet, v3(4.0f, 0.0f, 0.0f), 0.35f, 1.8f);
+        if (out.x > -r + 0.05f)
+            printf("FAIL: the trunk must block the capsule (x %.2f)\n",
+                   out.x);
+        /* under the boughs: pass beside the trunk untouched */
+        feet = v3(-2.0f, 0.0f, 1.2f);
+        out  = collide_slide(&cs, feet, v3(4.0f, 0.0f, 0.0f), 0.35f, 1.8f);
+        if (out.x < 1.9f)
+            printf("FAIL: the boughs must admit the capsule (x %.2f)\n",
+                   out.x);
+        collide_set_free(&cs);
+        scene_free(&s);
+        printf("tree agreement: trunk blocks, boughs admit, "
+               "the box reads the chain\n");
     }
     printf("collide_test: OK\n");
     return 0;

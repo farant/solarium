@@ -14,8 +14,11 @@
 
 /* kinds are PRESETS over one generator (the synth lesson: the schema is
    the instrument, a type just sets the dials) — plaster is literally
-   stone with course=0: no masonry grid, only trowel and weather. */
-enum { TEXGEN_STONE = 0, TEXGEN_PLASTER, TEXGEN_KIND_COUNT };
+   stone with course=0: no masonry grid, only trowel and weather. BARK
+   (P7 item 3) is the first ANISOTROPIC kind: ridge noise stretched
+   along v, so the grain runs with the lathe's world-scale UVs — up the
+   trunk, along every branch, trunk-to-twig, for free. APPEND-ONLY. */
+enum { TEXGEN_STONE = 0, TEXGEN_PLASTER, TEXGEN_BARK, TEXGEN_KIND_COUNT };
 
 int         texgen_kind(const char *name);    /* "stone"/"plaster" -> kind; -1 unknown */
 const char *texgen_kind_name(int kind);       /* NULL if out of range */

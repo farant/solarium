@@ -37,3 +37,4 @@ compile_commands.json
 mirror_test_dir/
 /gothic_test
 /texgen_test
+/flora_test

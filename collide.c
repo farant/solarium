@@ -6,6 +6,7 @@
 
 #include <math.h>       /* sqrtf, cosf, sinf, atan2f */
 #include <stdlib.h>     /* realloc, free */
+#include "flora.h"      /* trunk dims: the tree read a second time (P7) */
 #include "gothic.h"     /* the plan + survival: the church read a
                            THIRD time — render and physics agree by
                            construction (P6 item 9) */
@@ -631,6 +632,19 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
                            0.85f, 0.85f, 0.0f, 0.36f);
             emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
                            0.26f, 0.26f, 0.36f, h);
+
+        } else if (flora_species(o->mesh_ref) >= 0) {
+            /* a tree (P7 item 3): the trunk blocks, the boughs admit —
+               flora_trunk_dims is the SAME read the emitter grew from
+               (one formula, two readers) */
+            float r, top;
+            mat4  m = scene_world_matrix(s, o);
+            flora_trunk_dims(flora_species(o->mesh_ref),
+                             o->mesh_params, o->mesh_param_count,
+                             &r, &top);
+            if (r > 0.0f && top > 0.2f)
+                emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
+                               r, r, 0.0f, top);
         }
     }
 }
