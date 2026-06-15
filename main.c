@@ -11,6 +11,7 @@
 #include "mesh.h"
 #include "gothic.h"              /* the kit: church_plan + queries (P6) */
 #include "flora.h"               /* trees: the canopy + species (P7) */
+#include "rock.h"                /* boulders + the pebble unit (P7 item 6) */
 #include "texgen.h"              /* synthesized material maps (texture side-quest) */
 #include "scene.h"
 #include "sol_math.h"
@@ -74,6 +75,8 @@ typedef struct {
     int       wood_count[FOREST_VARIANT_COUNT];
     RhiBuffer canopy[2];        /* [0] = broadleaf, [1] = conifer */
     int       canopy_count[2];
+    RhiBuffer scree;            /* FIELD scree (item 6): pebbles, ghost */
+    int       scree_count;
     Material  wood_mat[FOREST_VARIANT_COUNT];   /* bark per variant */
 } ForestPatch;
 
@@ -1765,8 +1768,10 @@ typedef struct {
     float         ornament_fp;     /* the scene fingerprint last built */
 
     /* the FIELD forest (P7 item 5): per-island woods on the ornament
-       pipeline; the variant wood meshes are shared (built once) */
+       pipeline; the variant wood meshes are shared (built once). The
+       pebble unit (item 6) rides the same pool for scree. */
     Mesh          forest_wood[FOREST_VARIANT_COUNT];
+    Mesh          scree_mesh;
     ForestPatch   forest[32];
     int           forest_count;
     /* particles (P4 item 7): the pool is VIEW STATE (the reader-rig
@@ -3376,6 +3381,7 @@ static const ForestVariant FOREST_VARIANTS[FOREST_VARIANT_COUNT] = {
 static FloraLeaf g_var_slots[FOREST_VARIANT_COUNT][FOREST_VAR_SLOTS];
 static int       g_var_slot_count[FOREST_VARIANT_COUNT];
 static RhiTexture g_bark_albedo, g_bark_normal, g_bark_orm;
+static RhiTexture g_scree_albedo, g_scree_normal, g_scree_orm;
 static int       g_forest_built = 0;
 
 /* the variant's 10-param prefix: silhouette defaults at the variant's
@@ -3408,6 +3414,13 @@ static void forest_build_variants(AppState *st) {
                                            p, 10, g_var_slots[v],
                                            FOREST_VAR_SLOTS);
     }
+    {   /* the unit pebble for scree (item 6) */
+        MeshBuilder mb;
+        mb_init(&mb);
+        rock_pebble_unit(&mb);
+        st->scree_mesh = mesh_from_builder(&mb);
+        mb_free(&mb);
+    }
     {   /* one bark set for the whole wood (a hero tree near you wears its
            own; the forest is backdrop — one texture is plenty) */
         float bk[TEXGEN_PARAMS];
@@ -3418,7 +3431,32 @@ static void forest_build_variants(AppState *st) {
         texgen_mint(TEXGEN_BARK, bk, &g_bark_albedo, &g_bark_normal,
                     &g_bark_orm);
     }
+    {   /* one COURSE-FREE stone set for the scree (the boulder texture,
+           shared) — granular rock, no masonry grid */
+        float sk[TEXGEN_PARAMS];
+        const float *sd;
+        int k;
+        texgen_schema(TEXGEN_STONE, (const char *const **)0, &sd);
+        for (k = 0; k < TEXGEN_PARAMS; k++) sk[k] = sd[k];
+        sk[2] = 0.0f;          /* course = 0: no grid, just stone */
+        sk[5] = 0.7f;          /* depth: rougher granular relief */
+        texgen_mint(TEXGEN_STONE, sk, &g_scree_albedo, &g_scree_normal,
+                    &g_scree_orm);
+    }
     g_forest_built = 1;
+}
+
+/* the scree's stone material (shared course-free maps) */
+static Material forest_scree_material(void) {
+    Material m = material_default();
+    m.base_color = vec3_make(1.0f, 1.0f, 1.0f);
+    m.roughness  = 1.0f;
+    m.metallic   = 1.0f;
+    m.albedo_tex = g_scree_albedo;
+    m.normal_tex = g_scree_normal;
+    m.mr_tex     = g_scree_orm;
+    m.ao_tex     = g_scree_orm;
+    return m;
 }
 
 /* the forest's bark material (shared maps; white base so they show) */
@@ -3481,6 +3519,7 @@ static void forest_rebuild(AppState *st) {
                 rhi_destroy_buffer(st->forest[p].wood[v]);
         if (st->forest[p].canopy_count[0]) rhi_destroy_buffer(st->forest[p].canopy[0]);
         if (st->forest[p].canopy_count[1]) rhi_destroy_buffer(st->forest[p].canopy[1]);
+        if (st->forest[p].scree_count)     rhi_destroy_buffer(st->forest[p].scree);
     }
     st->forest_count = 0;
 
@@ -3600,11 +3639,48 @@ static void forest_rebuild(AppState *st) {
                                     (size_t)cn[k] * 8 * sizeof(float));
             free(can[k]);
         }
+
+        {   /* FIELD scree (item 6): small pebbles scattered EVERYWHERE —
+               no tree gates (gravel lives on crag and near ruins alike),
+               ghost (you don't trip on it). A separate denser throw. */
+            int    starget = (int)(w * d * 0.045f), sn = 0, sk;
+            float *scr;
+            if (starget > 160) starget = 160;
+            scr = (float *)malloc((size_t)(starget > 0 ? starget : 1)
+                                  * 8 * sizeof(float));
+            if (scr) {
+                for (sk = 0; sk < starget; sk++) {
+                    float lx, lz, h, ps;
+                    lx = (forest_rnd(&rng) - 0.5f) * (w - 1.0f);
+                    lz = (forest_rnd(&rng) - 0.5f) * (d - 1.0f);
+                    h  = terrain_height(o->mesh_params, o->mesh_param_count,
+                                        lx, lz);
+                    ps = 0.10f + 0.28f * forest_rnd(&rng);   /* pebble size */
+                    scr[sn * 8 + 0] = lx;
+                    scr[sn * 8 + 1] = h + ps * 0.35f;        /* half-sunk */
+                    scr[sn * 8 + 2] = lz;
+                    scr[sn * 8 + 3] = forest_rnd(&rng) * 6.2831853f;
+                    scr[sn * 8 + 4] = ps;
+                    scr[sn * 8 + 5] = ps;
+                    scr[sn * 8 + 6] = 0.0f;
+                    scr[sn * 8 + 7] = 0.0f;                  /* stone: no sway */
+                    sn++;
+                }
+                fp->scree_count = sn;
+                if (sn > 0)
+                    fp->scree = rhi_create_buffer(RHI_BUFFER_VERTEX, scr,
+                                    (size_t)sn * 8 * sizeof(float));
+                free(scr);
+            } else {
+                fp->scree_count = 0;
+            }
+        }
+
         st->forest_count++;
         total += placed;
     }
     if (st->forest_count > 0)
-        printf("the forest: %d island(s), %d trees\n",
+        printf("the forest: %d island(s), %d trees + scree\n",
                st->forest_count, total);
 }
 
@@ -7502,6 +7578,18 @@ static void render(AppState *state) {
                                                f->canopy_count[lk]);
                     state->draws_done++;
                 }
+            }
+            if (f->scree_count > 0 && state->scree_mesh.index_count > 0) {
+                Mesh *um = &state->scree_mesh;
+                bind_scene_uniforms(state, state->ornament_pipeline, model,
+                                    view, proj, eye, 0.0f,
+                                    forest_scree_material());
+                rhi_set_uniform_float("uTime", (float)glfwGetTime());
+                rhi_bind_vertex_buffer(um->vbuffer);
+                rhi_bind_instance_buffer(f->scree);
+                rhi_bind_index_buffer(um->ibuffer);
+                rhi_draw_indexed_instanced(0, um->index_count, f->scree_count);
+                state->draws_done++;
             }
         }
     }

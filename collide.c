@@ -7,6 +7,7 @@
 #include <math.h>       /* sqrtf, cosf, sinf, atan2f */
 #include <stdlib.h>     /* realloc, free */
 #include "flora.h"      /* trunk dims: the tree read a second time (P7) */
+#include "rock.h"       /* boulder dims: the stone read a second time (P7) */
 #include "gothic.h"     /* the plan + survival: the church read a
                            THIRD time — render and physics agree by
                            construction (P6 item 9) */
@@ -645,6 +646,18 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
             if (r > 0.0f && top > 0.2f)
                 emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
                                r, r, 0.0f, top);
+
+        } else if (strcmp(o->mesh_ref, "boulder") == 0) {
+            /* a boulder (P7 item 6): a standable box — rock_boulder_dims
+               is the SAME size/flat the mesh is built from, so a flat
+               boulder's box top sits at its crown (a viewpoint) */
+            float half, top;
+            mat4  m = scene_world_matrix(s, o);
+            rock_boulder_dims(ref_p(o, "size"), ref_p(o, "flat"),
+                              &half, &top);
+            if (half > 0.0f)
+                emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
+                               half, half, -top, top);
         }
     }
 }

@@ -4,6 +4,7 @@
 #include "mesh.h"
 #include "gothic.h"     /* the kit's emitters — registry rows compose them */
 #include "flora.h"      /* the trees (P7 item 3): species refs over tree_plan */
+#include "rock.h"       /* boulders (P7 item 6): the island's own stone */
 #include "sol_math.h"   /* SOL_PI + sol_smoothstep (the codex emitters) */
 
 #include <stdlib.h>
@@ -802,6 +803,9 @@ static void emit_birch(MeshBuilder *b, const float *p) {
 static void emit_cypress(MeshBuilder *b, const float *p) {
     flora_tree_wood(b, FLORA_CYPRESS, p, 10);
 }
+static void emit_boulder(MeshBuilder *b, const float *p) {
+    rock_boulder(b, p[0], (unsigned)(p[1] + 0.5f), p[2]);
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -898,7 +902,11 @@ static const MeshRefEntry REGISTRY[] = {
     { "cypress", 10, { "seed", "age", "height", "girth", "apical",
                        "splits", "spread", "droop", "leaf_size", "leaf_density" },
       { 0.0f, 1.0f, 7.0f, 0.20f, 0.90f, 5.0f, 24.0f, -0.55f, 0.35f, 0.9f },
-      emit_cypress }
+      emit_cypress },
+    /* the island's own stone (P7 item 6): an fBm-displaced octahedron;
+       flat squashes it to a standable table-rock */
+    { "boulder", 3, { "size", "seed", "flat" },
+      { 1.2f, 7.0f, 0.0f }, emit_boulder }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 
