@@ -49,9 +49,14 @@ static const float tg_plaster_def[TEXGEN_PARAMS] = {
 static const float tg_bark_def[TEXGEN_PARAMS] = {
     0.0f, 1.5f, 0.0f, 0.0f, 0.0f, 0.55f, 0.16f, 0.8f, 0.4f, 0.85f
 };
+/* water (item 8): only the NORMAL map matters — smooth rounded ripples,
+   tileable; the shader scrolls two copies. tile 3 m, depth = steepness */
+static const float tg_water_def[TEXGEN_PARAMS] = {
+    0.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.3f, 0.5f, 0.0f, 0.05f
+};
 
 static const char *const tg_kind_names[TEXGEN_KIND_COUNT] = {
-    "stone", "plaster", "bark"
+    "stone", "plaster", "bark", "water"
 };
 
 int texgen_kind(const char *name) {
@@ -73,6 +78,7 @@ int texgen_schema(int kind, const char *const **names,
     if (names)    *names = tg_names;
     if (defaults) *defaults = (kind == TEXGEN_PLASTER) ? tg_plaster_def
                             : (kind == TEXGEN_BARK)    ? tg_bark_def
+                            : (kind == TEXGEN_WATER)   ? tg_water_def
                                                        : tg_stone_def;
     return TEXGEN_PARAMS;
 }
@@ -291,6 +297,12 @@ sol_bool texgen_render(int kind, const float *params, int count,
                 face = 1.0f - 0.75f * ridge;
                 sval = (0.78f + 0.45f * strip) * (0.62f + 0.38f * face);
                 shue = strip;
+            }
+            if (kind == TEXGEN_WATER) {  /* smooth rounded ripples — two
+                   octaves, gentle; only the normal map is read */
+                float w1 = tg_fbm(seed, u, v, 4, 2, 41u);
+                float w2 = tg_fbm(seed, u, v, 9, 2, 53u);
+                h = (w1 - 0.5f) * depth + (w2 - 0.5f) * depth * 0.4f;
             }
             hf[py * TEXGEN_SIZE + px] = h;
 

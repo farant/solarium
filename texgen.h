@@ -18,7 +18,8 @@
    (P7 item 3) is the first ANISOTROPIC kind: ridge noise stretched
    along v, so the grain runs with the lathe's world-scale UVs — up the
    trunk, along every branch, trunk-to-twig, for free. APPEND-ONLY. */
-enum { TEXGEN_STONE = 0, TEXGEN_PLASTER, TEXGEN_BARK, TEXGEN_KIND_COUNT };
+enum { TEXGEN_STONE = 0, TEXGEN_PLASTER, TEXGEN_BARK, TEXGEN_WATER,
+       TEXGEN_KIND_COUNT };
 
 int         texgen_kind(const char *name);    /* "stone"/"plaster" -> kind; -1 unknown */
 const char *texgen_kind_name(int kind);       /* NULL if out of range */

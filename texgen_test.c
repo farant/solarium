@@ -160,10 +160,10 @@ int main(void) {
        Stone may step hard at a mortar line, but the seam must never
        step harder than the roughest interior edge — tileable by proof. */
     {
-        static const int kinds[3] = { TEXGEN_STONE, TEXGEN_PLASTER,
-                                      TEXGEN_BARK };
+        static const int kinds[4] = { TEXGEN_STONE, TEXGEN_PLASTER,
+                                      TEXGEN_BARK, TEXGEN_WATER };
         int k;
-        for (k = 0; k < 3; k++) {
+        for (k = 0; k < 4; k++) {
             if (!texgen_render(kinds[k], (const float *)0, 0, a1, n1, o1)) {
                 printf("FAIL: seam render failed\n"); return 1;
             }

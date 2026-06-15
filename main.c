@@ -739,6 +739,109 @@ static const char *ORNAMENT_SHADOW_VERTEX_SRC =
     "}\n";
 #endif /* SOL_RHI_METAL — the instanced ornament */
 
+/* --- the water shader (P7 item 8: the phase's one renderer feature) ---
+   A flat disc lit entirely in the fragment: two SCROLLING copies of one
+   synthesized ripple normal (texgen animates by phase, not re-render);
+   the surface normal rippled; the view reflected into the PREFILTER
+   cubemap (the IBL pays a third time); Schlick fresnel blends a deep
+   water tint into that sky reflection; a directional glint sparkles; a
+   rim alpha-fade dissolves the disc into the shore. Alpha-blended LAST,
+   after the opaque scene + particles. No planar reflections (the v1
+   line). uModel places it; uv stays LOCAL (rim fade + ripple scale). */
+#ifdef SOL_RHI_METAL
+static const char *WATER_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn { float3 pos [[attribute(0)]]; float3 normal [[attribute(1)]];\n"
+    "             float2 uv [[attribute(2)]]; float4 tangent [[attribute(3)]]; };\n"
+    "struct VU { float4x4 uModel; float4x4 uView; float4x4 uProj; };\n"
+    "struct VOut { float4 pos [[position]]; float3 worldPos; float2 uv; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float4 wp = u.uModel * float4(v.pos, 1.0);\n"
+    "    o.worldPos = wp.xyz;\n"
+    "    o.uv = v.uv;\n"
+    "    o.pos = u.uProj * (u.uView * wp);\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"
+    "    return o;\n"
+    "}\n";
+static const char *WATER_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct FU { float3 uViewPos; float uTime; float3 uWaterTint;\n"
+    "            float uWaterAlpha; float uPondR; float uRippleStr;\n"
+    "            float3 uLightDir; float3 uLightColor; };\n"
+    "struct VOut { float4 pos [[position]]; float3 worldPos; float2 uv; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
+    "                      texture2d<float>   uRippleTex    [[texture(0)]],\n"
+    "                      texturecube<float> uPrefilterMap [[texture(6)]],\n"
+    "                      sampler s0 [[sampler(0)]], sampler s6 [[sampler(6)]]) {\n"
+    "    float2 uv1 = v.uv * 0.6 + u.uTime * float2(0.018, 0.011);\n"
+    "    float2 uv2 = v.uv * 0.37 - u.uTime * float2(0.012, 0.016);\n"
+    "    float3 t1 = uRippleTex.sample(s0, uv1).rgb * 2.0 - 1.0;\n"
+    "    float3 t2 = uRippleTex.sample(s0, uv2).rgb * 2.0 - 1.0;\n"
+    "    float2 pert = (t1.xy + t2.xy) * u.uRippleStr;\n"
+    "    float3 N = normalize(float3(pert.x, 1.0, pert.y));\n"
+    "    float3 V = normalize(u.uViewPos - v.worldPos);\n"
+    "    float3 R = reflect(-V, N);\n"
+    "    float3 sky = uPrefilterMap.sample(s6, R, level(1.5)).rgb;\n"
+    "    float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);\n"
+    "    float3 col = mix(u.uWaterTint, sky, fres);\n"
+    "    float3 H = normalize(V - u.uLightDir);\n"
+    "    float glint = pow(max(dot(N, H), 0.0), 220.0);\n"
+    "    col += u.uLightColor * glint * 2.5;\n"
+    "    float rim = clamp((u.uPondR - length(v.uv)) / max(u.uPondR*0.22, 0.01), 0.0, 1.0);\n"
+    "    return float4(col, u.uWaterAlpha * rim);\n"
+    "}\n";
+#else /* GLSL */
+static const char *WATER_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 1) in vec3 aNormal;\n"
+    "layout (location = 2) in vec2 aUV;\n"
+    "layout (location = 3) in vec4 aTangent;\n"
+    "uniform mat4 uModel; uniform mat4 uView; uniform mat4 uProj;\n"
+    "out vec3 vWorldPos; out vec2 vUV;\n"
+    "void main() {\n"
+    "    vec4 wp = uModel * vec4(aPos, 1.0);\n"
+    "    vWorldPos = wp.xyz;\n"
+    "    vUV = aUV;\n"
+    "    gl_Position = uProj * uView * wp;\n"
+    "}\n";
+static const char *WATER_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec3 vWorldPos; in vec2 vUV;\n"
+    "uniform vec3 uViewPos;\n"
+    "uniform float uTime;\n"
+    "uniform vec3 uWaterTint;\n"
+    "uniform float uWaterAlpha;\n"
+    "uniform float uPondR;\n"
+    "uniform float uRippleStr;\n"
+    "uniform vec3 uLightDir;\n"
+    "uniform vec3 uLightColor;\n"
+    "uniform sampler2D uRippleTex;\n"
+    "uniform samplerCube uPrefilterMap;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    vec2 uv1 = vUV * 0.6 + uTime * vec2(0.018, 0.011);\n"
+    "    vec2 uv2 = vUV * 0.37 - uTime * vec2(0.012, 0.016);\n"
+    "    vec3 t1 = texture(uRippleTex, uv1).rgb * 2.0 - 1.0;\n"
+    "    vec3 t2 = texture(uRippleTex, uv2).rgb * 2.0 - 1.0;\n"
+    "    vec2 pert = (t1.xy + t2.xy) * uRippleStr;\n"
+    "    vec3 N = normalize(vec3(pert.x, 1.0, pert.y));\n"
+    "    vec3 V = normalize(uViewPos - vWorldPos);\n"
+    "    vec3 R = reflect(-V, N);\n"
+    "    vec3 sky = textureLod(uPrefilterMap, R, 1.5).rgb;\n"
+    "    float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);\n"
+    "    vec3 col = mix(uWaterTint, sky, fres);\n"
+    "    vec3 H = normalize(V - uLightDir);\n"
+    "    float glint = pow(max(dot(N, H), 0.0), 220.0);\n"
+    "    col += uLightColor * glint * 2.5;\n"
+    "    float rim = clamp((uPondR - length(vUV)) / max(uPondR*0.22, 0.01), 0.0, 1.0);\n"
+    "    FragColor = vec4(col, uWaterAlpha * rim);\n"
+    "}\n";
+#endif /* SOL_RHI_METAL — the water */
+
 /* --- the particle shader (P4 item 7): BILLBOARDS — one shared unit quad,
    expanded in the vertex shader along the camera's own right/up so every
    quad faces the eye exactly. Those axes are FREE: the view matrix is the
@@ -835,7 +938,7 @@ static const char *POST_FRAGMENT_SRC =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "struct VOut { float4 pos [[position]]; float2 uv; };\n"
-    "struct FU { float uBloomStrength; float uExposure; };\n"
+    "struct FU { float uBloomStrength; float uExposure; float4 uFog; };\n"
     "static float3 aces(float3 x) {\n"            /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
     "}\n"
@@ -850,6 +953,7 @@ static const char *POST_FRAGMENT_SRC =
     "    hdr          *= u.uExposure;\n"
     "    float3 mapped = aces(hdr);\n"
     "    float3 ldr    = pow(mapped, float3(1.0 / 2.2));\n"
+    "    ldr           = mix(ldr, u.uFogColor, u.uFogStrength);\n"   /* under-water tint */
     "    return float4(ldr, 1.0);\n"
     "}\n";
 
@@ -871,6 +975,8 @@ static const char *POST_FRAGMENT_SRC =
     "uniform sampler2D uBloom;\n"                            /* the chain's top level (P4 i5) */
     "uniform float uBloomStrength;\n"
     "uniform float uExposure;\n"
+    "uniform vec3 uFogColor;\n"
+    "uniform float uFogStrength;\n"   /* under-water tint (item 8) */
     "out vec4 FragColor;\n"
     "vec3 aces(vec3 x) {\n"                                  /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
@@ -884,6 +990,7 @@ static const char *POST_FRAGMENT_SRC =
     "    hdr        *= uExposure;\n"
     "    vec3 mapped = aces(hdr);\n"                           /* tonemap: roll off HDR -> [0,1] */
     "    vec3 ldr    = pow(mapped, vec3(1.0 / 2.2));\n"        /* linear -> sRGB for display */
+    "    ldr         = mix(ldr, uFogColor, uFogStrength);\n"   /* wading under the surface */
     "    FragColor   = vec4(ldr, 1.0);\n"
     "}\n";
 
@@ -1787,6 +1894,11 @@ typedef struct {
     RhiPipeline  part_pipeline;
     RhiBuffer    part_vbuf, part_ibuf, part_inst;
     int          part_count;    /* live count last frame — the HUD's number */
+
+    /* water (P7 item 8): the pond's pipeline + its scrolling ripple
+       normal map; ponds are scene objects the scene pass skips */
+    RhiPipeline  water_pipeline;
+    RhiTexture   water_ripple;
     sol_bool     e_was_down;    /* 'E' mints a dust emitter */
     sol_bool     y_was_down;    /* 'Y' mints a fox (item 9) */
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
@@ -7022,6 +7134,47 @@ static int init_scene(AppState *state) {
        must exist before any forest_rebuild scatters them */
     forest_build_variants(state);
 
+    /* the water pipeline + ripple normal (P7 item 8): the disc rides the
+       standard 12-float vertex layout; alpha-blended, depth-tested but
+       write-off (drawn last, occluding nothing) */
+    {
+        RhiShader       wsh;
+        RhiPipelineDesc wd = {0};
+        wsh = rhi_create_shader(WATER_VERTEX_SRC, WATER_FRAGMENT_SRC);
+        if (wsh.id) {
+            wd.shader = wsh;
+            wd.attrs[0].location = 0; wd.attrs[0].format = RHI_FORMAT_FLOAT3; wd.attrs[0].offset = 0;
+            wd.attrs[1].location = 1; wd.attrs[1].format = RHI_FORMAT_FLOAT3; wd.attrs[1].offset = 3 * sizeof(float);
+            wd.attrs[2].location = 2; wd.attrs[2].format = RHI_FORMAT_FLOAT2; wd.attrs[2].offset = 6 * sizeof(float);
+            wd.attrs[3].location = 3; wd.attrs[3].format = RHI_FORMAT_FLOAT4; wd.attrs[3].offset = 8 * sizeof(float);
+            wd.attr_count      = 4;
+            wd.stride          = 12 * sizeof(float);
+            wd.depth_test      = SOL_TRUE;
+            wd.depth_write_off = SOL_TRUE;
+            wd.blend           = RHI_BLEND_ALPHA;
+            state->water_pipeline = rhi_create_pipeline(&wd);
+        }
+        {   /* the ripple normal map — synthesized once, scrolled by the
+               shader (texgen animates by phase, not re-render) */
+            float wk[TEXGEN_PARAMS];
+            const float *wdf;
+            unsigned char *nb = (unsigned char *)malloc(
+                (size_t)TEXGEN_SIZE * TEXGEN_SIZE * 4);
+            unsigned char *ab = (unsigned char *)malloc(
+                (size_t)TEXGEN_SIZE * TEXGEN_SIZE * 4);
+            unsigned char *ob = (unsigned char *)malloc(
+                (size_t)TEXGEN_SIZE * TEXGEN_SIZE * 4);
+            int k;
+            texgen_schema(TEXGEN_WATER, (const char *const **)0, &wdf);
+            for (k = 0; k < TEXGEN_PARAMS; k++) wk[k] = wdf[k];
+            if (ab && nb && ob &&
+                texgen_render(TEXGEN_WATER, wk, TEXGEN_PARAMS, ab, nb, ob))
+                state->water_ripple = rhi_create_texture(nb, TEXGEN_SIZE,
+                                          TEXGEN_SIZE, RHI_TEX_RGBA8);
+            free(ab); free(nb); free(ob);
+        }
+    }
+
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
@@ -7430,6 +7583,8 @@ static void render(AppState *state) {
             const SceneObject *o = &state->scene.objects[i];
             mat4 model;
             if (o->mesh.index_count == 0) continue;   /* empties cast nothing */
+            if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
+                continue;                             /* water casts nothing */
             if (lvis && !lvis[o->handle]) continue;   /* outside the light's cone:
                                                          cannot cast into the map */
             model = scene_world_matrix(&state->scene, o);
@@ -7600,6 +7755,8 @@ static void render(AppState *state) {
         mat4  model;
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
+        if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
+            continue;                             /* ponds: the WATER PASS draws them */
         state->draws_total++;                     /* the yardstick: would draw */
         if (vis && !vis[o->handle]) continue;     /* outside the camera frustum
                                                      (piece 4): the HUD's left
@@ -7972,6 +8129,51 @@ static void render(AppState *state) {
        own. The whole pool is one instanced draw; the fill is arithmetic
        (particles.c), the upload is an orphaning stream write. rgb > 1 on a
        spark feeds the bloom extract exactly like an emissive surface. */
+    /* the pond surfaces (P7 item 8): alpha-blended, drawn after the
+       opaque scene — reflection from the prefilter IBL, ripples scrolled,
+       the rim dissolving into the shore. The scene pass skipped these. */
+    if (state->water_pipeline.id && state->water_ripple.id) {
+        sol_u32 wi;
+        for (wi = 0; wi < state->scene.count; wi++) {
+            SceneObject *o = &state->scene.objects[wi];
+            mat4  model;
+            float r, depth, alpha;
+            if (!o->mesh_ref || strcmp(o->mesh_ref, "pond") != 0) continue;
+            if (o->mesh.index_count == 0) continue;
+            if (vis && !vis[o->handle]) continue;
+            r     = mesh_ref_param("pond", o->mesh_params, o->mesh_param_count, "r");
+            depth = mesh_ref_param("pond", o->mesh_params, o->mesh_param_count, "depth");
+            alpha = 0.55f + 0.12f * (depth > 3.0f ? 3.0f : depth);  /* deeper = more opaque */
+            model = scene_world_matrix(&state->scene, o);
+            rhi_set_pipeline(state->water_pipeline);
+            rhi_set_uniform_mat4("uModel", model.m);
+            rhi_set_uniform_mat4("uView", view.m);
+            rhi_set_uniform_mat4("uProj", proj.m);
+            rhi_set_uniform_vec3("uViewPos", eye.x, eye.y, eye.z);
+            rhi_set_uniform_float("uTime", (float)glfwGetTime());
+            rhi_set_uniform_vec3("uWaterTint", 0.015f, 0.055f, 0.075f);
+            rhi_set_uniform_float("uWaterAlpha", alpha);
+            rhi_set_uniform_float("uPondR", r);
+            rhi_set_uniform_float("uRippleStr", 0.5f);
+            {   /* a fixed soft glint direction — a stylized sun/moon
+                   glitter on the ripples (v1; sconce glints flagged) */
+                vec3 ld = vec3_normalize(vec3_make(-0.4f, -0.7f, -0.5f));
+                rhi_set_uniform_vec3("uLightDir", ld.x, ld.y, ld.z);
+                rhi_set_uniform_vec3("uLightColor", 0.55f, 0.55f, 0.6f);
+            }
+            rhi_bind_texture(state->water_ripple, 0);
+            rhi_set_uniform_int("uRippleTex", 0);
+            if (state->prefilter_cubemap.id) {
+                rhi_bind_texture(state->prefilter_cubemap, 6);
+                rhi_set_uniform_int("uPrefilterMap", 6);
+            }
+            rhi_bind_vertex_buffer(o->mesh.vbuffer);
+            rhi_bind_index_buffer(o->mesh.ibuffer);
+            rhi_draw_indexed(0, o->mesh.index_count);
+            state->draws_done++;
+        }
+    }
+
     {
         static float part_data[PARTICLE_CAP * PARTICLE_INST_FLOATS];
         int n = particles_fill(&state->particles, part_data, PARTICLE_CAP);
@@ -8046,6 +8248,28 @@ static void render(AppState *state) {
             rhi_set_uniform_float("uBloomStrength",
                                   state->bloom_on ? 0.06f : 0.0f);
             rhi_set_uniform_float("uExposure", state->exposure);
+            {   /* under-water tint (item 8): the camera below a pond's
+                   surface, within its disc — a cool fog sells the wade */
+                float fr = 0.0f, fg = 0.0f, fb = 0.0f, fa = 0.0f;
+                sol_u32 wi;
+                for (wi = 0; wi < state->scene.count; wi++) {
+                    SceneObject *o = &state->scene.objects[wi];
+                    mat4  m;
+                    float r, dx, dz;
+                    if (!o->mesh_ref || strcmp(o->mesh_ref, "pond") != 0) continue;
+                    m = scene_world_matrix(&state->scene, o);
+                    if (state->camera.pos.y >= m.m[13]) continue;   /* above the surface */
+                    r  = mesh_ref_param("pond", o->mesh_params, o->mesh_param_count, "r");
+                    dx = state->camera.pos.x - m.m[12];
+                    dz = state->camera.pos.z - m.m[14];
+                    if (dx * dx + dz * dz <= r * r) {
+                        fr = 0.04f; fg = 0.10f; fb = 0.14f; fa = 0.72f;
+                        break;
+                    }
+                }
+                rhi_set_uniform_vec3("uFogColor", fr, fg, fb);
+                rhi_set_uniform_float("uFogStrength", fa);
+            }
         }
         rhi_draw(0, 3);
     }

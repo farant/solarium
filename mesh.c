@@ -809,6 +809,21 @@ static void emit_shrub(MeshBuilder *b, const float *p) {
 static void emit_boulder(MeshBuilder *b, const float *p) {
     rock_boulder(b, p[0], (unsigned)(p[1] + 0.5f), p[2]);
 }
+/* a pond's surface (P7 item 8): a flat disc at y=0, normal up, world-
+   scale UVs for the ripple normal. depth/seed are the SHADER's (the
+   water pass reads them off the object) — the geometry is just r. */
+static void emit_pond(MeshBuilder *b, const float *p) {
+    float   r = p[0] > 0.1f ? p[0] : 0.1f;
+    int     n = 48, k;
+    sol_u32 c = mb_push_vertex(b, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+    for (k = 0; k < n; k++) {
+        float a = (float)k / (float)n * 6.2831853f;
+        float x = r * cosf(a), z = r * sinf(a);
+        mb_push_vertex(b, x, 0.0f, z, 0.0f, 1.0f, 0.0f, x, z);
+    }
+    for (k = 0; k < n; k++)
+        mb_push_triangle(b, c, (sol_u32)(1 + k), (sol_u32)(1 + (k + 1) % n));
+}
 
 static const MeshRefEntry REGISTRY[] = {
     { "box",  0, { 0 }, { 0.0f }, emit_box  },
@@ -915,7 +930,11 @@ static const MeshRefEntry REGISTRY[] = {
     /* the island's own stone (P7 item 6): an fBm-displaced octahedron;
        flat squashes it to a standable table-rock */
     { "boulder", 3, { "size", "seed", "flat" },
-      { 1.2f, 7.0f, 0.0f }, emit_boulder }
+      { 1.2f, 7.0f, 0.0f }, emit_boulder },
+    /* the pond surface (P7 item 8): a flat disc the WATER PASS draws — the
+       scene pass skips it. depth/seed feed the shader (tint + ripple) */
+    { "pond", 3, { "r", "depth", "seed" },
+      { 4.0f, 1.5f, 7.0f }, emit_pond }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 
