@@ -91,4 +91,36 @@ void flora_tree_wood(MeshBuilder *b, int species, const float *params,
 void flora_trunk_dims(int species, const float *params, int count,
                       float *r, float *top);
 
+/* ---- item 4: the canopy ----
+   Leaves read the TIPS the branch graph already flagged (§1.2 again).
+   One cluster seat per tip; leaf_density (knob 9) GATES tips by a
+   per-tip hash threshold — MONOTONE, a tip bared at 0.3 stays bared at
+   0.6 (the baluster membership law, the ruin-dial of trees). The
+   canopy is per-instance data over a unit leaf mesh: the item-10
+   ornament pool is its renderer (one draw per tree). */
+typedef struct {
+    vec3  pos;      /* the tip, in the tree's base frame */
+    float yaw;      /* golden-angle splay about Y        */
+    float scale;    /* leaf_size x per-tip jitter        */
+    float phase;    /* sway phase (item 4 wind down-payment) */
+} FloraLeaf;
+
+/* fill out (at most max) with one seat per surviving tip; returns the
+   count. params is the species-default-merged prefix. */
+int flora_canopy(int species, const float *params, int count,
+                 FloraLeaf *out, int max);
+
+/* which unit mesh a species wears: 0 = broadleaf puff, 1 = conifer
+   spray. Cluster SHAPE is species data, not new machinery. */
+enum { FLORA_LEAF_BROAD = 0, FLORA_LEAF_CONIFER };
+int  flora_leaf_kind(int species);
+
+/* one unit leaf cluster, base at y=0 growing up (the sway pins the
+   root), double-sided cards. leaf_kind picks puff vs spray. */
+void flora_leafcard_unit(MeshBuilder *b, int leaf_kind);
+
+/* the canopy's green (linear), per species — the leaf material's base
+   color (the wood wears bark; the leaves can't inherit it) */
+vec3 flora_leaf_color(int species);
+
 #endif /* FLORA_H */

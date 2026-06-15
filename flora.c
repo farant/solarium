@@ -38,31 +38,36 @@ static const char *const fl_names[FLORA_PARAMS] = {
     "splits",   /* lateral children per fork                   */
     "spread",   /* lateral pitch off the parent axis, degrees  */
     "droop",    /* gravitropism, signed: + sags, - sweeps up   */
+    "leaf_size",     /* item 4: cluster scale at each tip      */
+    "leaf_density",  /* item 4: the shedding dial (monotone)   */
     "twist",    /* azimuth advance per generation, degrees     */
     "taper",    /* radius retained along one segment           */
     "decay",    /* lateral length / parent length              */
     "gens",     /* generations at age 1 (capped FLORA_MAX_GENS)*/
     "jitter",   /* randomness amplitude 0..1                   */
-    "leaf_size",     /* item 4's (reserved now: schema growth  */
-    "leaf_density",  /*  is a save-format event)               */
     "reserved"
 };
 
+/* THE LEAF KNOBS RIDE AT 8/9 (P7 item 4): the registry's prefix rule is
+   contiguous from knob 0, so a 10-param tree ref reaches leaf_density
+   (the shedding dial) while the deep structural knobs stay species-
+   fixed at 10-14. The reorder was free exactly once — before any tree
+   persisted a knob past the 8th, which is this item. */
 static const float fl_oak[FLORA_PARAMS] = {
     0.0f, 1.0f, 7.0f, 0.28f, 0.15f, 3.0f, 42.0f, 0.10f,
-    25.0f, 0.80f, 0.72f, 5.0f, 0.55f, 0.55f, 0.8f, 0.0f
+    0.55f, 0.8f, 25.0f, 0.80f, 0.72f, 5.0f, 0.55f, 0.0f
 };
 static const float fl_pine[FLORA_PARAMS] = {
     0.0f, 1.0f, 11.0f, 0.26f, 0.92f, 4.0f, 68.0f, 0.60f,
-    12.0f, 0.88f, 0.38f, 6.0f, 0.30f, 0.45f, 0.7f, 0.0f
+    0.45f, 0.7f, 12.0f, 0.88f, 0.38f, 6.0f, 0.30f, 0.0f
 };
 static const float fl_birch[FLORA_PARAMS] = {
     0.0f, 1.0f, 9.0f, 0.16f, 0.70f, 2.0f, 32.0f, -0.05f,
-    40.0f, 0.82f, 0.68f, 6.0f, 0.45f, 0.40f, 0.6f, 0.0f
+    0.40f, 0.6f, 40.0f, 0.82f, 0.68f, 6.0f, 0.45f, 0.0f
 };
 static const float fl_cypress[FLORA_PARAMS] = {
     0.0f, 1.0f, 7.0f, 0.20f, 0.90f, 5.0f, 24.0f, -0.55f,
-    30.0f, 0.86f, 0.32f, 6.0f, 0.25f, 0.35f, 0.9f, 0.0f
+    0.35f, 0.9f, 30.0f, 0.86f, 0.32f, 6.0f, 0.25f, 0.0f
 };
 
 static const char *const fl_species_names[FLORA_SPECIES_COUNT] = {
@@ -165,13 +170,14 @@ int flora_tree_plan(int species, const float *params, int count,
     if (splits > 6) splits = 6;
     spread = p[6] * (SOL_PI / 180.0f);
     droop  = p[7];
-    twist  = p[8] * (SOL_PI / 180.0f);
-    taper  = p[9];
+    /* p[8] leaf_size, p[9] leaf_density — the canopy's, read by flora_canopy */
+    twist  = p[10] * (SOL_PI / 180.0f);
+    taper  = p[11];
     if (taper < 0.5f)  taper = 0.5f;
     if (taper > 0.98f) taper = 0.98f;
-    decay  = p[10];
-    jitter = p[12];
-    gens   = (int)(p[11] * (age < 1.0f ? age : 1.0f) + 0.5f);
+    decay  = p[12];
+    jitter = p[14];
+    gens   = (int)(p[13] * (age < 1.0f ? age : 1.0f) + 0.5f);
     if (gens < 1) gens = 1;
     if (gens > FLORA_MAX_GENS) gens = FLORA_MAX_GENS;
 
@@ -369,4 +375,138 @@ void flora_trunk_dims(int species, const float *params, int count,
         cur = next;
     }
     if (top) *top = s[cur].p1.y;
+}
+
+/* ================== item 4: the canopy ================== */
+
+vec3 flora_leaf_color(int species) {
+    switch (species) {
+    case FLORA_OAK:     return vec3_make(0.16f, 0.32f, 0.10f);  /* deep green */
+    case FLORA_BIRCH:   return vec3_make(0.34f, 0.50f, 0.16f);  /* bright, light */
+    case FLORA_PINE:    return vec3_make(0.10f, 0.22f, 0.12f);  /* blue-green */
+    case FLORA_CYPRESS: return vec3_make(0.12f, 0.26f, 0.16f);  /* darker still */
+    default:            return vec3_make(0.18f, 0.34f, 0.14f);
+    }
+}
+
+int flora_leaf_kind(int species) {
+    return (species == FLORA_PINE || species == FLORA_CYPRESS)
+        ? FLORA_LEAF_CONIFER : FLORA_LEAF_BROAD;
+}
+
+int flora_canopy(int species, const float *params, int count,
+                 FloraLeaf *out, int max) {
+    FloraSeg s[FLORA_MAX_SEG];
+    float    p[FLORA_PARAMS];
+    const float *defs;
+    unsigned seed;
+    float    leaf_size, density, twig;
+    int      n, i, m = 0, seat_i = 0;
+
+    if (flora_schema(species, (const char *const **)0, &defs) < 0) return 0;
+    if (!out || max < 1) return 0;
+    for (i = 0; i < FLORA_PARAMS; i++)
+        p[i] = (params && i < count) ? params[i] : defs[i];
+    seed      = (unsigned)(sol_u32)(long)floorf(p[0] + 0.5f);
+    leaf_size = p[8];
+    density   = p[9];
+    if (density < 0.0f) density = 0.0f;
+    if (density > 1.0f) density = 1.0f;
+
+    n = flora_tree_plan(species, params, count, s, FLORA_MAX_SEG);
+    /* the TWIG threshold: leaves grow where the wood is thin enough to
+       bear them, never on the trunk — botanically true, and it fills
+       high-apical conifers (whose thin laterals never reach the radius
+       floor as tips) the way childless-tips alone could not */
+    twig = 0.18f * (n > 0 ? s[0].r0 : 0.1f);
+    if (twig < 0.035f) twig = 0.035f;
+    for (i = 0; i < n && m < max; i++) {
+        float keep, jit, t;
+        vec3  along;
+        if (!s[i].tip && s[i].r1 > twig) continue;   /* trunk/limb: bare */
+        /* the shedding dial: hash by SEAT ORDINAL (stable identity);
+           KEEP while the roll lands under density — MONOTONE (a seat
+           bared at 0.3 stays bared at 0.6 because the threshold only
+           rises). density 1 = full, 0 = winter. */
+        keep = flora_hash01(seed, LANE_FLORA_LENGTH, 9000 + seat_i, 0);
+        seat_i++;
+        if (keep >= density) continue;
+        jit   = flora_hash01(seed, LANE_FLORA_PITCH, 9000 + seat_i, 1);
+        along = vec3_sub(s[i].p1, s[i].p0);
+        t     = s[i].tip ? 1.0f : 0.6f;              /* tip caps; twig rides */
+        out[m].pos   = vec3_add(s[i].p0, vec3_scale(along, t));
+        out[m].yaw   = FLORA_GOLDEN_DEG * (SOL_PI / 180.0f) * (float)seat_i;
+        out[m].scale = leaf_size * (0.7f + 0.6f * jit);
+        out[m].phase = flora_hash01(seed, LANE_FLORA_AZIMUTH,
+                                    9000 + seat_i, 2) * 6.2831853f;
+        m++;
+    }
+    return m;
+}
+
+/* one double-sided card in the plane spun to `yaw` and tilted `pitch`
+   from vertical, base at the origin, reaching `up_len` with half-width
+   `hw` at the base tapering to a point — a leaf blade. Emitted both
+   windings so it lights from either face (leaves are thin). */
+static void fl_card(MeshBuilder *b, float yaw, float pitch, float up_len,
+                    float hw, vec3 col) {
+    float cy = cosf(yaw), sy = sinf(yaw);
+    float cp = cosf(pitch), sp = sinf(pitch);
+    /* the blade's own axes: u across (in the yaw plane), w up-and-out */
+    vec3  uax = vec3_make(cy, 0.0f, sy);
+    vec3  wax = vec3_make(-sy * sp, cp, cy * sp);
+    vec3  nrm = vec3_normalize(vec3_cross(wax, uax));
+    vec3  b0  = vec3_scale(uax, -hw);
+    vec3  b1  = vec3_scale(uax,  hw);
+    vec3  tipv = vec3_scale(wax, up_len);
+    vec3  mid0 = vec3_add(vec3_scale(wax, up_len * 0.55f),
+                          vec3_scale(uax, -hw * 0.5f));
+    vec3  mid1 = vec3_add(vec3_scale(wax, up_len * 0.55f),
+                          vec3_scale(uax,  hw * 0.5f));
+    sol_u32 v[5];
+    int     side;
+    (void)col;
+    for (side = 0; side < 2; side++) {
+        vec3 nn = side ? vec3_scale(nrm, -1.0f) : nrm;
+        v[0] = mb_push_vertex(b, b0.x, b0.y, b0.z, nn.x, nn.y, nn.z, 0.0f, 0.0f);
+        v[1] = mb_push_vertex(b, b1.x, b1.y, b1.z, nn.x, nn.y, nn.z, 1.0f, 0.0f);
+        v[2] = mb_push_vertex(b, mid1.x, mid1.y, mid1.z, nn.x, nn.y, nn.z, 0.85f, 0.55f);
+        v[3] = mb_push_vertex(b, tipv.x, tipv.y, tipv.z, nn.x, nn.y, nn.z, 0.5f, 1.0f);
+        v[4] = mb_push_vertex(b, mid0.x, mid0.y, mid0.z, nn.x, nn.y, nn.z, 0.15f, 0.55f);
+        if (!side) {
+            mb_push_triangle(b, v[0], v[1], v[2]);
+            mb_push_triangle(b, v[0], v[2], v[3]);
+            mb_push_triangle(b, v[0], v[3], v[4]);
+        } else {
+            mb_push_triangle(b, v[0], v[2], v[1]);
+            mb_push_triangle(b, v[0], v[3], v[2]);
+            mb_push_triangle(b, v[0], v[4], v[3]);
+        }
+    }
+}
+
+void flora_leafcard_unit(MeshBuilder *b, int leaf_kind) {
+    vec3 col = vec3_make(1.0f, 1.0f, 1.0f);
+    int  i;
+    if (!b) return;
+    if (leaf_kind == FLORA_LEAF_CONIFER) {
+        /* a drooping spray: many blades fanned around and angled DOWN-
+           and-out, denser, longer — the needle frond reads from afar */
+        int blades = 10;
+        for (i = 0; i < blades; i++) {
+            float yaw   = FLORA_GOLDEN_DEG * (SOL_PI / 180.0f) * (float)i;
+            float t     = (float)i / (float)blades;
+            float pitch = 1.15f + 0.30f * t;       /* past vertical: droops */
+            fl_card(b, yaw, pitch, 0.95f - 0.3f * t, 0.06f, col);
+        }
+    } else {
+        /* a broadleaf puff: blades fanned up-and-out into a rough dome */
+        int blades = 7;
+        for (i = 0; i < blades; i++) {
+            float yaw   = FLORA_GOLDEN_DEG * (SOL_PI / 180.0f) * (float)i;
+            float pitch = 0.35f + 0.5f
+                        * flora_hash01(1u, LANE_FLORA_PITCH, i, 0);
+            fl_card(b, yaw, pitch, 0.85f, 0.34f, col);
+        }
+    }
 }

@@ -104,7 +104,9 @@ void    make_wall_with_opening(MeshBuilder *b, sol_f32 w, sol_f32 h,
    each entry declares its parameter names + defaults, so the scene file can
    carry them as self-describing attributes (<mesh ref="room" w="6" .../>)
    and the writer/loader/resolver all read one table. */
-#define MESH_REF_MAX_PARAMS 8
+#define MESH_REF_MAX_PARAMS 10   /* P7 item 4: the tree refs expose
+                                    leaf_size/leaf_density at 8/9 — the
+                                    cap rose with them; church/room stay 8 */
 
 /* Schema lookup: the entry's parameter names + defaults (borrowed pointers,
    static lifetime). Returns the parameter count, or -1 for an unknown ref. */

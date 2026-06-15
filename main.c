@@ -10,6 +10,7 @@
 #include "rhi.h"                 /* the graphics seam — no GL above here */
 #include "mesh.h"
 #include "gothic.h"              /* the kit: church_plan + queries (P6) */
+#include "flora.h"               /* trees: the canopy + species (P7) */
 #include "texgen.h"              /* synthesized material maps (texture side-quest) */
 #include "scene.h"
 #include "sol_math.h"
@@ -46,13 +47,18 @@ typedef struct {
     sol_u32   island;
 } MeadowPatch;
 
-/* one balustrade's balusters (P6 item 10): a static instance buffer of
-   local slots — the copies ride their carcass's transform and its
-   visibility bit, exactly the meadow's island arrangement */
+/* one instanced-ornament population (P6 item 10, generalized to KINDS
+   in P7 item 4): a static instance buffer of local slots riding a
+   source object's transform + visibility bit (the meadow arrangement).
+   kind selects the unit mesh AND the material: balusters wear the
+   source's stone; leaf clusters wear the canopy green carried here. */
+enum { ORN_BALUSTER = 0, ORN_LEAF_BROAD, ORN_LEAF_CONIFER, ORN_KIND_COUNT };
 typedef struct {
     RhiBuffer data;
     int       count;
     sol_u32   source;
+    int       kind;
+    Material  material;   /* used when kind != ORN_BALUSTER */
 } OrnamentPatch;
 
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
@@ -611,6 +617,7 @@ static const char *ORNAMENT_VERTEX_SRC =
     "    float4x4 uView;\n"
     "    float4x4 uProj;\n"
     "    float3x3 uNormalMatrix;\n"
+    "    float    uTime;\n"
     "};\n"
     "struct VOut {\n"
     "    float4 pos [[position]];\n"
@@ -624,6 +631,9 @@ static const char *ORNAMENT_VERTEX_SRC =
     "    float c = cos(v.instA.w), s = sin(v.instA.w);\n"
     "    float3 sp = float3(v.pos.x * v.instB.x, v.pos.y * v.instB.y, v.pos.z * v.instB.x);\n"
     "    float3 lp = float3(c*sp.x + s*sp.z, sp.y, -s*sp.x + c*sp.z) + v.instA.xyz;\n"
+    "    float sway = v.instB.w * sp.y;\n"   /* amp 0 = no move (balusters) */
+    "    lp.x += sway * sin(u.uTime * 1.3 + v.instB.z);\n"
+    "    lp.z += sway * 0.7 * cos(u.uTime * 1.05 + v.instB.z);\n"
     "    float4 worldPos = u.uModel * float4(lp, 1.0);\n"
     "    o.pos = u.uProj * (u.uView * worldPos);\n"
     "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
@@ -669,6 +679,7 @@ static const char *ORNAMENT_VERTEX_SRC =
     "uniform mat4 uView;\n"
     "uniform mat4 uProj;\n"
     "uniform mat3 uNormalMatrix;\n"
+    "uniform float uTime;\n"
     "out vec3 vNormal;\n"
     "out vec3 vWorldPos;\n"
     "out vec2 vUV;\n"
@@ -677,6 +688,9 @@ static const char *ORNAMENT_VERTEX_SRC =
     "    float c = cos(aInstA.w), s = sin(aInstA.w);\n"
     "    vec3 sp = vec3(aPos.x * aInstB.x, aPos.y * aInstB.y, aPos.z * aInstB.x);\n"
     "    vec3 lp = vec3(c*sp.x + s*sp.z, sp.y, -s*sp.x + c*sp.z) + aInstA.xyz;\n"
+    "    float sway = aInstB.w * sp.y;\n"      /* amp 0 = no move (balusters) */
+    "    lp.x += sway * sin(uTime * 1.3 + aInstB.z);\n"
+    "    lp.z += sway * 0.7 * cos(uTime * 1.05 + aInstB.z);\n"
     "    vec4 worldPos = uModel * vec4(lp, 1.0);\n"
     "    gl_Position = uProj * uView * worldPos;\n"
     "    vec3 ln = vec3(aNormal.x / aInstB.x, aNormal.y / aInstB.y, aNormal.z / aInstB.x);\n"
@@ -1725,11 +1739,12 @@ typedef struct {
     MeadowPatch meadow[32];
     int         meadow_count;
 
-    /* instanced ornament (P6 item 10, the item-7 debt): one canonical
-       baluster through the FULL PBR pipeline + a shadow twin */
+    /* instanced ornament (P6 item 10, the item-7 debt; P7 item 4 grew
+       it to KINDS): unit meshes through the FULL PBR pipeline + a shadow
+       twin. orn_mesh is indexed by ORN_* — baluster, broadleaf, conifer */
     RhiPipeline   ornament_pipeline, ornament_shadow_pipeline;
-    Mesh          baluster_mesh;
-    OrnamentPatch ornament[64];
+    Mesh          orn_mesh[ORN_KIND_COUNT];
+    OrnamentPatch ornament[128];
     int           ornament_count;
     float         ornament_fp;     /* the scene fingerprint last built */
     /* particles (P4 item 7): the pool is VIEW STATE (the reader-rig
@@ -2245,66 +2260,111 @@ static void meadow_rebuild(AppState *st) {
    one author (the carcass's sill/rail constants ride gothic.h, so the
    copies stand exactly between them). Rebuilt when the fingerprint
    moves; dragging only moves uModel, which the pool never bakes. */
+#define ORN_MAX_SLOTS 512
+#define ORN_LEAF_SWAY 0.10f   /* rustle amplitude (item 4's wind down-payment) */
+
+/* add one finished patch to the pool; returns SOL_FALSE if it's full */
+static sol_bool orn_add(AppState *st, const float *inst, int n, int kind,
+                        sol_u32 source, Material mat) {
+    OrnamentPatch *op;
+    if (n <= 0) return SOL_TRUE;
+    if (st->ornament_count >=
+        (int)(sizeof st->ornament / sizeof st->ornament[0])) return SOL_FALSE;
+    op = &st->ornament[st->ornament_count++];
+    op->data     = rhi_create_buffer(RHI_BUFFER_VERTEX, inst,
+                                     (size_t)n * 8 * sizeof(float));
+    op->count    = n;
+    op->kind     = kind;
+    op->source   = source;
+    op->material = mat;
+    return SOL_TRUE;
+}
+
 static void ornament_rebuild(AppState *st) {
-    int     p;
+    int     p, balusters = 0, leaves = 0, trees = 0;
     sol_u32 i;
-    int     total = 0;
     for (p = 0; p < st->ornament_count; p++)
         rhi_destroy_buffer(st->ornament[p].data);
     st->ornament_count = 0;
     for (i = 0; i < st->scene.count; i++) {
         SceneObject *o = &st->scene.objects[i];
-        float    xs[128], inst[128 * 8];
-        float    len, h, ruin, gap;
-        unsigned seed;
-        int      n, k;
-        if (!o->mesh_ref || strcmp(o->mesh_ref, "balustrade") != 0) continue;
-        if (st->ornament_count >=
-            (int)(sizeof st->ornament / sizeof st->ornament[0])) break;
-        len  = mesh_ref_param("balustrade", o->mesh_params,
-                              o->mesh_param_count, "len");
-        h    = mesh_ref_param("balustrade", o->mesh_params,
-                              o->mesh_param_count, "h");
-        seed = (unsigned)(mesh_ref_param("balustrade", o->mesh_params,
-                                         o->mesh_param_count, "seed") + 0.5f);
-        ruin = mesh_ref_param("balustrade", o->mesh_params,
-                              o->mesh_param_count, "ruin");
-        n = gothic_balusters(len, h, seed, ruin, xs, 128);
-        gap = (h - GOTHIC_BALUSTER_RAIL) - GOTHIC_BALUSTER_SILL;
-        if (n <= 0 || gap < 0.2f) continue;
-        for (k = 0; k < n; k++) {
-            inst[k * 8 + 0] = xs[k];
-            inst[k * 8 + 1] = GOTHIC_BALUSTER_SILL;
-            inst[k * 8 + 2] = 0.0f;
-            inst[k * 8 + 3] = 0.0f;   /* square balusters sit straight */
-            inst[k * 8 + 4] = gap;    /* thickness rides the gap: proportion */
-            inst[k * 8 + 5] = gap;
-            inst[k * 8 + 6] = 0.0f;
-            inst[k * 8 + 7] = 0.0f;
+        float        inst[ORN_MAX_SLOTS * 8];
+        int          n, k, species;
+        if (!o->mesh_ref) continue;
+
+        if (strcmp(o->mesh_ref, "balustrade") == 0) {
+            float    xs[ORN_MAX_SLOTS], gap;
+            float    len = mesh_ref_param("balustrade", o->mesh_params,
+                                          o->mesh_param_count, "len");
+            float    h   = mesh_ref_param("balustrade", o->mesh_params,
+                                          o->mesh_param_count, "h");
+            unsigned seed = (unsigned)(mesh_ref_param("balustrade",
+                                o->mesh_params, o->mesh_param_count, "seed")
+                                + 0.5f);
+            float    ruin = mesh_ref_param("balustrade", o->mesh_params,
+                                           o->mesh_param_count, "ruin");
+            n = gothic_balusters(len, h, seed, ruin, xs, ORN_MAX_SLOTS);
+            gap = (h - GOTHIC_BALUSTER_RAIL) - GOTHIC_BALUSTER_SILL;
+            if (n <= 0 || gap < 0.2f) continue;
+            for (k = 0; k < n; k++) {
+                inst[k * 8 + 0] = xs[k];
+                inst[k * 8 + 1] = GOTHIC_BALUSTER_SILL;
+                inst[k * 8 + 2] = 0.0f;
+                inst[k * 8 + 3] = 0.0f;   /* square balusters sit straight */
+                inst[k * 8 + 4] = gap;    /* thickness rides the gap */
+                inst[k * 8 + 5] = gap;
+                inst[k * 8 + 6] = 0.0f;
+                inst[k * 8 + 7] = 0.0f;   /* sway amp 0: stone never moves */
+            }
+            if (!orn_add(st, inst, n, ORN_BALUSTER, o->handle,
+                         o->material)) break;
+            balusters += n;
+
+        } else if ((species = flora_species(o->mesh_ref)) >= 0) {
+            FloraLeaf slots[ORN_MAX_SLOTS];
+            Material  mat = material_default();
+            int       leaf_kind = flora_leaf_kind(species);
+            n = flora_canopy(species, o->mesh_params, o->mesh_param_count,
+                             slots, ORN_MAX_SLOTS);
+            if (n <= 0) continue;
+            for (k = 0; k < n; k++) {
+                inst[k * 8 + 0] = slots[k].pos.x;
+                inst[k * 8 + 1] = slots[k].pos.y;
+                inst[k * 8 + 2] = slots[k].pos.z;
+                inst[k * 8 + 3] = slots[k].yaw;
+                inst[k * 8 + 4] = slots[k].scale;
+                inst[k * 8 + 5] = slots[k].scale;
+                inst[k * 8 + 6] = slots[k].phase;
+                inst[k * 8 + 7] = ORN_LEAF_SWAY;   /* leaves rustle */
+            }
+            mat.base_color = flora_leaf_color(species);
+            mat.roughness  = 0.85f;
+            mat.metallic   = 0.0f;
+            if (!orn_add(st, inst, n,
+                         leaf_kind == FLORA_LEAF_CONIFER ? ORN_LEAF_CONIFER
+                                                         : ORN_LEAF_BROAD,
+                         o->handle, mat)) break;
+            leaves += n;
+            trees++;
         }
-        st->ornament[st->ornament_count].data =
-            rhi_create_buffer(RHI_BUFFER_VERTEX, inst,
-                              (size_t)n * 8 * sizeof(float));
-        st->ornament[st->ornament_count].count  = n;
-        st->ornament[st->ornament_count].source = o->handle;
-        st->ornament_count++;
-        total += n;
     }
-    if (st->ornament_count > 0)
-        printf("ornament: %d balustrade(s), %d balusters instanced\n",
-               st->ornament_count, total);
+    if (balusters || leaves)
+        printf("ornament: %d balusters, %d leaves on %d tree(s)\n",
+               balusters, leaves, trees);
 }
 
 /* the per-frame sync: a cheap fingerprint over (handle, params) of every
-   balustrade — immune to missed call sites (mint, L, X, hand-edit all
-   just change the fingerprint) */
+   ornament SOURCE (balustrades + trees) — immune to missed call sites
+   (mint, L, X, hand-edit all just change the fingerprint) */
 static void ornament_sync(AppState *st) {
     sol_u32 i;
     int     j;
     float   fp = 0.0f;
     for (i = 0; i < st->scene.count; i++) {
         const SceneObject *o = &st->scene.objects[i];
-        if (!o->mesh_ref || strcmp(o->mesh_ref, "balustrade") != 0) continue;
+        if (!o->mesh_ref) continue;
+        if (strcmp(o->mesh_ref, "balustrade") != 0 &&
+            flora_species(o->mesh_ref) < 0) continue;
         fp += (float)o->handle * 0.618034f;
         for (j = 0; j < o->mesh_param_count; j++)
             fp += o->mesh_params[j] * (float)(j + 1);
@@ -6402,9 +6462,14 @@ static int init_scene(AppState *state) {
         RhiPipelineDesc od  = {0};
         RhiPipelineDesc osd = {0};
         MeshBuilder     mb;
-        mb_init(&mb);
-        gothic_baluster_unit(&mb);
-        state->baluster_mesh = mesh_from_builder(&mb);
+        mb_init(&mb); gothic_baluster_unit(&mb);
+        state->orn_mesh[ORN_BALUSTER] = mesh_from_builder(&mb);
+        mb_free(&mb);
+        mb_init(&mb); flora_leafcard_unit(&mb, FLORA_LEAF_BROAD);
+        state->orn_mesh[ORN_LEAF_BROAD] = mesh_from_builder(&mb);
+        mb_free(&mb);
+        mb_init(&mb); flora_leafcard_unit(&mb, FLORA_LEAF_CONIFER);
+        state->orn_mesh[ORN_LEAF_CONIFER] = mesh_from_builder(&mb);
         mb_free(&mb);
         osh = rhi_create_shader(ORNAMENT_VERTEX_SRC, FRAGMENT_SRC);
         if (osh.id) {
@@ -6890,26 +6955,27 @@ static void render(AppState *state) {
                 rhi_draw_indexed(0, sm->mesh.index_count);
             }
         }
-        /* instanced ornament casts too (P6 item 10) — floating shadowless
-           balusters would read wrong */
-        if (state->ornament_shadow_pipeline.id && state->ornament_count > 0 &&
-            state->baluster_mesh.index_count > 0) {
+        /* instanced ornament casts too (P6 item 10; P7 item 4: leaves
+           cast their canopy) — floating shadowless ornament reads wrong.
+           The shadow uses the UN-swayed pose (no uTime here): the rustle
+           is gentle and the canopy shadow is a blob — a flagged v1. */
+        if (state->ornament_shadow_pipeline.id && state->ornament_count > 0) {
             int op;
             rhi_set_pipeline(state->ornament_shadow_pipeline);
             rhi_set_uniform_mat4("uLightVP", lvp.m);
-            rhi_bind_vertex_buffer(state->baluster_mesh.vbuffer);
-            rhi_bind_index_buffer(state->baluster_mesh.ibuffer);
             for (op = 0; op < state->ornament_count; op++) {
-                SceneObject *o = scene_get(&state->scene,
-                                           state->ornament[op].source);
+                OrnamentPatch *pt = &state->ornament[op];
+                Mesh          *um = &state->orn_mesh[pt->kind];
+                SceneObject   *o  = scene_get(&state->scene, pt->source);
                 mat4 model;
-                if (!o) continue;
+                if (!o || um->index_count == 0) continue;
                 if (lvis && !lvis[o->handle]) continue;
                 model = scene_world_matrix(&state->scene, o);
                 rhi_set_uniform_mat4("uModel", model.m);
-                rhi_bind_instance_buffer(state->ornament[op].data);
-                rhi_draw_indexed_instanced(0, state->baluster_mesh.index_count,
-                                           state->ornament[op].count);
+                rhi_bind_vertex_buffer(um->vbuffer);
+                rhi_bind_index_buffer(um->ibuffer);
+                rhi_bind_instance_buffer(pt->data);
+                rhi_draw_indexed_instanced(0, um->index_count, pt->count);
             }
         }
         rhi_end_pass();
@@ -7062,29 +7128,31 @@ static void render(AppState *state) {
         }
     }
 
-    /* the instanced ornament (P6 item 10): every balustrade's balusters,
-       one draw each — full PBR through the carcass's OWN material (a
-       stone-dressed balustrade grows stone balusters), riding the
-       carcass's visibility bit */
-    if (state->ornament_pipeline.id && state->ornament_count > 0 &&
-        state->baluster_mesh.index_count > 0) {
+    /* the instanced ornament (P6 item 10; P7 item 4 grew it to KINDS):
+       balusters wear their carcass's OWN material (stone), leaf clusters
+       wear the canopy green carried on the patch — one draw each, riding
+       the source's visibility bit. uTime drives the leaf sway (balusters
+       carry sway amp 0, so they hold still). */
+    if (state->ornament_pipeline.id && state->ornament_count > 0) {
         int op;
         for (op = 0; op < state->ornament_count; op++) {
-            SceneObject *o = scene_get(&state->scene,
-                                       state->ornament[op].source);
+            OrnamentPatch *pt = &state->ornament[op];
+            Mesh          *um = &state->orn_mesh[pt->kind];
+            SceneObject   *o  = scene_get(&state->scene, pt->source);
+            Material       mat;
             mat4 model;
-            if (!o) continue;
+            if (!o || um->index_count == 0) continue;
             if (vis && !vis[o->handle]) continue;
+            mat   = (pt->kind == ORN_BALUSTER) ? o->material : pt->material;
             model = scene_world_matrix(&state->scene, o);
             bind_scene_uniforms(state, state->ornament_pipeline, model,
                                 view, proj, eye,
-                                o->handle == sel_root ? 1.0f : 0.0f,
-                                o->material);
-            rhi_bind_vertex_buffer(state->baluster_mesh.vbuffer);
-            rhi_bind_instance_buffer(state->ornament[op].data);
-            rhi_bind_index_buffer(state->baluster_mesh.ibuffer);
-            rhi_draw_indexed_instanced(0, state->baluster_mesh.index_count,
-                                       state->ornament[op].count);
+                                o->handle == sel_root ? 1.0f : 0.0f, mat);
+            rhi_set_uniform_float("uTime", (float)glfwGetTime());
+            rhi_bind_vertex_buffer(um->vbuffer);
+            rhi_bind_instance_buffer(pt->data);
+            rhi_bind_index_buffer(um->ibuffer);
+            rhi_draw_indexed_instanced(0, um->index_count, pt->count);
             state->draws_done++;
         }
     }

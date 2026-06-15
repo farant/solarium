@@ -761,16 +761,16 @@ static void emit_portal(MeshBuilder *b, const float *p) {
                        (int)(p[6] + 0.5f), p[7], 1);
 }
 static void emit_church_stone(MeshBuilder *b, const float *p) {
-    church_stone(b, p, MESH_REF_MAX_PARAMS);
+    church_stone(b, p, 8);   /* the church schema is exactly 8 wide */
 }
 static void emit_church_glass(MeshBuilder *b, const float *p) {
-    church_glass(b, p, MESH_REF_MAX_PARAMS);
+    church_glass(b, p, 8);
 }
 static void emit_church_roof(MeshBuilder *b, const float *p) {
-    church_roof(b, p, MESH_REF_MAX_PARAMS);
+    church_roof(b, p, 8);
 }
 static void emit_church_floor(MeshBuilder *b, const float *p) {
-    church_floor(b, p, MESH_REF_MAX_PARAMS);
+    church_floor(b, p, 8);
 }
 static void emit_pinnacle(MeshBuilder *b, const float *p) {
     gothic_pinnacle(b, p[0], (unsigned)(p[1] + 0.5f));
@@ -791,16 +791,16 @@ static void emit_cross(MeshBuilder *b, const float *p) {
     gothic_cross(b, p[0]);
 }
 static void emit_oak(MeshBuilder *b, const float *p) {
-    flora_tree_wood(b, FLORA_OAK, p, 8);
+    flora_tree_wood(b, FLORA_OAK, p, 10);
 }
 static void emit_pine(MeshBuilder *b, const float *p) {
-    flora_tree_wood(b, FLORA_PINE, p, 8);
+    flora_tree_wood(b, FLORA_PINE, p, 10);
 }
 static void emit_birch(MeshBuilder *b, const float *p) {
-    flora_tree_wood(b, FLORA_BIRCH, p, 8);
+    flora_tree_wood(b, FLORA_BIRCH, p, 10);
 }
 static void emit_cypress(MeshBuilder *b, const float *p) {
-    flora_tree_wood(b, FLORA_CYPRESS, p, 8);
+    flora_tree_wood(b, FLORA_CYPRESS, p, 10);
 }
 
 static const MeshRefEntry REGISTRY[] = {
@@ -878,21 +878,27 @@ static const MeshRefEntry REGISTRY[] = {
     { "cross", 1, { "h" }, { 3.2f }, emit_cross },
     /* the trees (P7 item 3): species are REFS — the registry's per-ref
        defaults express the presets (the church-group pattern, your
-       ruling). The 8-param prefix exposes the silhouette knobs; the
-       deeper schema (twist/taper/gens/leaf...) stays species-fixed v1.
-       Defaults MUST equal flora_schema's first 8 (floratest asserts). */
-    { "oak", 8, { "seed", "age", "height", "girth",
-                  "apical", "splits", "spread", "droop" },
-      { 0.0f, 1.0f, 7.0f, 0.28f, 0.15f, 3.0f, 42.0f, 0.10f }, emit_oak },
-    { "pine", 8, { "seed", "age", "height", "girth",
-                   "apical", "splits", "spread", "droop" },
-      { 0.0f, 1.0f, 11.0f, 0.26f, 0.92f, 4.0f, 68.0f, 0.60f }, emit_pine },
-    { "birch", 8, { "seed", "age", "height", "girth",
-                    "apical", "splits", "spread", "droop" },
-      { 0.0f, 1.0f, 9.0f, 0.16f, 0.70f, 2.0f, 32.0f, -0.05f }, emit_birch },
-    { "cypress", 8, { "seed", "age", "height", "girth",
-                      "apical", "splits", "spread", "droop" },
-      { 0.0f, 1.0f, 7.0f, 0.20f, 0.90f, 5.0f, 24.0f, -0.55f }, emit_cypress }
+       ruling). The 10-param prefix exposes the silhouette knobs PLUS
+       leaf_size/leaf_density (item 4: the shedding dial reaches the
+       file); the deeper structural schema (twist/taper/gens...) stays
+       species-fixed. Defaults MUST equal flora_schema's first 10
+       (floratest asserts). */
+    { "oak", 10, { "seed", "age", "height", "girth", "apical",
+                   "splits", "spread", "droop", "leaf_size", "leaf_density" },
+      { 0.0f, 1.0f, 7.0f, 0.28f, 0.15f, 3.0f, 42.0f, 0.10f, 0.55f, 0.8f },
+      emit_oak },
+    { "pine", 10, { "seed", "age", "height", "girth", "apical",
+                    "splits", "spread", "droop", "leaf_size", "leaf_density" },
+      { 0.0f, 1.0f, 11.0f, 0.26f, 0.92f, 4.0f, 68.0f, 0.60f, 0.45f, 0.7f },
+      emit_pine },
+    { "birch", 10, { "seed", "age", "height", "girth", "apical",
+                     "splits", "spread", "droop", "leaf_size", "leaf_density" },
+      { 0.0f, 1.0f, 9.0f, 0.16f, 0.70f, 2.0f, 32.0f, -0.05f, 0.40f, 0.6f },
+      emit_birch },
+    { "cypress", 10, { "seed", "age", "height", "girth", "apical",
+                       "splits", "spread", "droop", "leaf_size", "leaf_density" },
+      { 0.0f, 1.0f, 7.0f, 0.20f, 0.90f, 5.0f, 24.0f, -0.55f, 0.35f, 0.9f },
+      emit_cypress }
 };
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 
@@ -933,6 +939,7 @@ sol_bool mesh_ref_build(const char *ref, const float *params, int count, MeshBui
     float               full[MESH_REF_MAX_PARAMS];
     int                 k;
     if (!e) return SOL_FALSE;
+    for (k = 0; k < MESH_REF_MAX_PARAMS; k++) full[k] = 0.0f;  /* clean tail */
     /* merge the caller's prefix with the defaults: a file written before a
        schema grew (a 3-param room from before the presence flags) must get
        defaults for the new tail, never an uninitialized read */

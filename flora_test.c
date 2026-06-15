@@ -223,16 +223,16 @@ int main(void) {
         printf("trunk dims: ok\n");
     }
 
-    {   /* the registry rows: 8-param prefix MUST equal flora's defaults
-           (the gothic_church_defaults law) — and the rows build */
+    {   /* the registry rows: the 10-param prefix MUST equal flora's
+           defaults (the gothic_church_defaults law) — and the rows build */
         for (sp = 0; sp < FLORA_SPECIES_COUNT; sp++) {
             const char *const *names;
             const float       *rdefs, *fdefs;
             MeshBuilder        mb;
             int nr = mesh_ref_schema(flora_species_name(sp), &names, &rdefs);
             flora_schema(sp, (const char *const **)0, &fdefs);
-            if (nr != 8) { fail("registry: tree row not 8 params"); continue; }
-            if (memcmp(rdefs, fdefs, 8 * sizeof(float)) != 0)
+            if (nr != 10) { fail("registry: tree row not 10 params"); continue; }
+            if (memcmp(rdefs, fdefs, 10 * sizeof(float)) != 0)
                 fail("registry: row defaults drifted from flora's");
             mb_init(&mb);
             if (!mesh_ref_build(flora_species_name(sp), (const float *)0,
@@ -241,6 +241,68 @@ int main(void) {
             mb_free(&mb);
         }
         printf("registry rows: ok\n");
+    }
+
+    /* ---- item 4: the canopy ---- */
+    {
+        FloraLeaf a[512], b[512];
+        for (sp = 0; sp < FLORA_SPECIES_COUNT; sp++) {
+            int na = flora_canopy(sp, (const float *)0, 0, a, 512);
+            int nb = flora_canopy(sp, (const float *)0, 0, b, 512);
+            if (na < 12)
+                fail("canopy: a default tree is nearly bare");
+            if (na != nb ||
+                memcmp(a, b, (size_t)na * sizeof(FloraLeaf)) != 0)
+                fail("canopy: not deterministic");
+        }
+        printf("the canopy: ok\n");
+    }
+
+    {   /* THE SHEDDING DIAL is monotone BY MEMBERSHIP: a leaf seat kept
+           at low density is kept at high density (density up = fuller).
+           Compare the kept-tip ordinals across densities. */
+        FloraLeaf lo[512], hi[512];
+        float plo[10], phi[10];
+        const float *defs;
+        int i, nlo, nhi, k, sub;
+        flora_schema(FLORA_OAK, (const char *const **)0, &defs);
+        for (i = 0; i < 10; i++) { plo[i] = defs[i]; phi[i] = defs[i]; }
+        plo[9] = 0.3f; phi[9] = 0.8f;          /* density: sparse vs full */
+        nlo = flora_canopy(FLORA_OAK, plo, 10, lo, 512);
+        nhi = flora_canopy(FLORA_OAK, phi, 10, hi, 512);
+        if (nlo > nhi) fail("canopy: more density grew fewer leaves");
+        /* every sparse seat must reappear in the full canopy (subset) */
+        sub = 1;
+        for (i = 0; i < nlo; i++) {
+            int seen = 0;
+            for (k = 0; k < nhi; k++)
+                if (memcmp(&lo[i].pos, &hi[k].pos, sizeof(vec3)) == 0)
+                    { seen = 1; break; }
+            if (!seen) { sub = 0; break; }
+        }
+        if (!sub) fail("canopy: shedding not monotone (a leaf vanished then returned)");
+        /* density 0 = winter (bare), density 1 = every twig */
+        { float p0[10]; for (i=0;i<10;i++) p0[i]=defs[i]; p0[9]=0.0f;
+          if (flora_canopy(FLORA_OAK, p0, 10, lo, 512) != 0)
+              fail("canopy: density 0 is not bare"); }
+        printf("the shedding dial: ok\n");
+    }
+
+    {   /* the leaf unit meshes build, double-sided, and species pick */
+        MeshBuilder mb;
+        if (flora_leaf_kind(FLORA_OAK) != FLORA_LEAF_BROAD ||
+            flora_leaf_kind(FLORA_PINE) != FLORA_LEAF_CONIFER ||
+            flora_leaf_kind(FLORA_CYPRESS) != FLORA_LEAF_CONIFER)
+            fail("leaf kind: species map wrong");
+        mb_init(&mb);
+        flora_leafcard_unit(&mb, FLORA_LEAF_BROAD);
+        if (mb.index_count == 0) fail("leaf mesh: broadleaf empty");
+        mb_free(&mb);
+        mb_init(&mb);
+        flora_leafcard_unit(&mb, FLORA_LEAF_CONIFER);
+        if (mb.index_count == 0) fail("leaf mesh: conifer empty");
+        mb_free(&mb);
+        printf("leaf meshes: ok\n");
     }
 
     if (g_fail) { printf("flora_test: FAILED\n"); return 1; }
