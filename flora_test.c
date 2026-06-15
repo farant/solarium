@@ -120,11 +120,13 @@ int main(void) {
                4 * 5 * 4, total);
     }
 
-    /* ---- the defaults are real trees: non-trivial, uncapped ---- */
+    /* ---- the defaults are real plants: non-trivial, uncapped (a shrub
+           is legitimately smaller than a tree — the trunk-zero species) ---- */
     for (sp = 0; sp < FLORA_SPECIES_COUNT; sp++) {
+        int floor = (sp == FLORA_SHRUB) ? 8 : 30;
         n = flora_tree_plan(sp, (const float *)0, 0, A, FLORA_MAX_SEG);
-        if (n < 30) fail("a default tree is a twig");
-        if (n >= FLORA_MAX_SEG) fail("a default tree hit the arena cap");
+        if (n < floor) fail("a default plant is a twig");
+        if (n >= FLORA_MAX_SEG) fail("a default plant hit the arena cap");
     }
     printf("default species: ok\n");
 

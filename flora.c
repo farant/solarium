@@ -69,12 +69,18 @@ static const float fl_cypress[FLORA_PARAMS] = {
     0.0f, 1.0f, 7.0f, 0.20f, 0.90f, 5.0f, 24.0f, -0.55f,
     0.35f, 0.9f, 30.0f, 0.86f, 0.32f, 6.0f, 0.25f, 0.0f
 };
+/* the bush: apical 0.05 = no leader (forks from a short stem), low,
+   wide, dense — trunk-zero, the §1.4 proof */
+static const float fl_shrub[FLORA_PARAMS] = {
+    0.0f, 1.0f, 1.8f, 0.06f, 0.05f, 4.0f, 55.0f, 0.10f,
+    0.30f, 0.85f, 35.0f, 0.78f, 0.68f, 4.0f, 0.55f, 0.0f
+};
 
 static const char *const fl_species_names[FLORA_SPECIES_COUNT] = {
-    "oak", "pine", "birch", "cypress"
+    "oak", "pine", "birch", "cypress", "shrub"
 };
 static const float *const fl_defaults[FLORA_SPECIES_COUNT] = {
-    fl_oak, fl_pine, fl_birch, fl_cypress
+    fl_oak, fl_pine, fl_birch, fl_cypress, fl_shrub
 };
 
 int flora_species(const char *name) {
@@ -385,6 +391,7 @@ vec3 flora_leaf_color(int species) {
     case FLORA_BIRCH:   return vec3_make(0.34f, 0.50f, 0.16f);  /* bright, light */
     case FLORA_PINE:    return vec3_make(0.10f, 0.22f, 0.12f);  /* blue-green */
     case FLORA_CYPRESS: return vec3_make(0.12f, 0.26f, 0.16f);  /* darker still */
+    case FLORA_SHRUB:   return vec3_make(0.22f, 0.38f, 0.14f);  /* fresh shrub */
     default:            return vec3_make(0.18f, 0.34f, 0.14f);
     }
 }

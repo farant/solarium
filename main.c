@@ -41,10 +41,14 @@ static sol_bool glb_acquire_model(const char *path, GlbModel *out);
 static void     glb_part_key(const char *path, int index, char *buf);
 
 /* one island's grass (P4 item 3): a static instance buffer + the island it
-   grows on — drawn only when the island itself survives the frustum */
+   grows on — drawn only when the island itself survives the frustum. P7
+   item 7 adds a sparse FLOWER buffer (a second bloom mesh, bright tints,
+   patchy) — the meadow grown up. */
 typedef struct {
     RhiBuffer data;
     int       count;
+    RhiBuffer flowers;
+    int       flower_count;
     sol_u32   island;
 } MeadowPatch;
 
@@ -68,7 +72,7 @@ typedef struct {
    tree's CANOPY clusters merged per leaf-kind. ~6 draws for a wood. A
    forest is not scene objects; it is shared variant meshes + per-island
    instance buffers, the meadow at organism scale. */
-#define FOREST_VARIANT_COUNT 5
+#define FOREST_VARIANT_COUNT 6   /* 0-4 trees, 5 = the shrub (item 7) */
 typedef struct {
     sol_u32   island;
     RhiBuffer wood[FOREST_VARIANT_COUNT];
@@ -1755,6 +1759,7 @@ typedef struct {
        never serialized */
     RhiPipeline meadow_pipeline;
     RhiBuffer   meadow_vbuf, meadow_ibuf;   /* the one shared tuft */
+    RhiBuffer   flower_vbuf, flower_ibuf;   /* the bloom (item 7) */
     MeadowPatch meadow[32];
     int         meadow_count;
 
@@ -2210,11 +2215,40 @@ static float meadow_rnd(sol_u32 *rng) {
     return (float)((*rng >> 8) & 0xFFFFu) / 65535.0f;
 }
 
+/* flowers cluster in PATCHES (item 7): a per-cell hash over a coarse
+   grid — a cell is "flowery" or not, so blooms gather rather than
+   sprinkle. The lane keeps it off the grass scatter's rng stream. */
+static float flower_patch(sol_u32 seed, float lx, float lz) {
+    int     cx = (int)floorf(lx / 5.0f), cz = (int)floorf(lz / 5.0f);
+    sol_u32 h  = seed * 374761393u + 1u;
+    h ^= (sol_u32)cx * 668265263u; h ^= h >> 15; h *= 2246822519u;
+    h ^= (sol_u32)cz * 3266489917u; h ^= h >> 13; h *= 374761393u;
+    h ^= h >> 16;
+    return (float)(h & 0xFFFFu) / 65535.0f;
+}
+
+/* a sparse bright palette, picked per bloom (item 7) */
+static void flower_color(sol_u32 *rng, float *r, float *g, float *b) {
+    static const float PAL[6][3] = {   /* vivid but <=1: no bloom */
+        { 0.92f, 0.18f, 0.14f },   /* red     */
+        { 0.96f, 0.86f, 0.20f },   /* yellow  */
+        { 0.95f, 0.93f, 0.92f },   /* white   */
+        { 0.58f, 0.22f, 0.88f },   /* violet  */
+        { 0.96f, 0.52f, 0.14f },   /* orange  */
+        { 0.90f, 0.40f, 0.66f }    /* pink    */
+    };
+    int i = (int)(meadow_rnd(rng) * 6.0f);
+    if (i > 5) i = 5;
+    *r = PAL[i][0]; *g = PAL[i][1]; *b = PAL[i][2];
+}
+
 static void meadow_rebuild(AppState *st) {
     sol_u32 i;
     int     p, total = 0;
-    for (p = 0; p < st->meadow_count; p++)
+    for (p = 0; p < st->meadow_count; p++) {
         rhi_destroy_buffer(st->meadow[p].data);
+        if (st->meadow[p].flower_count) rhi_destroy_buffer(st->meadow[p].flowers);
+    }
     st->meadow_count = 0;
     for (i = 0; i < st->scene.count; i++) {
         SceneObject *o = &st->scene.objects[i];
@@ -2273,13 +2307,56 @@ static void meadow_rebuild(AppState *st) {
                              (size_t)placed * 8 * sizeof(float));
             mp->count  = placed;
             mp->island = o->handle;
+            mp->flower_count = 0;
+            {   /* the flowers (item 7): a sparser scatter, gathered in
+                   patches, bright per-bloom tints — the meadow grown up */
+                sol_u32 fseed = (sol_u32)mesh_ref_param("terrain",
+                                    o->mesh_params, o->mesh_param_count,
+                                    "seed") * 2654435761u + 101u;
+                int     ftarget = (int)(w * d * 0.5f), fk, fn = 0;
+                float  *fbuf;
+                if (ftarget > MEADOW_MAX_TUFTS) ftarget = MEADOW_MAX_TUFTS;
+                fbuf = (float *)malloc((size_t)(ftarget > 0 ? ftarget : 1)
+                                       * 8 * sizeof(float));
+                for (fk = 0; fbuf && fk < ftarget; fk++) {
+                    float lx, lz, h, sx, sz, slope, cr, cg, cb;
+                    vec3  wp;
+                    lx = (meadow_rnd(&rng) - 0.5f) * (w - 1.5f);
+                    lz = (meadow_rnd(&rng) - 0.5f) * (d - 1.5f);
+                    if (flower_patch(fseed, lx, lz) < 0.62f) continue; /* patchy */
+                    h  = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz);
+                    sx = terrain_height(o->mesh_params, o->mesh_param_count, lx + 0.5f, lz);
+                    sz = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz + 0.5f);
+                    slope = sqrtf((sx-h)*(sx-h) + (sz-h)*(sz-h)) * 2.0f;
+                    if (slope > 0.40f) continue;
+                    if (amp > 0.0f && h / amp > 0.70f) continue;
+                    wp = mat4_mul_point(world, vec3_make(lx, h, lz));
+                    flower_color(&rng, &cr, &cg, &cb);
+                    fbuf[fn * 8 + 0] = wp.x;
+                    fbuf[fn * 8 + 1] = wp.y;
+                    fbuf[fn * 8 + 2] = wp.z;
+                    fbuf[fn * 8 + 3] = 0.14f + 0.10f * meadow_rnd(&rng);
+                    fbuf[fn * 8 + 4] = cr;
+                    fbuf[fn * 8 + 5] = cg;
+                    fbuf[fn * 8 + 6] = cb;
+                    fbuf[fn * 8 + 7] = 1.0f;
+                    fn++;
+                }
+                if (fbuf && fn > 0) {
+                    mp->flowers = rhi_create_buffer(RHI_BUFFER_VERTEX, fbuf,
+                                      (size_t)fn * 8 * sizeof(float));
+                    mp->flower_count = fn;
+                }
+                free(fbuf);
+            }
             st->meadow_count++;
             total += placed;
         }
         free(buf);
     }
     if (st->meadow_count > 0)
-        printf("the meadow: %d island(s), %d tufts\n", st->meadow_count, total);
+        printf("the meadow: %d island(s), %d tufts + flowers\n",
+               st->meadow_count, total);
 }
 
 /* The instanced ornament (P6 item 10): every balustrade's balusters as
@@ -3368,12 +3445,14 @@ static void texgen_revoice_visit(const char *key, void *payload, void *user) {
    jitter does the rest. */
 typedef struct { int species; float scale; float seed; float density; }
         ForestVariant;
+#define FOREST_TREE_VARIANTS 5    /* the first 5 are trees; index 5 = shrub */
 static const ForestVariant FOREST_VARIANTS[FOREST_VARIANT_COUNT] = {
     { FLORA_OAK,     1.00f, 11.0f, 0.75f },
     { FLORA_OAK,     0.78f, 23.0f, 0.70f },
     { FLORA_BIRCH,   0.95f, 31.0f, 0.60f },
     { FLORA_PINE,    1.10f, 41.0f, 0.65f },
-    { FLORA_CYPRESS, 0.85f, 53.0f, 0.80f }
+    { FLORA_CYPRESS, 0.85f, 53.0f, 0.80f },
+    { FLORA_SHRUB,   1.00f, 67.0f, 0.85f }   /* undergrowth (item 7) */
 };
 
 /* built-once variant caches: the wood mesh lives in AppState, the canopy
@@ -3509,6 +3588,41 @@ static float forest_rnd(sol_u32 *rng) {
     return (float)((*rng >> 8) & 0xFFFFu) / 65535.0f;
 }
 
+/* place one plant (a tree or a shrub) of variant v at (lx,h,lz): one
+   wood instance + its cached canopy clusters, transformed. The wood and
+   canopy accumulators are the caller's per-island arrays. */
+static void forest_place(int v, float lx, float lz, float h, float yaw,
+                         float sc, float *wood[], int wn[],
+                         float *can[], int cn[]) {
+    int   lk = flora_leaf_kind(FOREST_VARIANTS[v].species)
+                   == FLORA_LEAF_CONIFER ? 1 : 0;
+    float c = cosf(yaw), s = sinf(yaw);
+    int   j;
+    wood[v][wn[v] * 8 + 0] = lx;
+    wood[v][wn[v] * 8 + 1] = h;
+    wood[v][wn[v] * 8 + 2] = lz;
+    wood[v][wn[v] * 8 + 3] = yaw;
+    wood[v][wn[v] * 8 + 4] = sc;
+    wood[v][wn[v] * 8 + 5] = sc;
+    wood[v][wn[v] * 8 + 6] = 0.0f;
+    wood[v][wn[v] * 8 + 7] = 0.0f;       /* wood doesn't sway */
+    wn[v]++;
+    for (j = 0; j < g_var_slot_count[v] && cn[lk] < FOREST_CANOPY_CAP; j++) {
+        FloraLeaf *sl = &g_var_slots[v][j];
+        float spx = sc * sl->pos.x, spy = sc * sl->pos.y, spz = sc * sl->pos.z;
+        int   ci = cn[lk];
+        can[lk][ci * 8 + 0] = lx + (c * spx + s * spz);
+        can[lk][ci * 8 + 1] = h + spy;
+        can[lk][ci * 8 + 2] = lz + (-s * spx + c * spz);
+        can[lk][ci * 8 + 3] = yaw + sl->yaw;
+        can[lk][ci * 8 + 4] = sc * sl->scale;
+        can[lk][ci * 8 + 5] = sc * sl->scale;
+        can[lk][ci * 8 + 6] = sl->phase;
+        can[lk][ci * 8 + 7] = FOREST_LEAF_SWAY;
+        cn[lk]++;
+    }
+}
+
 static void forest_rebuild(AppState *st) {
     sol_u32 i;
     int     p, v, total = 0;
@@ -3568,58 +3682,76 @@ static void forest_rebuild(AppState *st) {
             continue;
         }
 
-        placed = 0;
-        for (darts = 0; darts < target * 6 && placed < target; darts++) {
-            float lx, lz, h, sx, sz, slope, yaw, sc, c, s;
-            int   lk, j;
-            lx = (forest_rnd(&rng) - 0.5f) * (w - 2.0f);
-            lz = (forest_rnd(&rng) - 0.5f) * (d - 2.0f);
-            h  = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz);
-            sx = terrain_height(o->mesh_params, o->mesh_param_count, lx + 0.5f, lz);
-            sz = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz + 0.5f);
-            slope = sqrtf((sx - h) * (sx - h) + (sz - h) * (sz - h)) * 2.0f;
-            if (slope > 0.40f) continue;                  /* crag: bare */
-            if (amp > 0.0f && h / amp > 0.74f) continue;  /* peaks: bare */
-            if (anchor) {   /* keep clear of a standing church; the band
-                               shrinks as it falls — the wood reclaims */
-                vec3  wp = mat4_mul_point(world, vec3_make(lx, h, lz));
-                vec3  al = scene_world_to_local(&st->scene, anchor, wp);
-                float margin = FOREST_FOOTPRINT - ruin * FOREST_RECLAIM;
-                if (church_occupies(&cp, al.x, al.z, margin)) continue;
+        {   /* TWO-PHASE SCATTER (item 7): trees first, then shrubs reading
+               the trees — undergrowth shelters under the canopy (plan-as-
+               author chained, one pass feeding the next) */
+            float tree_xz[FOREST_MAX_TREES * 2];
+            int   ntree = 0, stgt, sdarts, splaced;
+
+            placed = 0;
+            for (darts = 0; darts < target * 6 && placed < target; darts++) {
+                float lx, lz, h, sx, sz, slope, yaw, sc;
+                lx = (forest_rnd(&rng) - 0.5f) * (w - 2.0f);
+                lz = (forest_rnd(&rng) - 0.5f) * (d - 2.0f);
+                h  = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz);
+                sx = terrain_height(o->mesh_params, o->mesh_param_count, lx + 0.5f, lz);
+                sz = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz + 0.5f);
+                slope = sqrtf((sx - h) * (sx - h) + (sz - h) * (sz - h)) * 2.0f;
+                if (slope > 0.40f) continue;                  /* crag: bare */
+                if (amp > 0.0f && h / amp > 0.74f) continue;  /* peaks: bare */
+                if (anchor) {   /* keep clear of a standing church; the band
+                                   shrinks as it falls — the wood reclaims */
+                    vec3  wp = mat4_mul_point(world, vec3_make(lx, h, lz));
+                    vec3  al = scene_world_to_local(&st->scene, anchor, wp);
+                    float margin = FOREST_FOOTPRINT - ruin * FOREST_RECLAIM;
+                    if (church_occupies(&cp, al.x, al.z, margin)) continue;
+                }
+                v   = (int)(forest_rnd(&rng) * (float)FOREST_TREE_VARIANTS);
+                if (v >= FOREST_TREE_VARIANTS) v = FOREST_TREE_VARIANTS - 1;
+                yaw = forest_rnd(&rng) * 6.2831853f;
+                sc  = FOREST_VARIANTS[v].scale * (0.82f + 0.36f * forest_rnd(&rng));
+                forest_place(v, lx, lz, h, yaw, sc, wood, wn, can, cn);
+                tree_xz[ntree * 2 + 0] = lx;
+                tree_xz[ntree * 2 + 1] = lz;
+                ntree++;
+                placed++;
             }
-            v   = (int)(forest_rnd(&rng) * (float)FOREST_VARIANT_COUNT);
-            if (v >= FOREST_VARIANT_COUNT) v = FOREST_VARIANT_COUNT - 1;
-            yaw = forest_rnd(&rng) * 6.2831853f;
-            sc  = FOREST_VARIANTS[v].scale * (0.82f + 0.36f * forest_rnd(&rng));
-            /* the wood placement */
-            wood[v][wn[v] * 8 + 0] = lx;
-            wood[v][wn[v] * 8 + 1] = h;
-            wood[v][wn[v] * 8 + 2] = lz;
-            wood[v][wn[v] * 8 + 3] = yaw;
-            wood[v][wn[v] * 8 + 4] = sc;
-            wood[v][wn[v] * 8 + 5] = sc;
-            wood[v][wn[v] * 8 + 6] = 0.0f;
-            wood[v][wn[v] * 8 + 7] = 0.0f;   /* trunks don't sway */
-            wn[v]++;
-            /* its canopy: the variant's cached slots, placed */
-            lk = flora_leaf_kind(FOREST_VARIANTS[v].species)
-                     == FLORA_LEAF_CONIFER ? 1 : 0;
-            c = cosf(yaw); s = sinf(yaw);
-            for (j = 0; j < g_var_slot_count[v] && cn[lk] < FOREST_CANOPY_CAP; j++) {
-                FloraLeaf *sl = &g_var_slots[v][j];
-                float spx = sc * sl->pos.x, spy = sc * sl->pos.y, spz = sc * sl->pos.z;
-                int   ci = cn[lk];
-                can[lk][ci * 8 + 0] = lx + (c * spx + s * spz);
-                can[lk][ci * 8 + 1] = h + spy;
-                can[lk][ci * 8 + 2] = lz + (-s * spx + c * spz);
-                can[lk][ci * 8 + 3] = yaw + sl->yaw;
-                can[lk][ci * 8 + 4] = sc * sl->scale;
-                can[lk][ci * 8 + 5] = sc * sl->scale;
-                can[lk][ci * 8 + 6] = sl->phase;
-                can[lk][ci * 8 + 7] = FOREST_LEAF_SWAY;
-                cn[lk]++;
+
+            /* phase 2: shrubs, biased UNDER the canopy — accept near a
+               tree, rarely in the open (woodland understory) */
+            stgt = (int)((float)placed * 1.6f);
+            if (stgt > target) stgt = target;
+            splaced = 0;
+            for (sdarts = 0; sdarts < stgt * 8 && splaced < stgt; sdarts++) {
+                float lx, lz, h, sx, sz, slope, yaw, sc, near2 = 1e30f;
+                int   ti;
+                lx = (forest_rnd(&rng) - 0.5f) * (w - 2.0f);
+                lz = (forest_rnd(&rng) - 0.5f) * (d - 2.0f);
+                h  = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz);
+                sx = terrain_height(o->mesh_params, o->mesh_param_count, lx + 0.5f, lz);
+                sz = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz + 0.5f);
+                slope = sqrtf((sx - h) * (sx - h) + (sz - h) * (sz - h)) * 2.0f;
+                if (slope > 0.45f) continue;
+                if (amp > 0.0f && h / amp > 0.78f) continue;
+                if (anchor) {
+                    vec3  wp = mat4_mul_point(world, vec3_make(lx, h, lz));
+                    vec3  al = scene_world_to_local(&st->scene, anchor, wp);
+                    float margin = FOREST_FOOTPRINT - ruin * FOREST_RECLAIM;
+                    if (church_occupies(&cp, al.x, al.z, margin)) continue;
+                }
+                for (ti = 0; ti < ntree; ti++) {
+                    float ddx = lx - tree_xz[ti * 2], ddz = lz - tree_xz[ti * 2 + 1];
+                    float d2 = ddx * ddx + ddz * ddz;
+                    if (d2 < near2) near2 = d2;
+                }
+                /* under a crown (< 3.2 m) accept; else a sparse few */
+                if (near2 > 3.2f * 3.2f && forest_rnd(&rng) > 0.18f) continue;
+                yaw = forest_rnd(&rng) * 6.2831853f;
+                sc  = FOREST_VARIANTS[5].scale * (0.7f + 0.5f * forest_rnd(&rng));
+                forest_place(5, lx, lz, h, yaw, sc, wood, wn, can, cn);
+                splaced++;
             }
-            placed++;
+            placed += splaced;
         }
 
         fp = &st->forest[st->forest_count];
@@ -6773,6 +6905,19 @@ static int init_scene(AppState *state) {
             state->meadow_pipeline = rhi_create_pipeline(&mdesc);
             state->meadow_vbuf = rhi_create_buffer(RHI_BUFFER_VERTEX, TUFT, sizeof TUFT);
             state->meadow_ibuf = rhi_create_buffer(RHI_BUFFER_INDEX,  TIDX, sizeof TIDX);
+            {   /* the bloom (item 7): a short tuft splayed wider at the
+                   top — petals. Same layout/shader as grass; the bright
+                   tint comes from the per-instance color. */
+                static const float BLOOM[24] = {
+                    -0.12f, 0.0f, 0.0f,    0.12f, 0.0f, 0.0f,
+                     0.32f, 0.7f, 0.0f,   -0.32f, 0.7f, 0.0f,
+                     0.0f, 0.0f, -0.12f,   0.0f, 0.0f, 0.12f,
+                     0.0f, 0.7f,  0.32f,   0.0f, 0.7f, -0.32f
+                };
+                static const sol_u32 BIDX[12] = { 0,1,2, 0,2,3, 4,5,6, 4,6,7 };
+                state->flower_vbuf = rhi_create_buffer(RHI_BUFFER_VERTEX, BLOOM, sizeof BLOOM);
+                state->flower_ibuf = rhi_create_buffer(RHI_BUFFER_INDEX,  BIDX, sizeof BIDX);
+            }
         }
     }
 
@@ -7527,6 +7672,18 @@ static void render(AppState *state) {
             if (vis && !vis[state->meadow[mp].island]) continue;
             rhi_bind_instance_buffer(state->meadow[mp].data);
             rhi_draw_indexed_instanced(0, 12, state->meadow[mp].count);
+        }
+        /* the flowers (item 7): the bloom mesh, same pipeline, one more
+           draw per island where blooms gathered */
+        if (state->flower_vbuf.id) {
+            rhi_bind_vertex_buffer(state->flower_vbuf);
+            rhi_bind_index_buffer(state->flower_ibuf);
+            for (mp = 0; mp < state->meadow_count; mp++) {
+                if (state->meadow[mp].flower_count == 0) continue;
+                if (vis && !vis[state->meadow[mp].island]) continue;
+                rhi_bind_instance_buffer(state->meadow[mp].flowers);
+                rhi_draw_indexed_instanced(0, 12, state->meadow[mp].flower_count);
+            }
         }
     }
 

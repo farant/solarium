@@ -803,6 +803,9 @@ static void emit_birch(MeshBuilder *b, const float *p) {
 static void emit_cypress(MeshBuilder *b, const float *p) {
     flora_tree_wood(b, FLORA_CYPRESS, p, 10);
 }
+static void emit_shrub(MeshBuilder *b, const float *p) {
+    flora_tree_wood(b, FLORA_SHRUB, p, 10);
+}
 static void emit_boulder(MeshBuilder *b, const float *p) {
     rock_boulder(b, p[0], (unsigned)(p[1] + 0.5f), p[2]);
 }
@@ -903,6 +906,12 @@ static const MeshRefEntry REGISTRY[] = {
                        "splits", "spread", "droop", "leaf_size", "leaf_density" },
       { 0.0f, 1.0f, 7.0f, 0.20f, 0.90f, 5.0f, 24.0f, -0.55f, 0.35f, 0.9f },
       emit_cypress },
+    /* the shrub (P7 item 7): a trunk-zero species — the §1.4 proof,
+       placeable as a hero bush and scattered as undergrowth */
+    { "shrub", 10, { "seed", "age", "height", "girth", "apical",
+                     "splits", "spread", "droop", "leaf_size", "leaf_density" },
+      { 0.0f, 1.0f, 1.8f, 0.06f, 0.05f, 4.0f, 55.0f, 0.10f, 0.30f, 0.85f },
+      emit_shrub },
     /* the island's own stone (P7 item 6): an fBm-displaced octahedron;
        flat squashes it to a standable table-rock */
     { "boulder", 3, { "size", "seed", "flat" },

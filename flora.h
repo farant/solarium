@@ -19,7 +19,10 @@
 
 /* species are PRESETS over the one schema (the synth lesson, fourth
    verse): a shrub is a species whose trunk knobs shrink, not new code */
-enum { FLORA_OAK = 0, FLORA_PINE, FLORA_BIRCH, FLORA_CYPRESS,
+/* SHRUB (P7 item 7) is the schema's proof of §1.4: a bush is a species
+   whose trunk knob shrinks (apical ~0 = no leader, it forks from the
+   base), not new machinery — the plaster lesson at organism scale. */
+enum { FLORA_OAK = 0, FLORA_PINE, FLORA_BIRCH, FLORA_CYPRESS, FLORA_SHRUB,
        FLORA_SPECIES_COUNT };
 
 /* lanes — APPEND-ONLY (the gothic law). Keys are (node_id, ordinal):
