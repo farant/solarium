@@ -1997,6 +1997,7 @@ typedef struct {
     sol_u32     current_terrain;   /* plot underfoot; 0 = none (HUD naming) */
     sol_bool    h_was_down;        /* edge-detect mint-island (H) */
     sol_bool    o_was_down;        /* edge-detect mint-lantern (O, P4 item 5) */
+    sol_bool    q_was_down;        /* edge-detect mint-pond (Q, P7 item 8) */
     /* the floor-plan overlay (P6 item 3): J toggles; the island underfoot
        is the plot, so every island shows its destined church */
     sol_bool    j_was_down;
@@ -5976,6 +5977,51 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             printf("a lantern is lit — drag it; the light goes along\n");
         }
         st->o_was_down = o_now;
+    }
+
+    /* Q mints a POND (P7 item 8): a disc of water dropped ahead, its
+       surface settled to the HOLLOW the ground makes there — the spec's
+       "the mint samples terrain_height minima." Flat ground gives a
+       shallow puddle; a dip gives a real pond. */
+    {
+        sol_bool q_now = glfwGetKey(w, GLFW_KEY_Q) == GLFW_PRESS;
+        if (q_now && !st->q_was_down) {
+            Mesh    empty;
+            vec3    f, ctr;
+            float   r = 5.0f, lowest, params[3];
+            int     a;
+            sol_u32 h;
+            f = camera_forward(&st->camera);
+            f.y = 0.0f;
+            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+            f   = vec3_normalize(f);
+            ctr = vec3_add(st->camera.pos, vec3_scale(f, r + 2.0f));
+            /* find the hollow: sample the ground at the center + a ring,
+               the surface settles a little above the lowest point */
+            lowest = mint_ground(st, ctr);
+            for (a = 0; a < 8; a++) {
+                float ang = (float)a / 8.0f * 6.2831853f;
+                vec3  s = ctr;
+                float g;
+                s.x += cosf(ang) * r * 0.7f;
+                s.z += sinf(ang) * r * 0.7f;
+                g = mint_ground(st, s);
+                if (g < lowest) lowest = g;
+            }
+            ctr.y = lowest + 0.25f;          /* the water surface */
+            memset(&empty, 0, sizeof empty);
+            h = scene_add(&st->scene, 0, empty, ctr, quat_identity(),
+                          vec3_make(1.0f, 1.0f, 1.0f));
+            scene_mesh_ref_set(&st->scene, h, "pond");
+            params[0] = r; params[1] = 2.0f; params[2] = 7.0f;
+            scene_mesh_params_set(&st->scene, h, params, 3);
+            scene_meta_set(&st->scene, h, "name", "pond");
+            scene_resolve_meshes(&st->scene);
+            st->selected_handle = h;
+            scene_save(&st->scene, "scene.stml");
+            printf("a pond fills the hollow (surface %.2f)\n", ctr.y);
+        }
+        st->q_was_down = q_now;
     }
 
     /* E mints a DUST EMITTER (P4 item 7): a small dim marker block whose
