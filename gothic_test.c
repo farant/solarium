@@ -541,6 +541,32 @@ static void test_plan(void) {
         church_plan(&p, (const float *)0, 0);   /* all defaults */
         if (p.nbays < 2) { fail("plan: default church too short"); return; }
     }
+    {   /* church_occupies (item 5): the center is inside, a point well
+           clear is outside, and a negative margin SHRINKS the footprint
+           (the ruin reclaim) — monotone in margin */
+        float params[8] = { 18, 30, 7, 2, 0, 1, 1, 0 };
+        ChurchPlan p;
+        float cx;
+        church_plan(&p, params, 8);
+        cx = 0.5f * (p.west_x + p.east_x);
+        if (!church_occupies(&p, cx, 0.0f, 0.0f))
+            fail("occupies: the nave center must be inside");
+        if (church_occupies(&p, cx, 0.0f, -1000.0f))
+            fail("occupies: a huge negative margin must clear everything");
+        if (church_occupies(&p, p.east_x + 50.0f, 0.0f, 0.0f))
+            fail("occupies: a point 50m east must be outside");
+        {   /* monotone: a point in at margin 0 may leave as margin drops,
+               but never the reverse */
+            float lz = 0.5f * p.nave_w + 0.2f, m;
+            int   was_in = 1;
+            for (m = 2.0f; m >= -3.0f; m -= 0.5f) {
+                int in = church_occupies(&p, cx, lz, m);
+                if (in && !was_in)
+                    { fail("occupies: not monotone in margin"); break; }
+                was_in = in;
+            }
+        }
+    }
 }
 
 /* ---- 12: item 4 — the stone shell ---- */

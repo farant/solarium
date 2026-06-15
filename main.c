@@ -61,6 +61,22 @@ typedef struct {
     Material  material;   /* used when kind != ORN_BALUSTER */
 } OrnamentPatch;
 
+/* the FIELD forest (P7 item 5): the meadow law promoted to whole trees.
+   Derived per island from its seed; drawn through the ornament PBR
+   pipeline — each variant's WOOD instanced across its placements, every
+   tree's CANOPY clusters merged per leaf-kind. ~6 draws for a wood. A
+   forest is not scene objects; it is shared variant meshes + per-island
+   instance buffers, the meadow at organism scale. */
+#define FOREST_VARIANT_COUNT 5
+typedef struct {
+    sol_u32   island;
+    RhiBuffer wood[FOREST_VARIANT_COUNT];
+    int       wood_count[FOREST_VARIANT_COUNT];
+    RhiBuffer canopy[2];        /* [0] = broadleaf, [1] = conifer */
+    int       canopy_count[2];
+    Material  wood_mat[FOREST_VARIANT_COUNT];   /* bark per variant */
+} ForestPatch;
+
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
 
@@ -1747,6 +1763,12 @@ typedef struct {
     OrnamentPatch ornament[128];
     int           ornament_count;
     float         ornament_fp;     /* the scene fingerprint last built */
+
+    /* the FIELD forest (P7 item 5): per-island woods on the ornament
+       pipeline; the variant wood meshes are shared (built once) */
+    Mesh          forest_wood[FOREST_VARIANT_COUNT];
+    ForestPatch   forest[32];
+    int           forest_count;
     /* particles (P4 item 7): the pool is VIEW STATE (the reader-rig
        doctrine) — emitters persist as components, the weather never does.
        One shared unit quad, one instance buffer re-uploaded per frame,
@@ -3326,6 +3348,266 @@ static void texgen_revoice_visit(const char *key, void *payload, void *user) {
     free(ab); free(nb); free(ob);
 }
 
+/* ================== the FIELD forest (P7 item 5) ================== */
+
+#define FOREST_MAX_TREES   48
+#define FOREST_PER_M2      0.018f
+#define FOREST_VAR_SLOTS   512        /* canopy clusters cached per variant */
+#define FOREST_CANOPY_CAP  8192       /* leaf clusters per island per kind  */
+#define FOREST_FOOTPRINT   2.5f       /* clear band around a whole church   */
+#define FOREST_RECLAIM     6.0f       /* how far ruin pulls the band in     */
+#define FOREST_LEAF_SWAY   0.10f
+
+/* a variant: a species at a size, with its OWN seed (distinct trees that
+   still SHARE a mesh — instancing needs that). Per-placement yaw/scale
+   jitter does the rest. */
+typedef struct { int species; float scale; float seed; float density; }
+        ForestVariant;
+static const ForestVariant FOREST_VARIANTS[FOREST_VARIANT_COUNT] = {
+    { FLORA_OAK,     1.00f, 11.0f, 0.75f },
+    { FLORA_OAK,     0.78f, 23.0f, 0.70f },
+    { FLORA_BIRCH,   0.95f, 31.0f, 0.60f },
+    { FLORA_PINE,    1.10f, 41.0f, 0.65f },
+    { FLORA_CYPRESS, 0.85f, 53.0f, 0.80f }
+};
+
+/* built-once variant caches: the wood mesh lives in AppState, the canopy
+   slot layout + the shared bark here (file-static, the mint-rng idiom) */
+static FloraLeaf g_var_slots[FOREST_VARIANT_COUNT][FOREST_VAR_SLOTS];
+static int       g_var_slot_count[FOREST_VARIANT_COUNT];
+static RhiTexture g_bark_albedo, g_bark_normal, g_bark_orm;
+static int       g_forest_built = 0;
+
+/* the variant's 10-param prefix: silhouette defaults at the variant's
+   seed/size, leaf_density from the variant */
+static void forest_variant_params(int v, float *p) {
+    const float *defs;
+    int k;
+    flora_schema(FOREST_VARIANTS[v].species,
+                 (const char *const **)0, &defs);
+    for (k = 0; k < 10; k++) p[k] = defs[k];
+    p[0] = FOREST_VARIANTS[v].seed;
+    p[2] = defs[2] * FOREST_VARIANTS[v].scale;   /* height by the size knob */
+    p[9] = FOREST_VARIANTS[v].density;
+}
+
+/* build the wood mesh + cache the canopy slots for every variant, and
+   synthesize the one bark texture every forest trunk shares. Once. */
+static void forest_build_variants(AppState *st) {
+    int v;
+    if (g_forest_built) return;
+    for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+        MeshBuilder mb;
+        float       p[10];
+        forest_variant_params(v, p);
+        mb_init(&mb);
+        flora_tree_wood(&mb, FOREST_VARIANTS[v].species, p, 10);
+        st->forest_wood[v] = mesh_from_builder(&mb);
+        mb_free(&mb);
+        g_var_slot_count[v] = flora_canopy(FOREST_VARIANTS[v].species,
+                                           p, 10, g_var_slots[v],
+                                           FOREST_VAR_SLOTS);
+    }
+    {   /* one bark set for the whole wood (a hero tree near you wears its
+           own; the forest is backdrop — one texture is plenty) */
+        float bk[TEXGEN_PARAMS];
+        const float *bd;
+        int k;
+        texgen_schema(TEXGEN_BARK, (const char *const **)0, &bd);
+        for (k = 0; k < TEXGEN_PARAMS; k++) bk[k] = bd[k];
+        texgen_mint(TEXGEN_BARK, bk, &g_bark_albedo, &g_bark_normal,
+                    &g_bark_orm);
+    }
+    g_forest_built = 1;
+}
+
+/* the forest's bark material (shared maps; white base so they show) */
+static Material forest_bark_material(void) {
+    Material m = material_default();
+    m.base_color = vec3_make(1.0f, 1.0f, 1.0f);
+    m.roughness  = 1.0f;
+    m.metallic   = 1.0f;
+    m.albedo_tex = g_bark_albedo;
+    m.normal_tex = g_bark_normal;
+    m.mr_tex     = g_bark_orm;
+    m.ao_tex     = g_bark_orm;
+    return m;
+}
+
+/* find the church anchored on this island (the plot meta links them);
+   returns its handle + fills the plan, or 0 */
+static sol_u32 forest_island_church(AppState *st, const char *isl_nid,
+                                    ChurchPlan *cp) {
+    sol_u32 i;
+    if (!isl_nid) return 0;
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *a = &st->scene.objects[i];
+        const char  *rt, *pl;
+        sol_u32      c;
+        float        params[10];
+        int          j, last = -1;
+        rt = scene_meta_get(&st->scene, a->handle, "room_type");
+        pl = scene_meta_get(&st->scene, a->handle, "plot");
+        if (!rt || strcmp(rt, "church") != 0) continue;
+        if (!pl || strcmp(pl, isl_nid) != 0) continue;
+        /* a church anchor's params live on its stone child */
+        for (c = 0; c < st->scene.count; c++) {
+            SceneObject *ch = &st->scene.objects[c];
+            if (ch->parent != a->handle || !ch->mesh_ref) continue;
+            if (strcmp(ch->mesh_ref, "church_stone") != 0) continue;
+            for (j = 0; j < ch->mesh_param_count && j < 10; j++) {
+                params[j] = ch->mesh_params[j];
+                last = j;
+            }
+            church_plan(cp, params, last + 1);
+            return a->handle;
+        }
+    }
+    return 0;
+}
+
+static float forest_rnd(sol_u32 *rng) {
+    *rng = *rng * 1664525u + 1013904223u;
+    return (float)((*rng >> 8) & 0xFFFFu) / 65535.0f;
+}
+
+static void forest_rebuild(AppState *st) {
+    sol_u32 i;
+    int     p, v, total = 0;
+    if (!g_forest_built) return;
+    for (p = 0; p < st->forest_count; p++) {     /* free the old buffers */
+        for (v = 0; v < FOREST_VARIANT_COUNT; v++)
+            if (st->forest[p].wood_count[v])
+                rhi_destroy_buffer(st->forest[p].wood[v]);
+        if (st->forest[p].canopy_count[0]) rhi_destroy_buffer(st->forest[p].canopy[0]);
+        if (st->forest[p].canopy_count[1]) rhi_destroy_buffer(st->forest[p].canopy[1]);
+    }
+    st->forest_count = 0;
+
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        float        w, d, amp, ruin = 0.0f;
+        sol_u32      rng, anchor = 0;
+        mat4         world;
+        ChurchPlan   cp;
+        float       *wood[FOREST_VARIANT_COUNT];
+        float       *can[2];
+        int          wn[FOREST_VARIANT_COUNT], cn[2];
+        int          target, darts, placed, k, ok;
+        ForestPatch *fp;
+
+        if (st->forest_count >= (int)(sizeof st->forest / sizeof st->forest[0]))
+            break;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "terrain") != 0) continue;
+        w   = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "w");
+        d   = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "d");
+        amp = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "amp");
+        rng = (sol_u32)mesh_ref_param("terrain", o->mesh_params,
+                                      o->mesh_param_count, "seed")
+                  * 2246822519u + 3266489917u;
+        world  = scene_world_matrix(&st->scene, o);
+        anchor = forest_island_church(st, o->nid, &cp);
+        if (anchor) ruin = cp.ruin;
+
+        target = (int)(w * d * FOREST_PER_M2);
+        if (target > FOREST_MAX_TREES) target = FOREST_MAX_TREES;
+        if (target < 1) continue;
+
+        ok = 1;
+        for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+            wood[v] = (float *)malloc((size_t)target * 8 * sizeof(float));
+            wn[v] = 0;
+            if (!wood[v]) ok = 0;
+        }
+        can[0] = (float *)malloc((size_t)FOREST_CANOPY_CAP * 8 * sizeof(float));
+        can[1] = (float *)malloc((size_t)FOREST_CANOPY_CAP * 8 * sizeof(float));
+        cn[0] = cn[1] = 0;
+        if (!can[0] || !can[1]) ok = 0;
+        if (!ok) {
+            for (v = 0; v < FOREST_VARIANT_COUNT; v++) free(wood[v]);
+            free(can[0]); free(can[1]);
+            continue;
+        }
+
+        placed = 0;
+        for (darts = 0; darts < target * 6 && placed < target; darts++) {
+            float lx, lz, h, sx, sz, slope, yaw, sc, c, s;
+            int   lk, j;
+            lx = (forest_rnd(&rng) - 0.5f) * (w - 2.0f);
+            lz = (forest_rnd(&rng) - 0.5f) * (d - 2.0f);
+            h  = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz);
+            sx = terrain_height(o->mesh_params, o->mesh_param_count, lx + 0.5f, lz);
+            sz = terrain_height(o->mesh_params, o->mesh_param_count, lx, lz + 0.5f);
+            slope = sqrtf((sx - h) * (sx - h) + (sz - h) * (sz - h)) * 2.0f;
+            if (slope > 0.40f) continue;                  /* crag: bare */
+            if (amp > 0.0f && h / amp > 0.74f) continue;  /* peaks: bare */
+            if (anchor) {   /* keep clear of a standing church; the band
+                               shrinks as it falls — the wood reclaims */
+                vec3  wp = mat4_mul_point(world, vec3_make(lx, h, lz));
+                vec3  al = scene_world_to_local(&st->scene, anchor, wp);
+                float margin = FOREST_FOOTPRINT - ruin * FOREST_RECLAIM;
+                if (church_occupies(&cp, al.x, al.z, margin)) continue;
+            }
+            v   = (int)(forest_rnd(&rng) * (float)FOREST_VARIANT_COUNT);
+            if (v >= FOREST_VARIANT_COUNT) v = FOREST_VARIANT_COUNT - 1;
+            yaw = forest_rnd(&rng) * 6.2831853f;
+            sc  = FOREST_VARIANTS[v].scale * (0.82f + 0.36f * forest_rnd(&rng));
+            /* the wood placement */
+            wood[v][wn[v] * 8 + 0] = lx;
+            wood[v][wn[v] * 8 + 1] = h;
+            wood[v][wn[v] * 8 + 2] = lz;
+            wood[v][wn[v] * 8 + 3] = yaw;
+            wood[v][wn[v] * 8 + 4] = sc;
+            wood[v][wn[v] * 8 + 5] = sc;
+            wood[v][wn[v] * 8 + 6] = 0.0f;
+            wood[v][wn[v] * 8 + 7] = 0.0f;   /* trunks don't sway */
+            wn[v]++;
+            /* its canopy: the variant's cached slots, placed */
+            lk = flora_leaf_kind(FOREST_VARIANTS[v].species)
+                     == FLORA_LEAF_CONIFER ? 1 : 0;
+            c = cosf(yaw); s = sinf(yaw);
+            for (j = 0; j < g_var_slot_count[v] && cn[lk] < FOREST_CANOPY_CAP; j++) {
+                FloraLeaf *sl = &g_var_slots[v][j];
+                float spx = sc * sl->pos.x, spy = sc * sl->pos.y, spz = sc * sl->pos.z;
+                int   ci = cn[lk];
+                can[lk][ci * 8 + 0] = lx + (c * spx + s * spz);
+                can[lk][ci * 8 + 1] = h + spy;
+                can[lk][ci * 8 + 2] = lz + (-s * spx + c * spz);
+                can[lk][ci * 8 + 3] = yaw + sl->yaw;
+                can[lk][ci * 8 + 4] = sc * sl->scale;
+                can[lk][ci * 8 + 5] = sc * sl->scale;
+                can[lk][ci * 8 + 6] = sl->phase;
+                can[lk][ci * 8 + 7] = FOREST_LEAF_SWAY;
+                cn[lk]++;
+            }
+            placed++;
+        }
+
+        fp = &st->forest[st->forest_count];
+        fp->island = o->handle;
+        for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+            fp->wood_count[v] = wn[v];
+            fp->wood_mat[v]   = forest_bark_material();
+            if (wn[v] > 0)
+                fp->wood[v] = rhi_create_buffer(RHI_BUFFER_VERTEX, wood[v],
+                                  (size_t)wn[v] * 8 * sizeof(float));
+            free(wood[v]);
+        }
+        for (k = 0; k < 2; k++) {
+            fp->canopy_count[k] = cn[k];
+            if (cn[k] > 0)
+                fp->canopy[k] = rhi_create_buffer(RHI_BUFFER_VERTEX, can[k],
+                                    (size_t)cn[k] * 8 * sizeof(float));
+            free(can[k]);
+        }
+        st->forest_count++;
+        total += placed;
+    }
+    if (st->forest_count > 0)
+        printf("the forest: %d island(s), %d trees\n",
+               st->forest_count, total);
+}
+
 /* ---- the watcher (P4 item 4 piece 3c): hot reload by mtime ----
    A small watch list polled every half second. Textures re-decode through
    rhi_update_texture — same handle, new pixels, nobody rebinds; a changed
@@ -4856,6 +5138,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
             scene_resolve_meshes(&st->scene);
             meadow_rebuild(st);                  /* a new island, new grass */
+            forest_rebuild(st);                  /* and its forest */
             st->selected_handle = h;
             scene_save(&st->scene, "scene.stml");
             printf("%s rises: %.0fx%.0fm, relief %.1fm, seed %d%s\n",
@@ -5300,6 +5583,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
             scene_resolve_meshes(&st->scene);
             collide_rebuild(&st->colliders, &st->scene);
+            forest_rebuild(st);                /* the hill grows its forest too */
             meadow_rebuild(st);                /* the hill grows its grass —
                                                   and through the roofless bays */
             scene_save(&st->scene, "scene.stml");
@@ -5946,6 +6230,7 @@ static sol_bool load_palace(AppState *st) {
     arrows_rebuild(st);              /* edges re-derive from the loaded cards */
     collide_rebuild(&st->colliders, &st->scene);  /* and so do the walls */
     meadow_rebuild(st);                           /* and the grass */
+    forest_rebuild(st);                           /* and the woods */
     apply_kind_materials(&st->scene);
     bind_runtime_handles(st);
     adopt_legacy_motion(st);         /* pre-component saves get their dance back */
@@ -6512,6 +6797,10 @@ static int init_scene(AppState *state) {
         }
     }
 
+    /* the forest's variant meshes + shared bark, built once (P7 item 5):
+       must exist before any forest_rebuild scatters them */
+    forest_build_variants(state);
+
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
@@ -6525,6 +6814,7 @@ static int init_scene(AppState *state) {
         populate_default_scene(state);
         collide_rebuild(&state->colliders, &state->scene);
         meadow_rebuild(state);
+        forest_rebuild(state);
         adopt_legacy_motion(state);   /* the default scene's movers, as data */
     }
 
@@ -6978,6 +7268,42 @@ static void render(AppState *state) {
                 rhi_draw_indexed_instanced(0, um->index_count, pt->count);
             }
         }
+        /* the FIELD forest casts too (P7 item 5): wood + canopy, gated by
+           the LIGHT's view volume — only trees near the camera, since the
+           shadow frustum is tight (SHADOW_FAR), so the cost is bounded */
+        if (state->ornament_shadow_pipeline.id && state->forest_count > 0) {
+            int fp, v, lk;
+            rhi_set_pipeline(state->ornament_shadow_pipeline);
+            rhi_set_uniform_mat4("uLightVP", lvp.m);
+            for (fp = 0; fp < state->forest_count; fp++) {
+                ForestPatch *f   = &state->forest[fp];
+                SceneObject *isl = scene_get(&state->scene, f->island);
+                mat4 model;
+                if (!isl) continue;
+                if (lvis && !lvis[f->island]) continue;
+                model = scene_world_matrix(&state->scene, isl);
+                rhi_set_uniform_mat4("uModel", model.m);
+                for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+                    Mesh *um = &state->forest_wood[v];
+                    if (f->wood_count[v] == 0 || um->index_count == 0) continue;
+                    rhi_bind_vertex_buffer(um->vbuffer);
+                    rhi_bind_index_buffer(um->ibuffer);
+                    rhi_bind_instance_buffer(f->wood[v]);
+                    rhi_draw_indexed_instanced(0, um->index_count,
+                                               f->wood_count[v]);
+                }
+                for (lk = 0; lk < 2; lk++) {
+                    Mesh *um = &state->orn_mesh[lk == 0 ? ORN_LEAF_BROAD
+                                                        : ORN_LEAF_CONIFER];
+                    if (f->canopy_count[lk] == 0 || um->index_count == 0) continue;
+                    rhi_bind_vertex_buffer(um->vbuffer);
+                    rhi_bind_index_buffer(um->ibuffer);
+                    rhi_bind_instance_buffer(f->canopy[lk]);
+                    rhi_draw_indexed_instanced(0, um->index_count,
+                                               f->canopy_count[lk]);
+                }
+            }
+        }
         rhi_end_pass();
     }
     rt1 = glfwGetTime();
@@ -7125,6 +7451,58 @@ static void render(AppState *state) {
             if (vis && !vis[state->meadow[mp].island]) continue;
             rhi_bind_instance_buffer(state->meadow[mp].data);
             rhi_draw_indexed_instanced(0, 12, state->meadow[mp].count);
+        }
+    }
+
+    /* the FIELD forest (P7 item 5): per island, each variant's wood in
+       one instanced draw + the canopy merged per leaf-kind — through the
+       ornament PBR pipeline, riding the island's visibility bit. uModel
+       = the island world, so a dragged island carries its wood. */
+    if (state->ornament_pipeline.id && state->forest_count > 0) {
+        int fp, v;
+        Material leafmat[2];
+        leafmat[0] = material_default();
+        leafmat[0].base_color = flora_leaf_color(FLORA_OAK);
+        leafmat[0].roughness  = 0.85f;
+        leafmat[1] = material_default();
+        leafmat[1].base_color = flora_leaf_color(FLORA_PINE);
+        leafmat[1].roughness  = 0.85f;
+        for (fp = 0; fp < state->forest_count; fp++) {
+            ForestPatch *f  = &state->forest[fp];
+            SceneObject *isl = scene_get(&state->scene, f->island);
+            mat4         model;
+            if (!isl) continue;
+            if (vis && !vis[f->island]) continue;
+            model = scene_world_matrix(&state->scene, isl);
+            for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+                Mesh *um = &state->forest_wood[v];
+                if (f->wood_count[v] == 0 || um->index_count == 0) continue;
+                bind_scene_uniforms(state, state->ornament_pipeline, model,
+                                    view, proj, eye, 0.0f, f->wood_mat[v]);
+                rhi_set_uniform_float("uTime", (float)glfwGetTime());
+                rhi_bind_vertex_buffer(um->vbuffer);
+                rhi_bind_instance_buffer(f->wood[v]);
+                rhi_bind_index_buffer(um->ibuffer);
+                rhi_draw_indexed_instanced(0, um->index_count, f->wood_count[v]);
+                state->draws_done++;
+            }
+            {   /* the canopy: broadleaf (mesh 1) then conifer (mesh 2) */
+                int lk;
+                for (lk = 0; lk < 2; lk++) {
+                    Mesh *um = &state->orn_mesh[lk == 0 ? ORN_LEAF_BROAD
+                                                        : ORN_LEAF_CONIFER];
+                    if (f->canopy_count[lk] == 0 || um->index_count == 0) continue;
+                    bind_scene_uniforms(state, state->ornament_pipeline, model,
+                                        view, proj, eye, 0.0f, leafmat[lk]);
+                    rhi_set_uniform_float("uTime", (float)glfwGetTime());
+                    rhi_bind_vertex_buffer(um->vbuffer);
+                    rhi_bind_instance_buffer(f->canopy[lk]);
+                    rhi_bind_index_buffer(um->ibuffer);
+                    rhi_draw_indexed_instanced(0, um->index_count,
+                                               f->canopy_count[lk]);
+                    state->draws_done++;
+                }
+            }
         }
     }
 

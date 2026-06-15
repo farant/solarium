@@ -207,6 +207,15 @@ int plan_apse_pier(const ChurchPlan *p, int k, float *out_x, float *out_z);
 enum { GOTHIC_BAY_NONE = 0, GOTHIC_BAY_NAVE, GOTHIC_BAY_AISLE };
 int plan_bay_kind(const ChurchPlan *p, int i, int lane);  /* lane 0/1/2 = S aisle/nave/N aisle */
 
+/* The footprint test (P7 item 5): is plan-frame (lx, lz) inside the
+   church's ground rectangle, grown by `margin`? The forest scatter
+   asks this to keep trees out of the nave — and a NEGATIVE margin lets
+   a ruin's footprint SHRINK toward its standing heart, so the wood
+   reclaims the fallen bays as ruin rises (the simple v1; the per-bay
+   survival query is the flagged refinement). 0 when fully reclaimed
+   (the shrunk rectangle inverted) or p is NULL. */
+int church_occupies(const ChurchPlan *p, float lx, float lz, float margin);
+
 /* openings by RULE, not by draw: aisle and clerestory bays get one
    window each (width 0.55 x the bay's clear span, sill at the string
    course); the west front gets the portal (i = 0) and the great window

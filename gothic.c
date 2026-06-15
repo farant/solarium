@@ -684,6 +684,17 @@ int plan_bay_kind(const ChurchPlan *p, int i, int lane) {
     return p->aisles ? GOTHIC_BAY_AISLE : GOTHIC_BAY_NONE;
 }
 
+int church_occupies(const ChurchPlan *p, float lx, float lz, float margin) {
+    float x0, x1, hw;
+    if (!p) return 0;
+    x0 = p->west_x - p->tower_d - margin;
+    x1 = p->east_x + p->apse_d  + margin;
+    hw = 0.5f * p->nave_w + (p->aisles ? p->aisle_w : 0.0f)
+       + p->margin + margin;
+    if (x1 <= x0 || hw <= 0.0f) return 0;   /* fully reclaimed */
+    return (lx >= x0 && lx <= x1 && lz >= -hw && lz <= hw) ? 1 : 0;
+}
+
 /* flatten-to-fit: if the default acuteness pushes the crown past the
    limit, re-solve via the level-crown formula; if even the SEMICIRCLE
    is too tall, drop the springing toward the sill, and narrow the
