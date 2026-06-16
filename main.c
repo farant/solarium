@@ -900,10 +900,19 @@ static const char *PARTICLE_FRAGMENT_SRC =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "struct VOut { float4 pos [[position]]; float2 uv; float4 color; };\n"
-    "fragment float4 fmain(VOut v [[stage_in]]) {\n"
+    "struct PU { float uNear; float uFar; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      constant PU &u [[buffer(0)]],\n"
+    "                      texture2d<float> uSceneDepth [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
     "    float f = max(1.0 - dot(v.uv, v.uv), 0.0);\n"
     "    f = f * f;\n"
-    "    return float4(v.color.rgb * (v.color.a * f), 1.0);\n"
+    "    float2 uv = v.pos.xy / float2(uSceneDepth.get_width(), uSceneDepth.get_height());\n"
+    "    float sd = uSceneDepth.sample(s0, uv).r;\n"          /* P8 item 4: soft fade near geometry */
+    "    float ls = (2.0*u.uNear*u.uFar)/(u.uFar+u.uNear-(2.0*sd-1.0)*(u.uFar-u.uNear));\n"
+    "    float lp = (2.0*u.uNear*u.uFar)/(u.uFar+u.uNear-(2.0*v.pos.z-1.0)*(u.uFar-u.uNear));\n"
+    "    float soft = clamp((ls - lp) / 0.5, 0.0, 1.0);\n"
+    "    return float4(v.color.rgb * (v.color.a * f * soft), 1.0);\n"
     "}\n";
 #else /* GLSL */
 static const char *PARTICLE_VERTEX_SRC =
@@ -928,11 +937,19 @@ static const char *PARTICLE_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vUV;\n"
     "in vec4 vColor;\n"
+    "uniform sampler2D uSceneDepth;\n"
+    "uniform float uNear;\n"
+    "uniform float uFar;\n"
     "out vec4 FragColor;\n"
     "void main() {\n"
     "    float f = max(1.0 - dot(vUV, vUV), 0.0);\n"
     "    f = f * f;\n"
-    "    FragColor = vec4(vColor.rgb * (vColor.a * f), 1.0);\n"
+    "    vec2 uv = gl_FragCoord.xy / vec2(textureSize(uSceneDepth, 0));\n"  /* P8 item 4: soft fade */
+    "    float sd = texture(uSceneDepth, uv).r;\n"
+    "    float ls = (2.0*uNear*uFar)/(uFar+uNear-(2.0*sd-1.0)*(uFar-uNear));\n"
+    "    float lp = (2.0*uNear*uFar)/(uFar+uNear-(2.0*gl_FragCoord.z-1.0)*(uFar-uNear));\n"
+    "    float soft = clamp((ls - lp) / 0.5, 0.0, 1.0);\n"
+    "    FragColor = vec4(vColor.rgb * (vColor.a * f * soft), 1.0);\n"
     "}\n";
 #endif /* SOL_RHI_METAL — the particles */
 
@@ -1169,6 +1186,31 @@ static const char *GODRAY_FRAGMENT_SRC =
     "    float phase = hg(dot(dir, uLightDir), 0.6);\n"        /* forward scatter toward the source */
     "    vec3 col = accum * phase * uLightColor * uGodrayIntensity;\n"
     "    FragColor = vec4(col, 1.0);\n"
+    "}\n";
+#endif
+
+/* --- soft particles (P8 item 4): a trivial depth copy. A particle pass can't
+   sample the depth attachment it draws into (a feedback loop), so we copy the
+   scene depth to a readable color texture first; the particle FS reads THIS
+   for its soft fade. Shares POST_VERTEX_SRC. --- */
+#ifdef SOL_RHI_METAL
+static const char *DEPTHCOPY_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      depth2d<float> uDepth [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    return float4(uDepth.sample(s0, v.uv));\n"
+    "}\n";
+#else
+static const char *DEPTHCOPY_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uDepth;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    FragColor = vec4(texture(uDepth, vUV).r);\n"
     "}\n";
 #endif
 
@@ -2043,6 +2085,10 @@ typedef struct {
     RhiRenderTarget godray_rt;
     int             godray_w, godray_h;
     RhiPipeline     godray_pipeline;
+    /* soft particles (P8 item 4): a depth copy lets the particle FS read the
+       scene depth without a feedback loop on the live depth attachment */
+    RhiRenderTarget depthcopy_rt;
+    RhiPipeline     copy_pipeline;
     /* the meadow (P4 item 3): per-island instanced grass — DERIVED data
        (the arrows pattern at landscape scale), rebuilt on load and mint,
        never serialized */
@@ -7306,6 +7352,16 @@ static int init_scene(AppState *state) {
         state->godray_pipeline = rhi_create_pipeline(&gr_desc);
     }
 
+    {   /* soft particles (P8 item 4): the depth-copy pass */
+        RhiPipelineDesc cp_desc = {0};
+        cp_desc.shader     = rhi_create_shader(POST_VERTEX_SRC, DEPTHCOPY_FRAGMENT_SRC);
+        cp_desc.attr_count = 0;
+        cp_desc.stride     = 0;
+        cp_desc.depth_test = SOL_FALSE;
+        cp_desc.blend      = SOL_FALSE;
+        state->copy_pipeline = rhi_create_pipeline(&cp_desc);
+    }
+
     /* the shadow map + its two pipelines (item 9b): a depth-only pass that reads
        just position, and a fullscreen inspector that shows the depth map. */
     {
@@ -7907,6 +7963,12 @@ static void ensure_render_target(AppState *state, int w, int h) {
         rhi_destroy_render_target(state->godray_rt);
     state->godray_rt = rhi_create_render_target(state->godray_w, state->godray_h,
                                                 RHI_TEX_RGBA16F);
+
+    /* soft particles (P8 item 4): a full-res copy of the scene depth — the
+       particle pass can't sample the depth it draws into, so it reads this */
+    if (state->depthcopy_rt.id != 0)
+        rhi_destroy_render_target(state->depthcopy_rt);
+    state->depthcopy_rt = rhi_create_render_target(w, h, RHI_TEX_RGBA16F);
 }
 
 /* fold a per-frame sample (seconds) into a readable ms readout. Fixed blend:
@@ -8623,6 +8685,19 @@ static void render(AppState *state) {
         }
     }
 
+    /* soft particles (P8 item 4): close the HDR pass so its depth is readable,
+       copy it, then re-open (CLEAR_NONE loads color+depth) for the particles —
+       they still hardware-occlude and still composite before bloom; they just
+       also sample the copy to fade as they near geometry. */
+    rhi_end_pass();
+    rhi_begin_pass(state->depthcopy_rt, RHI_CLEAR_COLOR, 0.0f, 0.0f, 0.0f, 1.0f);
+    rhi_set_pipeline(state->copy_pipeline);
+    rhi_bind_texture(rhi_render_target_depth_texture(state->hdr_rt), 0);
+    rhi_set_uniform_int("uDepth", 0);
+    rhi_draw(0, 3);
+    rhi_end_pass();
+    rhi_begin_pass(state->hdr_rt, RHI_CLEAR_NONE, 0.0f, 0.0f, 0.0f, 1.0f);
+
     {
         static float part_data[PARTICLE_CAP * PARTICLE_INST_FLOATS];
         int n = particles_fill(&state->particles, part_data, PARTICLE_CAP);
@@ -8631,6 +8706,10 @@ static void render(AppState *state) {
             rhi_set_pipeline(state->part_pipeline);
             rhi_set_uniform_mat4("uView", view.m);
             rhi_set_uniform_mat4("uProj", proj.m);
+            rhi_bind_texture(rhi_render_target_texture(state->depthcopy_rt), 0);
+            rhi_set_uniform_int("uSceneDepth", 0);
+            rhi_set_uniform_float("uNear", 0.1f);    /* must match camera_proj's near/far */
+            rhi_set_uniform_float("uFar", 100.0f);
             rhi_update_buffer(state->part_inst, part_data,
                               (size_t)n * PARTICLE_INST_FLOATS * sizeof(float));
             rhi_bind_vertex_buffer(state->part_vbuf);
