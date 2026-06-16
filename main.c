@@ -950,7 +950,7 @@ static const char *POST_FRAGMENT_SRC =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "struct VOut { float4 pos [[position]]; float2 uv; };\n"
-    "struct FU { float uBloomStrength; float uExposure; float4 uFog; };\n"
+    "struct FU { float uBloomStrength; float uExposure; float3 uFogColor; float uFogStrength; };\n"
     "static float3 aces(float3 x) {\n"            /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
     "}\n"
@@ -5495,6 +5495,69 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     to->material = m;
                 }
             }
+            /* the WILD ISLAND dressing (P7 item 10): a hero tree, a couple
+               of erratics, and a pond IF the island has a real hollow —
+               so a minted island feels inhabited without a church (the
+               forest, flowers, scree and wind grow themselves). Children
+               of the island, in its LOCAL frame. */
+            {
+                float lowest = 1e30f, lowx = 0.0f, lowz = 0.0f, rim = -1e30f;
+                int   gx, gz;
+#define WILD_PLANT(ref, lx, lz, prm, np, texkind, nm)                     \
+                do {                                                       \
+                    float wy_ = terrain_height(p, 5, (lx), (lz));          \
+                    sol_u32 w_ = scene_add(&st->scene, h, empty,           \
+                                  vec3_make((lx), wy_, (lz)),              \
+                                  quat_identity(), one);                   \
+                    scene_mesh_ref_set(&st->scene, w_, (ref));             \
+                    if ((np) > 0)                                          \
+                        scene_mesh_params_set(&st->scene, w_, (prm), (np));\
+                    scene_meta_set(&st->scene, w_, "name", (nm));          \
+                    {   SceneObject *wo_ = scene_get(&st->scene, w_);      \
+                        if (wo_) { Material wm_ = material_default();      \
+                            wm_.base_color = vec3_make(1.0f, 1.0f, 1.0f);  \
+                            wm_.roughness = 1.0f; wm_.metallic = 1.0f;     \
+                            wo_->material = wm_; } }                       \
+                    scene_tex_ref_set(&st->scene, w_, (texkind));          \
+                } while (0)
+                /* scan for the lowest spot (the hollow) and the rim */
+                for (gz = -3; gz <= 3; gz++)
+                    for (gx = -3; gx <= 3; gx++) {
+                        float sx = (float)gx / 3.0f * 0.4f * p[0];
+                        float sz = (float)gz / 3.0f * 0.4f * p[1];
+                        float gh = terrain_height(p, 5, sx, sz);
+                        if (gh < lowest) { lowest = gh; lowx = sx; lowz = sz; }
+                        if (gh > rim) rim = gh;
+                    }
+                {   /* a lone tree off-center, species by seed */
+                    static const char *sp4[4] = { "oak", "pine", "birch", "cypress" };
+                    float tp[3];
+                    tp[0] = p[4] + 17.0f; tp[1] = 1.1f; tp[2] = 7.0f;
+                    WILD_PLANT(sp4[(int)p[4] & 3], -0.18f * p[0], 0.16f * p[1],
+                               tp, 3, "bark", "the lone tree");
+                }
+                {   /* two erratics */
+                    float bp[3];
+                    bp[0] = 0.9f; bp[1] = p[4] + 3.0f; bp[2] = 0.0f;
+                    WILD_PLANT("boulder", 0.22f * p[0], -0.20f * p[1], bp, 3,
+                               "stone", "erratic");
+                    bp[0] = 0.6f; bp[1] = p[4] + 9.0f; bp[2] = 0.6f;
+                    WILD_PLANT("boulder", 0.30f * p[0], -0.10f * p[1], bp, 3,
+                               "stone", "erratic");
+                }
+                if (rim - lowest > 1.2f) {   /* a real dip → a pond */
+                    float pp[3];
+                    sol_u32 pondh = scene_add(&st->scene, h, empty,
+                                  vec3_make(lowx, lowest + 0.2f, lowz),
+                                  quat_identity(), one);
+                    scene_mesh_ref_set(&st->scene, pondh, "pond");
+                    pp[0] = 3.5f; pp[1] = 1.5f; pp[2] = p[4];
+                    scene_mesh_params_set(&st->scene, pondh, pp, 3);
+                    scene_meta_set(&st->scene, pondh, "name", "tarn");
+                }
+#undef WILD_PLANT
+            }
+
             scene_resolve_meshes(&st->scene);
             meadow_rebuild(st);                  /* a new island, new grass */
             forest_rebuild(st);                  /* and its forest */
@@ -5938,6 +6001,100 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                         }
                     }
                 }
+            }
+
+            /* the HERO planting (P7 item 10): the hand-placed pieces the
+               scatter can't give — the churchyard yew, an orchard pair,
+               the pond in the western hollow, a few erratics. The forest,
+               flowers, scree and wind grow themselves (items 5-9). */
+            {
+                SceneObject *isl = scene_get(&st->scene, island);
+                static const float FALL_LEAVES[24] = {
+                    3.0f, 5.0f,  0.0f, -0.30f, 0.0f,  1.6f, 0.3f, 1.6f,
+                    0.0f, 4.5f, 0.0f,  0.09f, 0.07f,
+                    0.55f, 0.35f, 0.10f, 1.0f,  0.35f, 0.18f, 0.06f, 0.0f,
+                    0.0f, -0.15f, 0.0f
+                };
+#define ABBEY_PLANT(ref, px, pz, prm, np, texkind, leaf, nm)              \
+                do {                                                       \
+                    float lx_, lz_, hgt_;                                  \
+                    sol_u32 t_;                                            \
+                    plan_to_local(&cp, (px), (pz), &lx_, &lz_);            \
+                    hgt_ = terrain_height(isl->mesh_params,                \
+                                          isl->mesh_param_count, lx_, lz_);\
+                    t_ = scene_add(&st->scene, anchor, empty,              \
+                                   vec3_make((px), hgt_ - datum, (pz)),    \
+                                   quat_identity(), one);                  \
+                    scene_mesh_ref_set(&st->scene, t_, (ref));             \
+                    if ((np) > 0)                                          \
+                        scene_mesh_params_set(&st->scene, t_, (prm), (np));\
+                    scene_meta_set(&st->scene, t_, "name", (nm));          \
+                    {   SceneObject *po_ = scene_get(&st->scene, t_);      \
+                        if (po_) { Material pm_ = material_default();      \
+                            pm_.base_color = vec3_make(1.0f, 1.0f, 1.0f);  \
+                            pm_.roughness = 1.0f; pm_.metallic = 1.0f;     \
+                            po_->material = pm_; } }                       \
+                    scene_tex_ref_set(&st->scene, t_, (texkind));          \
+                    if (leaf) scene_component_add(&st->scene, t_, "emit",  \
+                                                  FALL_LEAVES, 24);        \
+                } while (0)
+
+                {   /* the churchyard yew (an evergreen cypress) by the cross */
+                    float yp[3];
+                    yp[0] = 0.0f; yp[1] = 1.25f; yp[2] = iseed + 200.0f;
+                    ABBEY_PLANT("cypress", cp.west_x - 5.5f, 6.5f, yp, 3,
+                                "bark", 0, "the churchyard yew");
+                }
+                {   /* an orchard pair, south of the nave — deciduous, shedding */
+                    float op[3];
+                    float ox = cp.west_x + cp.tower_d + 1.5f * cp.bay_l;
+                    float oz = -(0.5f * cp.nave_w + cp.aisle_w) - 4.0f;
+                    op[0] = iseed + 211.0f; op[1] = 0.9f; op[2] = 6.5f;
+                    ABBEY_PLANT("oak", ox, oz, op, 3, "bark", 1, "orchard oak");
+                    op[0] = iseed + 223.0f;
+                    ABBEY_PLANT("oak", ox + 1.7f * cp.bay_l, oz, op, 3,
+                                "bark", 1, "orchard oak");
+                }
+                {   /* a few erratics on the south slope, course-free stone */
+                    int bk;
+                    for (bk = 0; bk < 3; bk++) {
+                        float bp[3];
+                        bp[0] = 0.7f + 0.5f * (float)bk;     /* size  */
+                        bp[1] = iseed + 30.0f + (float)bk * 7.0f;
+                        bp[2] = (bk == 1) ? 0.6f : 0.0f;     /* one flat-top */
+                        ABBEY_PLANT("boulder",
+                                    cp.west_x + (float)bk * 2.4f,
+                                    0.5f * cp.nave_w + cp.aisle_w + 3.0f + (float)bk,
+                                    bp, 3, "stone", 0, "erratic");
+                    }
+                }
+                {   /* the pond in the western hollow: sample the dip, set
+                       the surface just above the lowest ground there */
+                    float lx_, lz_, lowest, pp[3];
+                    int   a;
+                    sol_u32 pondh;
+                    plan_to_local(&cp, cp.west_x - 11.0f, 0.0f, &lx_, &lz_);
+                    lowest = terrain_height(isl->mesh_params,
+                                            isl->mesh_param_count, lx_, lz_);
+                    for (a = 0; a < 8; a++) {
+                        float ang = (float)a / 8.0f * 6.2831853f;
+                        float sx2, sz2, g2;
+                        plan_to_local(&cp, cp.west_x - 11.0f + cosf(ang) * 3.0f,
+                                      sinf(ang) * 3.0f, &sx2, &sz2);
+                        g2 = terrain_height(isl->mesh_params,
+                                            isl->mesh_param_count, sx2, sz2);
+                        if (g2 < lowest) lowest = g2;
+                    }
+                    pondh = scene_add(&st->scene, anchor, empty,
+                                vec3_make(cp.west_x - 11.0f,
+                                          lowest - datum + 0.2f, 0.0f),
+                                quat_identity(), one);
+                    scene_mesh_ref_set(&st->scene, pondh, "pond");
+                    pp[0] = 4.5f; pp[1] = 2.0f; pp[2] = 7.0f;
+                    scene_mesh_params_set(&st->scene, pondh, pp, 3);
+                    scene_meta_set(&st->scene, pondh, "name", "the abbey pond");
+                }
+#undef ABBEY_PLANT
             }
 
             scene_resolve_meshes(&st->scene);
