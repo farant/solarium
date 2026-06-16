@@ -151,6 +151,23 @@ int main(void) {
         printf("behind-camera point culled: ok\n");
     }
 
+    /* mat4_inverse (P8 item 2): inverse(proj*view) * (proj*view) ~ identity.
+       The post-pass fog reconstructs world position with exactly this inverse. */
+    {
+        mat4 vp  = mat4_mul(camera_proj(&c, 1.777f), camera_view(&c));
+        mat4 inv = mat4_inverse(vp);
+        mat4 id  = mat4_mul(inv, vp);
+        mat4 I   = mat4_identity();
+        int  k;
+        for (k = 0; k < 16; k++) {
+            if (!approx(id.m[k], I.m[k])) {
+                printf("FAIL: mat4_inverse roundtrip not identity at [%d]\n", k);
+                return 1;
+            }
+        }
+        printf("mat4_inverse roundtrip: ok\n");
+    }
+
     printf("camera_test: OK\n");
     return 0;
 }

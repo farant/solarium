@@ -817,7 +817,7 @@ RhiRenderTarget rhi_create_render_target(int width, int height,
     MTLTextureDescriptor *td;
     id<MTLTexture> color, depth;
     MtRenderTarget *rt;
-    sol_u32 rt_idx, tex_id;
+    sol_u32 rt_idx, tex_id, depth_id;
     h.id = 0;
     if (!g_device || width <= 0 || height <= 0) return h;
 
@@ -829,23 +829,31 @@ RhiRenderTarget rhi_create_render_target(int width, int height,
 
     td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
             width:(NSUInteger)width height:(NSUInteger)height mipmapped:NO];
-    td.usage       = MTLTextureUsageRenderTarget;   /* write-only, GL's rbo */
+    td.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;  /* P8 item 2: post samples depth */
     td.storageMode = MTLStorageModePrivate;
     depth = [g_device newTextureWithDescriptor:td];
     if (!color || !depth) return h;
 
     tex_id = register_texture(color, SAMP_LINEAR_CLAMP, SOL_FALSE, color_format);
     if (!tex_id) return h;
-    rt_idx = slot_alloc(&g_render_target_count, g_render_target_free,
-                        &g_render_target_free_count, MAX_RENDER_TARGETS);
-    if (rt_idx == SLOT_NONE) {
+    depth_id = register_texture(depth, SAMP_DEPTH, SOL_FALSE, RHI_TEX_RGBA8);  /* P8 item 2: samplable */
+    if (!depth_id) {
         g_textures[tex_id - 1] = nil;
         slot_free(tex_id - 1, g_texture_free, &g_texture_free_count);
         return h;
     }
+    rt_idx = slot_alloc(&g_render_target_count, g_render_target_free,
+                        &g_render_target_free_count, MAX_RENDER_TARGETS);
+    if (rt_idx == SLOT_NONE) {
+        g_textures[tex_id - 1]   = nil;
+        g_textures[depth_id - 1] = nil;
+        slot_free(tex_id - 1,   g_texture_free, &g_texture_free_count);
+        slot_free(depth_id - 1, g_texture_free, &g_texture_free_count);
+        return h;
+    }
     rt = &g_render_targets[rt_idx];
     rt->color.id  = tex_id;
-    rt->depth.id  = 0;
+    rt->depth.id  = depth_id;       /* P8 item 2: color targets expose samplable depth */
     rt->color_fmt = color_format;
     rt->width     = width;
     rt->height    = height;

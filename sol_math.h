@@ -25,6 +25,8 @@ vec3  vec3_normalize(vec3 v);
 /* ---- mat4 basics ---- */
 mat4  mat4_identity(void);
 mat4  mat4_mul(mat4 a, mat4 b);   /* C = A * B; applied to a vector, B happens first */
+mat4  mat4_inverse(mat4 m);       /* general 4x4 inverse (cofactor); identity if singular.
+                                     P8 item 2: invViewProj reconstructs world pos from depth */
 
 /* ---- mat3 (normals; item 8) ---- */
 mat3  mat3_normal_matrix(mat4 model);   /* inverse-transpose of model's upper-left 3x3 */

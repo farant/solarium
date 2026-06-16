@@ -174,8 +174,10 @@ void rhi_draw_indexed_instanced(int first_index, int index_count,
    can sample what was just rendered (the fullscreen tonemap pass samples this). */
 RhiTexture rhi_render_target_texture(RhiRenderTarget rt);
 
-/* A depth target's depth attachment as a bindable texture (the shadow-map
-   sample source for the lighting pass). Returns id 0 for a color target. */
+/* A render target's depth attachment as a bindable texture: the shadow-map
+   sample source for the lighting pass, and (P8 item 2) the scene depth that
+   color targets now expose too, for the post pass's fog/god-ray/SSAO readers.
+   Returns id 0 only for a null target. */
 RhiTexture rhi_render_target_depth_texture(RhiRenderTarget rt);
 
 void rhi_present(void);

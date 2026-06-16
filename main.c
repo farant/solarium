@@ -950,19 +950,36 @@ static const char *POST_FRAGMENT_SRC =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "struct VOut { float4 pos [[position]]; float2 uv; };\n"
-    "struct FU { float uBloomStrength; float uExposure; float3 uFogColor; float uFogStrength; };\n"
+    "struct FU { float4x4 uInvViewProj; float3 uFogColor; float3 uAerialColor;\n"
+    "            float3 uCamPos; float uBloomStrength; float uExposure;\n"
+    "            float uFogStrength; float uFogDensity; float uFogHeight; float uFogFalloff; };\n"
     "static float3 aces(float3 x) {\n"            /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
+    "}\n"
+    "static float height_fog(constant FU &u, float3 P) {\n"      /* P8 item 2: analytic height fog */
+    "    float L  = length(P - u.uCamPos);\n"
+    "    float dY = P.y - u.uCamPos.y;\n"
+    "    float c  = u.uFogDensity * exp(-u.uFogFalloff * (u.uCamPos.y - u.uFogHeight));\n"
+    "    float bd = u.uFogFalloff * dY;\n"
+    "    float ig = (abs(bd) > 1e-4) ? (1.0 - exp(-bd)) / bd : 1.0;\n"
+    "    return 1.0 - exp(-L * c * ig);\n"
     "}\n"
     "fragment float4 fmain(VOut v [[stage_in]],\n"
     "                      constant FU &u [[buffer(0)]],\n"
     "                      texture2d<float> uHdr   [[texture(0)]],\n"
     "                      texture2d<float> uBloom [[texture(1)]],\n"
+    "                      depth2d<float>   uDepth [[texture(2)]],\n"
     "                      sampler s0 [[sampler(0)]],\n"
-    "                      sampler s1 [[sampler(1)]]) {\n"
+    "                      sampler s1 [[sampler(1)]],\n"
+    "                      sampler s2 [[sampler(2)]]) {\n"
     "    float3 hdr    = uHdr.sample(s0, v.uv).rgb\n"
     "                  + uBloom.sample(s1, v.uv).rgb * u.uBloomStrength;\n"
     "    hdr          *= u.uExposure;\n"
+    "    float d       = uDepth.sample(s2, v.uv);\n"
+    "    if (d < 1.0) {\n"                                    /* skip the sky (far plane) */
+    "        float4 wp = u.uInvViewProj * float4(v.uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);\n"
+    "        hdr       = mix(hdr, u.uAerialColor, height_fog(u, wp.xyz / wp.w));\n"
+    "    }\n"
     "    float3 mapped = aces(hdr);\n"
     "    float3 ldr    = pow(mapped, float3(1.0 / 2.2));\n"
     "    ldr           = mix(ldr, u.uFogColor, u.uFogStrength);\n"   /* under-water tint */
@@ -989,9 +1006,24 @@ static const char *POST_FRAGMENT_SRC =
     "uniform float uExposure;\n"
     "uniform vec3 uFogColor;\n"
     "uniform float uFogStrength;\n"   /* under-water tint (item 8) */
+    "uniform sampler2D uDepth;\n"                            /* scene depth (P8 item 2) */
+    "uniform mat4 uInvViewProj;\n"
+    "uniform vec3 uCamPos;\n"
+    "uniform vec3 uAerialColor;\n"                           /* horizon haze color */
+    "uniform float uFogDensity;\n"                           /* 0 = no atmospheric fog */
+    "uniform float uFogHeight;\n"
+    "uniform float uFogFalloff;\n"
     "out vec4 FragColor;\n"
     "vec3 aces(vec3 x) {\n"                                  /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
+    "}\n"
+    "float height_fog(vec3 P) {\n"                           /* P8 item 2: analytic height fog */
+    "    float L  = length(P - uCamPos);\n"
+    "    float dY = P.y - uCamPos.y;\n"
+    "    float c  = uFogDensity * exp(-uFogFalloff * (uCamPos.y - uFogHeight));\n"
+    "    float bd = uFogFalloff * dY;\n"
+    "    float ig = (abs(bd) > 1e-4) ? (1.0 - exp(-bd)) / bd : 1.0;\n"
+    "    return 1.0 - exp(-L * c * ig);\n"
     "}\n"
     "void main() {\n"
     "    vec3 hdr    = texture(uHdr, vUV).rgb\n"
@@ -1000,6 +1032,11 @@ static const char *POST_FRAGMENT_SRC =
                                                                 exposure + tonemap so ACES
                                                                 rolls it off naturally */
     "    hdr        *= uExposure;\n"
+    "    float d     = texture(uDepth, vUV).r;\n"            /* [0,1] nonlinear */
+    "    if (d < 1.0) {\n"                                /* skip the sky (far plane) */
+    "        vec4 wp = uInvViewProj * vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);\n"
+    "        hdr     = mix(hdr, uAerialColor, height_fog(wp.xyz / wp.w));\n"
+    "    }\n"
     "    vec3 mapped = aces(hdr);\n"                           /* tonemap: roll off HDR -> [0,1] */
     "    vec3 ldr    = pow(mapped, vec3(1.0 / 2.2));\n"        /* linear -> sRGB for display */
     "    ldr         = mix(ldr, uFogColor, uFogStrength);\n"   /* wading under the surface */
@@ -8495,6 +8532,21 @@ static void render(AppState *state) {
             rhi_set_uniform_float("uBloomStrength",
                                   state->bloom_on ? 0.06f : 0.0f);
             rhi_set_uniform_float("uExposure", state->exposure);
+            {   /* atmospheric fog (P8 item 2): the post pass reads the now-
+                   samplable scene depth, reconstructs world position, and fogs
+                   by distance and height toward a horizon color. Linear, pre-
+                   tonemap (aerial perspective). uFogDensity 0 = today's image. */
+                mat4 ivp = mat4_inverse(mat4_mul(proj, view));
+                rhi_bind_texture(rhi_render_target_depth_texture(state->hdr_rt), 2);
+                rhi_set_uniform_int("uDepth", 2);
+                rhi_set_uniform_mat4("uInvViewProj", ivp.m);
+                rhi_set_uniform_vec3("uCamPos", state->camera.pos.x,
+                                     state->camera.pos.y, state->camera.pos.z);
+                rhi_set_uniform_vec3("uAerialColor", 0.46f, 0.56f, 0.66f);
+                rhi_set_uniform_float("uFogDensity", 0.012f);
+                rhi_set_uniform_float("uFogHeight",  0.0f);
+                rhi_set_uniform_float("uFogFalloff", 0.035f);
+            }
             {   /* under-water tint (item 8): the camera below a pond's
                    surface, within its disc — a cool fog sells the wade */
                 float fr = 0.0f, fg = 0.0f, fb = 0.0f, fa = 0.0f;

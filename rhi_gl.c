@@ -404,9 +404,9 @@ void rhi_bind_texture(RhiTexture texture, int slot) {
 RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat color_format) {
     RhiRenderTarget h;
     GlRenderTarget *rt;
-    GLuint          fbo, color_tex, depth_rbo;
+    GLuint          fbo, color_tex, depth_tex;
     GLint           internal;
-    sol_u32         rt_idx, tex_idx;
+    sol_u32         rt_idx, tex_idx, depth_idx;
     GLenum          status;
 
     h.id = 0;
@@ -425,56 +425,68 @@ RhiRenderTarget rhi_create_render_target(int width, int height, RhiTextureFormat
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    /* depth attachment: a renderbuffer — write-only, cheaper than a texture,
-       and we never sample the camera's depth in this item. */
-    glGenRenderbuffers(1, &depth_rbo);
-    glBindRenderbuffer(GL_RENDERBUFFER, depth_rbo);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24,
-                          (GLsizei)width, (GLsizei)height);
+    /* depth attachment: a SAMPLABLE texture (P8 item 2). The post pass reads
+       scene depth to fog by distance and height; god-rays and SSAO read it
+       next — the §1.4 "one depth buffer, many readers" investment. NEAREST +
+       clamp; sampled 1:1 at pixel centers. */
+    glGenTextures(1, &depth_tex);
+    glBindTexture(GL_TEXTURE_2D, depth_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, (GLsizei)width, (GLsizei)height, 0,
+                 GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     /* the framebuffer object: wire color + depth into its slots */
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, color_tex, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                              GL_RENDERBUFFER, depth_rbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, depth_tex, 0);
 
     status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);            /* restore default before any return */
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "render target incomplete: 0x%04x\n", (unsigned)status);
         glDeleteTextures(1, &color_tex);
-        glDeleteRenderbuffers(1, &depth_rbo);
+        glDeleteTextures(1, &depth_tex);
         glDeleteFramebuffers(1, &fbo);
         return h;                                    /* id 0 = failure */
     }
 
-    /* register the color texture in the texture table so rhi_bind_texture and
-       rhi_render_target_texture treat it as an ordinary texture handle */
-    tex_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count, MAX_TEXTURES);
-    if (tex_idx == SLOT_NONE) {
+    /* register color AND depth in the texture table so each binds like an
+       ordinary handle (rhi_render_target_texture / _depth_texture) */
+    tex_idx   = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count, MAX_TEXTURES);
+    depth_idx = slot_alloc(&g_texture_count, g_texture_free, &g_texture_free_count, MAX_TEXTURES);
+    if (tex_idx == SLOT_NONE || depth_idx == SLOT_NONE) {
+        if (tex_idx   != SLOT_NONE) slot_free(tex_idx,   g_texture_free, &g_texture_free_count);
+        if (depth_idx != SLOT_NONE) slot_free(depth_idx, g_texture_free, &g_texture_free_count);
         glDeleteTextures(1, &color_tex);
-        glDeleteRenderbuffers(1, &depth_rbo);
+        glDeleteTextures(1, &depth_tex);
         glDeleteFramebuffers(1, &fbo);
         return h;                                    /* h.id already 0 */
     }
     g_textures[tex_idx].tex = color_tex;
     g_textures[tex_idx].target = GL_TEXTURE_2D;
+    g_textures[depth_idx].tex = depth_tex;
+    g_textures[depth_idx].target = GL_TEXTURE_2D;
 
     rt_idx = slot_alloc(&g_render_target_count, g_render_target_free, &g_render_target_free_count, MAX_RENDER_TARGETS);
     if (rt_idx == SLOT_NONE) {
-        slot_free(tex_idx, g_texture_free, &g_texture_free_count);   /* give the texture slot back */
+        slot_free(tex_idx,   g_texture_free, &g_texture_free_count);   /* give the texture slots back */
+        slot_free(depth_idx, g_texture_free, &g_texture_free_count);
         glDeleteTextures(1, &color_tex);
-        glDeleteRenderbuffers(1, &depth_rbo);
+        glDeleteTextures(1, &depth_tex);
         glDeleteFramebuffers(1, &fbo);
         return h;
     }
     rt = &g_render_targets[rt_idx];
     rt->fbo       = fbo;
-    rt->depth_rbo = depth_rbo;
+    rt->depth_rbo = 0;               /* depth is a texture now, not a renderbuffer */
     rt->color.id  = tex_idx + 1;
-    rt->depth.id  = 0;            /* color target: depth is the rbo, not samplable */
+    rt->depth.id  = depth_idx + 1;   /* P8 item 2: color targets expose samplable depth */
     rt->width     = width;
     rt->height    = height;
 
