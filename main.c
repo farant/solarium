@@ -91,6 +91,14 @@ typedef struct {
 #define SHADOW_NEAR       1.0f     /* light frustum near/far: bracket the scene  */
 #define SHADOW_FAR        20.0f    /* (also set depth precision)                 */
 
+/* P8 items 2 & 3: ONE fog medium — the atmospheric haze (item 2) and the
+   god-ray in-scatter density (item 3) read the same field, so shafts and
+   haze can never disagree. Eyeball-tuned constants (no hot reload yet). */
+#define FOG_DENSITY       0.012f
+#define FOG_HEIGHT        0.0f
+#define FOG_FALLOFF       0.035f
+#define GODRAY_INTENSITY  6.0f     /* shaft brightness; 0 = no god-rays */
+
 #define ENV_CUBE_SIZE   1024   /* per-face resolution of the environment cubemap */
 #define IRRADIANCE_SIZE 32     /* irradiance is very low-frequency: tiny is plenty */
 #define PREFILTER_SIZE  128    /* specular prefilter base (mip 0 = sharpest reflection) */
@@ -969,11 +977,14 @@ static const char *POST_FRAGMENT_SRC =
     "                      texture2d<float> uHdr   [[texture(0)]],\n"
     "                      texture2d<float> uBloom [[texture(1)]],\n"
     "                      depth2d<float>   uDepth [[texture(2)]],\n"
+    "                      texture2d<float> uGodray [[texture(3)]],\n"
     "                      sampler s0 [[sampler(0)]],\n"
     "                      sampler s1 [[sampler(1)]],\n"
-    "                      sampler s2 [[sampler(2)]]) {\n"
+    "                      sampler s2 [[sampler(2)]],\n"
+    "                      sampler s3 [[sampler(3)]]) {\n"
     "    float3 hdr    = uHdr.sample(s0, v.uv).rgb\n"
-    "                  + uBloom.sample(s1, v.uv).rgb * u.uBloomStrength;\n"
+    "                  + uBloom.sample(s1, v.uv).rgb * u.uBloomStrength\n"
+    "                  + uGodray.sample(s3, v.uv).rgb;\n"
     "    hdr          *= u.uExposure;\n"
     "    float d       = uDepth.sample(s2, v.uv);\n"
     "    if (d < 1.0) {\n"                                    /* skip the sky (far plane) */
@@ -1013,6 +1024,7 @@ static const char *POST_FRAGMENT_SRC =
     "uniform float uFogDensity;\n"                           /* 0 = no atmospheric fog */
     "uniform float uFogHeight;\n"
     "uniform float uFogFalloff;\n"
+    "uniform sampler2D uGodray;\n"                           /* P8 item 3: the shafts */
     "out vec4 FragColor;\n"
     "vec3 aces(vec3 x) {\n"                                  /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
@@ -1027,7 +1039,8 @@ static const char *POST_FRAGMENT_SRC =
     "}\n"
     "void main() {\n"
     "    vec3 hdr    = texture(uHdr, vUV).rgb\n"
-    "                + texture(uBloom, vUV).rgb * uBloomStrength;\n"  /* the glow is
+    "                + texture(uBloom, vUV).rgb * uBloomStrength\n"
+    "                + texture(uGodray, vUV).rgb;\n"  /* the glow is
                                                                 radiance too: add BEFORE
                                                                 exposure + tonemap so ACES
                                                                 rolls it off naturally */
@@ -1044,6 +1057,120 @@ static const char *POST_FRAGMENT_SRC =
     "}\n";
 
 #endif /* SOL_RHI_METAL — the post pair */
+
+/* --- god-rays (P8 item 3): march the view ray through the spot-light's
+   shadow volume, accumulating in-scatter wherever the ray is LIT. The medium
+   is the SAME height-fog field as item 2 (lit, not ambient). Crude on purpose
+   per the no-TAA constitution: 48 steps, a per-pixel dithered start (the slow
+   camera forgives the noise), ONE shadow tap per step, no temporal reuse.
+   Half-res; reconstructs world pos like item 2; shares POST_VERTEX_SRC. The
+   result is added in post like a bloom level. --- */
+#ifdef SOL_RHI_METAL
+static const char *GODRAY_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "struct GU { float4x4 uInvViewProj; float4x4 uLightVP; float3 uCamPos;\n"
+    "            float3 uLightColor; float3 uLightDir; float uFogDensity;\n"
+    "            float uFogHeight; float uFogFalloff; float uGodrayIntensity; };\n"
+    "static float hash12(float2 p) {\n"                       /* Dave Hoskins hash */
+    "    float3 p3 = fract(float3(p.xyx) * 0.1031);\n"
+    "    p3 += dot(p3, p3.yzx + 33.33);\n"
+    "    return fract((p3.x + p3.y) * p3.z);\n"
+    "}\n"
+    "static float hg(float c, float g) {\n"                   /* Henyey-Greenstein, 1/4pi folded in */
+    "    float gg = g * g;\n"
+    "    return (0.0795775 * (1.0 - gg)) / pow(1.0 + gg - 2.0 * g * c, 1.5);\n"
+    "}\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      constant GU &u [[buffer(0)]],\n"
+    "                      depth2d<float> uDepth     [[texture(0)]],\n"
+    "                      depth2d<float> uShadowMap [[texture(1)]],\n"
+    "                      sampler s0 [[sampler(0)]],\n"
+    "                      sampler s1 [[sampler(1)]]) {\n"
+    "    float  d  = uDepth.sample(s0, v.uv);\n"
+    "    float4 wp = u.uInvViewProj * float4(v.uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);\n"
+    "    float3 P  = wp.xyz / wp.w;\n"                         /* geometry, or far-plane for sky */
+    "    float3 dir = P - u.uCamPos;\n"
+    "    float  len = length(dir);\n"
+    "    dir = (len > 1e-4) ? dir / len : float3(0.0, 0.0, 1.0);\n"
+    "    const int N = 48;\n"
+    "    float stp = len / float(N);\n"
+    "    float dither = hash12(v.uv * 4096.0);\n"
+    "    float accum = 0.0;\n"
+    "    int i;\n"
+    "    for (i = 0; i < N; i++) {\n"
+    "        float3 s = u.uCamPos + dir * (float(i) + dither) * stp;\n"
+    "        float4 lp = u.uLightVP * float4(s, 1.0);\n"
+    "        float3 pr = lp.xyz / lp.w * 0.5 + 0.5;\n"
+    "        float lit = 0.0;\n"                               /* outside the cone = dark (it is a spot) */
+    "        if (lp.w > 0.0 && pr.z <= 1.0 &&\n"
+    "            pr.x >= 0.0 && pr.x <= 1.0 && pr.y >= 0.0 && pr.y <= 1.0) {\n"
+    "            float closest = uShadowMap.sample(s1, pr.xy);\n"
+    "            lit = (pr.z - 0.002 > closest) ? 0.0 : 1.0;\n"
+    "        }\n"
+    "        float rho = u.uFogDensity * exp(-u.uFogFalloff * (s.y - u.uFogHeight));\n"
+    "        accum += lit * rho * stp;\n"
+    "    }\n"
+    "    float phase = hg(dot(dir, u.uLightDir), 0.6);\n"      /* forward scatter toward the source */
+    "    float3 col = accum * phase * u.uLightColor * u.uGodrayIntensity;\n"
+    "    return float4(col, 1.0);\n"
+    "}\n";
+#else
+static const char *GODRAY_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uDepth;\n"
+    "uniform sampler2D uShadowMap;\n"
+    "uniform mat4 uInvViewProj;\n"
+    "uniform mat4 uLightVP;\n"
+    "uniform vec3 uCamPos;\n"
+    "uniform vec3 uLightColor;\n"
+    "uniform vec3 uLightDir;\n"
+    "uniform float uFogDensity;\n"
+    "uniform float uFogHeight;\n"
+    "uniform float uFogFalloff;\n"
+    "uniform float uGodrayIntensity;\n"
+    "out vec4 FragColor;\n"
+    "float hash12(vec2 p) {\n"                                /* Dave Hoskins hash */
+    "    vec3 p3 = fract(vec3(p.xyx) * 0.1031);\n"
+    "    p3 += dot(p3, p3.yzx + 33.33);\n"
+    "    return fract((p3.x + p3.y) * p3.z);\n"
+    "}\n"
+    "float hg(float c, float g) {\n"                          /* Henyey-Greenstein, 1/4pi folded in */
+    "    float gg = g * g;\n"
+    "    return (0.0795775 * (1.0 - gg)) / pow(1.0 + gg - 2.0 * g * c, 1.5);\n"
+    "}\n"
+    "void main() {\n"
+    "    float d   = texture(uDepth, vUV).r;\n"
+    "    vec4 wp = uInvViewProj * vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);\n"
+    "    vec3 P  = wp.xyz / wp.w;\n"                           /* geometry, or far-plane for sky */
+    "    vec3 dir = P - uCamPos;\n"
+    "    float len = length(dir);\n"
+    "    dir = (len > 1e-4) ? dir / len : vec3(0.0, 0.0, 1.0);\n"
+    "    const int N = 48;\n"
+    "    float stp = len / float(N);\n"
+    "    float dither = hash12(vUV * 4096.0);\n"
+    "    float accum = 0.0;\n"
+    "    int i;\n"
+    "    for (i = 0; i < N; i++) {\n"
+    "        vec3 s = uCamPos + dir * (float(i) + dither) * stp;\n"
+    "        vec4 lp = uLightVP * vec4(s, 1.0);\n"
+    "        vec3 pr = lp.xyz / lp.w * 0.5 + 0.5;\n"
+    "        float lit = 0.0;\n"                               /* outside the cone = dark (it is a spot) */
+    "        if (lp.w > 0.0 && pr.z <= 1.0 &&\n"
+    "            pr.x >= 0.0 && pr.x <= 1.0 && pr.y >= 0.0 && pr.y <= 1.0) {\n"
+    "            float closest = texture(uShadowMap, pr.xy).r;\n"
+    "            lit = (pr.z - 0.002 > closest) ? 0.0 : 1.0;\n"
+    "        }\n"
+    "        float rho = uFogDensity * exp(-uFogFalloff * (s.y - uFogHeight));\n"
+    "        accum += lit * rho * stp;\n"
+    "    }\n"
+    "    float phase = hg(dot(dir, uLightDir), 0.6);\n"        /* forward scatter toward the source */
+    "    vec3 col = accum * phase * uLightColor * uGodrayIntensity;\n"
+    "    FragColor = vec4(col, 1.0);\n"
+    "}\n";
+#endif
 
 /* --- the bloom chain (P4 item 5 piece 3): how a screen says "brighter than
    white". Extract what exceeds the threshold (with a SOFT KNEE — a hard
@@ -1911,6 +2038,11 @@ typedef struct {
     RhiPipeline     bloom_extract_pipeline, bloom_down_pipeline, bloom_up_pipeline;
     sol_bool        bloom_on;      /* 'K' toggles, for honest A/B */
     sol_bool        k_was_down;
+    /* god-rays (P8 item 3): a half-res raymarch of the spot-light shadow
+       volume, composited additively in post like a bloom level */
+    RhiRenderTarget godray_rt;
+    int             godray_w, godray_h;
+    RhiPipeline     godray_pipeline;
     /* the meadow (P4 item 3): per-island instanced grass — DERIVED data
        (the arrows pattern at landscape scale), rebuilt on load and mint,
        never serialized */
@@ -5867,6 +5999,21 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     if (hgt > datum) datum = hgt;
                 }
             }
+
+            {   /* P8 item 3: the abbey brings a low RAKING SUN, so the new
+                   god-ray pass throws real shafts through the half-fallen
+                   arcade (its ruin gaps are perfect occluders). Aimed at the
+                   nave mid-height and kept close enough to sit in the 20m
+                   shadow volume — full coverage waits on cascaded shadows. */
+                vec3 ctr = vec3_add(ipos, vec3_make(0.0f, datum + 5.0f, 0.0f));
+                st->light_pos       = vec3_add(ctr, vec3_make(-10.0f, 10.0f, 5.0f));
+                st->light_target    = ctr;
+                st->light_color     = vec3_make(1.0f, 0.93f, 0.78f);
+                st->light_intensity = 320.0f;   /* the rake sits ~14m off, vs ~4m for the
+                                                   old lamp — inverse-square wants ~15x more */
+                st->light_inner_deg = 30.0f;
+                st->light_outer_deg = 42.0f;
+            }
             rot = cp.swapped
                 ? quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
                                        -0.5f * (float)SOL_PI)
@@ -6079,7 +6226,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
                 {   /* the churchyard yew (an evergreen cypress) by the cross */
                     float yp[3];
-                    yp[0] = 0.0f; yp[1] = 1.25f; yp[2] = iseed + 200.0f;
+                    yp[0] = iseed + 200.0f; yp[1] = 1.25f; yp[2] = 9.0f;  /* seed, age, height(m) — was a slip: the seed had landed in the HEIGHT slot (9201 m yew) */
                     ABBEY_PLANT("cypress", cp.west_x - 5.5f, 6.5f, yp, 3,
                                 "bark", 0, "the churchyard yew");
                 }
@@ -7149,6 +7296,16 @@ static int init_scene(AppState *state) {
         state->post_pipeline = rhi_create_pipeline(&post_desc);
     }
 
+    {   /* god-rays (P8 item 3): a fullscreen raymarch, same desc shape as post */
+        RhiPipelineDesc gr_desc = {0};
+        gr_desc.shader     = rhi_create_shader(POST_VERTEX_SRC, GODRAY_FRAGMENT_SRC);
+        gr_desc.attr_count = 0;
+        gr_desc.stride     = 0;
+        gr_desc.depth_test = SOL_FALSE;
+        gr_desc.blend      = SOL_FALSE;
+        state->godray_pipeline = rhi_create_pipeline(&gr_desc);
+    }
+
     /* the shadow map + its two pipelines (item 9b): a depth-only pass that reads
        just position, and a fullscreen inspector that shows the depth map. */
     {
@@ -7742,6 +7899,14 @@ static void ensure_render_target(AppState *state, int w, int h) {
         state->bloom_w[lv]  = bw;
         state->bloom_h[lv]  = bh;
     }
+
+    /* god-rays (P8 item 3) ride one half-res buffer, like a bloom level */
+    state->godray_w = w / 2; if (state->godray_w < 8) state->godray_w = 8;
+    state->godray_h = h / 2; if (state->godray_h < 8) state->godray_h = 8;
+    if (state->godray_rt.id != 0)
+        rhi_destroy_render_target(state->godray_rt);
+    state->godray_rt = rhi_create_render_target(state->godray_w, state->godray_h,
+                                                RHI_TEX_RGBA16F);
 }
 
 /* fold a per-frame sample (seconds) into a readable ms readout. Fixed blend:
@@ -8484,6 +8649,34 @@ static void render(AppState *state) {
         rt2 = glfwGetTime();
         yardstick_ms(&state->t_hdr, rt2 - rt1);
 
+        /* ---- god-rays (P8 item 3): half-res raymarch of the spot's shadow
+           volume into godray_rt; reads the scene depth (stop at geometry) and
+           the shadow map (lit/shadowed). Added in post like a bloom level. ---- */
+        {
+            mat4 grivp = mat4_inverse(mat4_mul(proj, view));
+            mat4 grlvp = light_view_proj(state);
+            vec3 grld  = vec3_normalize(vec3_sub(state->light_target, state->light_pos));
+            rhi_begin_pass(state->godray_rt, RHI_CLEAR_COLOR, 0.0f, 0.0f, 0.0f, 1.0f);
+            rhi_set_pipeline(state->godray_pipeline);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->hdr_rt), 0);
+            rhi_set_uniform_int("uDepth", 0);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt), 1);
+            rhi_set_uniform_int("uShadowMap", 1);
+            rhi_set_uniform_mat4("uInvViewProj", grivp.m);
+            rhi_set_uniform_mat4("uLightVP", grlvp.m);
+            rhi_set_uniform_vec3("uCamPos", state->camera.pos.x,
+                                 state->camera.pos.y, state->camera.pos.z);
+            rhi_set_uniform_vec3("uLightColor", state->light_color.x,
+                                 state->light_color.y, state->light_color.z);
+            rhi_set_uniform_vec3("uLightDir", grld.x, grld.y, grld.z);
+            rhi_set_uniform_float("uFogDensity",  FOG_DENSITY);
+            rhi_set_uniform_float("uFogHeight",   FOG_HEIGHT);
+            rhi_set_uniform_float("uFogFalloff",  FOG_FALLOFF);
+            rhi_set_uniform_float("uGodrayIntensity", GODRAY_INTENSITY);
+            rhi_draw(0, 3);
+            rhi_end_pass();
+        }
+
         /* ---- the bloom chain (P4 item 5): extract, walk down, walk up ---- */
         if (state->bloom_on && state->bloom_up_pipeline.id) {
             int lv;
@@ -8527,8 +8720,10 @@ static void render(AppState *state) {
             rhi_set_pipeline(state->post_pipeline);
             rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
             rhi_bind_texture(rhi_render_target_texture(state->bloom_rt[0]), 1);
+            rhi_bind_texture(rhi_render_target_texture(state->godray_rt), 3);
             rhi_set_uniform_int("uHdr", 0);             /* sampler -> texture unit 0 */
             rhi_set_uniform_int("uBloom", 1);
+            rhi_set_uniform_int("uGodray", 3);          /* P8 item 3: the shafts buffer */
             rhi_set_uniform_float("uBloomStrength",
                                   state->bloom_on ? 0.06f : 0.0f);
             rhi_set_uniform_float("uExposure", state->exposure);
@@ -8543,9 +8738,9 @@ static void render(AppState *state) {
                 rhi_set_uniform_vec3("uCamPos", state->camera.pos.x,
                                      state->camera.pos.y, state->camera.pos.z);
                 rhi_set_uniform_vec3("uAerialColor", 0.46f, 0.56f, 0.66f);
-                rhi_set_uniform_float("uFogDensity", 0.012f);
-                rhi_set_uniform_float("uFogHeight",  0.0f);
-                rhi_set_uniform_float("uFogFalloff", 0.035f);
+                rhi_set_uniform_float("uFogDensity", FOG_DENSITY);
+                rhi_set_uniform_float("uFogHeight",  FOG_HEIGHT);
+                rhi_set_uniform_float("uFogFalloff", FOG_FALLOFF);
             }
             {   /* under-water tint (item 8): the camera below a pond's
                    surface, within its disc — a cool fog sells the wade */
