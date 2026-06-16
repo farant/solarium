@@ -38,6 +38,7 @@ mat4  mat4_scale(vec3 s);
 /* ---- mat4 camera + projection ---- */
 mat4  mat4_look_at(vec3 eye, vec3 center, vec3 up);
 mat4  mat4_perspective(float fovy, float aspect, float near, float far);  /* fovy in radians */
+mat4  mat4_ortho(float l, float r, float b, float t, float near, float far); /* box -> NDC [-1,1] (the sun's parallel projection, P8 item 6) */
 
 /* ---- quaternions (unit quaternion = a rotation) ---- */
 quat  quat_identity(void);

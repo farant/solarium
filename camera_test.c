@@ -168,6 +168,36 @@ int main(void) {
         printf("mat4_inverse roundtrip: ok\n");
     }
 
+    /* mat4_ortho (P8 item 6): the box corners map onto the NDC cube. The sun's
+       cascaded shadow maps project casters with exactly this. View-space near
+       plane sits at z = -near, far at z = -far. */
+    {
+        mat4  o = mat4_ortho(-3.0f, 5.0f, -2.0f, 6.0f, 1.0f, 21.0f);
+        /* (x,y,z,1) -> column-major M*v; check three known mappings. */
+        struct { float x, y, z, ex, ey, ez; } cases[3];
+        int  ci;
+        cases[0].x=-3.0f; cases[0].y=-2.0f; cases[0].z= -1.0f;  /* l,b,-near */
+        cases[0].ex=-1.0f; cases[0].ey=-1.0f; cases[0].ez=-1.0f;
+        cases[1].x= 5.0f; cases[1].y= 6.0f; cases[1].z=-21.0f;  /* r,t,-far  */
+        cases[1].ex= 1.0f; cases[1].ey= 1.0f; cases[1].ez= 1.0f;
+        cases[2].x= 1.0f; cases[2].y= 2.0f; cases[2].z=-11.0f;  /* center    */
+        cases[2].ex= 0.0f; cases[2].ey= 0.0f; cases[2].ez= 0.0f;
+        for (ci = 0; ci < 3; ci++) {
+            float x = cases[ci].x, y = cases[ci].y, z = cases[ci].z;
+            float nx = o.m[0]*x + o.m[4]*y + o.m[8] *z + o.m[12];
+            float ny = o.m[1]*x + o.m[5]*y + o.m[9] *z + o.m[13];
+            float nz = o.m[2]*x + o.m[6]*y + o.m[10]*z + o.m[14];
+            float nw = o.m[3]*x + o.m[7]*y + o.m[11]*z + o.m[15];
+            if (!approx(nw, 1.0f) || !approx(nx, cases[ci].ex) ||
+                !approx(ny, cases[ci].ey) || !approx(nz, cases[ci].ez)) {
+                printf("FAIL: mat4_ortho corner %d -> (%f,%f,%f,%f)\n",
+                       ci, (double)nx, (double)ny, (double)nz, (double)nw);
+                return 1;
+            }
+        }
+        printf("mat4_ortho NDC corners: ok\n");
+    }
+
     printf("camera_test: OK\n");
     return 0;
 }

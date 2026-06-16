@@ -178,6 +178,21 @@ mat4 mat4_perspective(float fovy, float aspect, float near, float far) {
     return r;
 }
 
+/* Orthographic: a box [l,r]x[b,t]x[-near,-far] (view space) -> NDC [-1,1]^3.
+   Parallel rays, no perspective divide (w stays 1) — the sun's projection for
+   cascaded shadow maps (P8 item 6). Same column-major layout as the others. */
+mat4 mat4_ortho(float l, float r, float b, float t, float near, float far) {
+    mat4 m = {0};
+    m.m[0]  =  2.0f / (r - l);
+    m.m[5]  =  2.0f / (t - b);
+    m.m[10] = -2.0f / (far - near);
+    m.m[12] = -(r + l) / (r - l);
+    m.m[13] = -(t + b) / (t - b);
+    m.m[14] = -(far + near) / (far - near);
+    m.m[15] =  1.0f;
+    return m;
+}
+
 /* ---- quaternions (unit quaternion = a rotation) ---- */
 quat quat_identity(void) {
     quat q;

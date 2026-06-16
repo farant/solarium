@@ -87,9 +87,15 @@ typedef struct {
 #define LOOK_SPEED        1.5f     /* radians/sec for keyboard look           */
 #define MOUSE_SENSITIVITY 0.0025f  /* radians per pixel; NOT dt-scaled        */
 
-#define SHADOW_MAP_SIZE   2048     /* the light's depth-map resolution (item 9b) */
-#define SHADOW_NEAR       1.0f     /* light frustum near/far: bracket the scene  */
-#define SHADOW_FAR        20.0f    /* (also set depth precision)                 */
+#define SHADOW_MAP_SIZE   2048     /* one cascade's depth-map resolution (item 9b/P8.6) */
+/* The sun (P8 item 6): a DIRECTIONAL light with cascaded shadow maps. No
+   position/cone/falloff — parallel rays, an orthographic box per cascade,
+   each fitted to a slice of the camera frustum (near = tight + crisp, far =
+   broad). light_pos/light_target now encode only a DIRECTION. */
+#define SHADOW_CASCADES   2        /* reserved decision #4: 2 (measure up to 3) */
+#define SHADOW_DIST       60.0f    /* sun shadows fitted out to here (camera far = 100) */
+#define SHADOW_CASTER_PAD 40.0f    /* world units pulled toward the sun so tall/behind
+                                      geometry still casts into the slice's box */
 
 /* P8 items 2 & 3: ONE fog medium — the atmospheric haze (item 2) and the
    god-ray in-scatter density (item 3) read the same field, so shafts and
@@ -97,7 +103,9 @@ typedef struct {
 #define FOG_DENSITY       0.012f
 #define FOG_HEIGHT        0.0f
 #define FOG_FALLOFF       0.035f
-#define GODRAY_INTENSITY  6.0f     /* shaft brightness; 0 = no god-rays */
+#define GODRAY_INTENSITY  3.0f     /* shaft brightness; 0 = no god-rays. Halved for
+                                      P8.6: the directional sun scatters island-wide,
+                                      not in a 20m cone, so the same number reads brighter */
 
 #define ENV_CUBE_SIZE   1024   /* per-face resolution of the environment cubemap */
 #define IRRADIANCE_SIZE 32     /* irradiance is very low-frequency: tiny is plenty */
@@ -197,7 +205,8 @@ static const char *FRAGMENT_SRC =
     "    float3   uPointPos[8];\n"
     "    float3   uPointColor[8];\n"
     "    float    uPointRadius[8];\n"
-    "    float4x4 uLightVP;\n"
+    "    float4x4 uLightVP;\n"                                /* near cascade (P8 item 6) */
+    "    float4x4 uLightVP1;\n"                               /* far cascade */
     "    float    uUseIBL;\n"
     "    float    uAmbientScale;\n"
     "};\n"
@@ -233,23 +242,31 @@ static const char *FRAGMENT_SRC =
     "static float3 fresnelSchlickRoughness(float cosTheta, float3 F0, float rough) {\n"
     "    return F0 + (max(float3(1.0 - rough), F0) - F0) * pow(1.0 - cosTheta, 5.0);\n"
     "}\n"
-    "static float shadowFactor(float3 worldPos, float NoL, constant FU &u,\n"
-    "                          depth2d<float> shadowMap, sampler shadowSmp) {\n"
-    "    float4 lpos = u.uLightVP * float4(worldPos, 1.0);\n"
-    "    float3 proj = lpos.xyz / lpos.w;\n"
-    "    proj = proj * 0.5 + 0.5;\n"
-    "    if (proj.z > 1.0) return 0.0;\n"
-    "    float current = proj.z;\n"
-    "    float bias = max(0.0025 * (1.0 - NoL), 0.0008);\n"
-    "    float2 texel = 1.0 / float2(shadowMap.get_width(), shadowMap.get_height());\n"
+    "static float pcfShadow(depth2d<float> smap, sampler smp, float3 proj, float bias) {\n"
+    "    float2 texel = 1.0 / float2(smap.get_width(), smap.get_height());\n"
     "    float sum = 0.0;\n"
     "    for (int x = -1; x <= 1; ++x)\n"
     "        for (int y = -1; y <= 1; ++y) {\n"
-    "            float closest = shadowMap.sample(shadowSmp,\n"
+    "            float closest = smap.sample(smp,\n"
     "                                proj.xy + float2((float)x, (float)y) * texel);\n"
-    "            sum += (current - bias > closest) ? 1.0 : 0.0;\n"
+    "            sum += (proj.z - bias > closest) ? 1.0 : 0.0;\n"
     "        }\n"
     "    return sum / 9.0;\n"
+    "}\n"
+    "static bool inCascade(float3 p) {\n"
+    "    return p.x > 0.0 && p.x < 1.0 && p.y > 0.0 && p.y < 1.0 && p.z <= 1.0;\n"
+    "}\n"
+    "static float shadowFactor(float3 worldPos, float NoL, constant FU &u,\n"
+    "                          depth2d<float> m0, sampler sm0,\n"
+    "                          depth2d<float> m1, sampler sm1) {\n"   /* P8 item 6: nearest covering cascade */
+    "    float bias = max(0.0025 * (1.0 - NoL), 0.0008);\n"
+    "    float4 l0 = u.uLightVP * float4(worldPos, 1.0);\n"
+    "    float3 p0 = l0.xyz / l0.w * 0.5 + 0.5;\n"
+    "    if (inCascade(p0)) return pcfShadow(m0, sm0, p0, bias);\n"
+    "    float4 l1 = u.uLightVP1 * float4(worldPos, 1.0);\n"
+    "    float3 p1 = l1.xyz / l1.w * 0.5 + 0.5;\n"
+    "    if (inCascade(p1)) return pcfShadow(m1, sm1, p1, bias);\n"
+    "    return 0.0;\n"
     "}\n"
     "fragment float4 fmain(VOut v [[stage_in]],\n"
     "                      constant FU &u [[buffer(0)]],\n"
@@ -261,10 +278,12 @@ static const char *FRAGMENT_SRC =
     "                      texturecube<float> uIrradianceMap [[texture(5)]],\n"
     "                      texturecube<float> uPrefilterMap  [[texture(6)]],\n"
     "                      texture2d<float>   uBrdfLUT       [[texture(7)]],\n"
+    "                      depth2d<float>     uShadowMap1    [[texture(8)]],\n"   /* far cascade (P8 item 6) */
     "                      sampler s0 [[sampler(0)]], sampler s1 [[sampler(1)]],\n"
     "                      sampler s2 [[sampler(2)]], sampler s3 [[sampler(3)]],\n"
     "                      sampler s4 [[sampler(4)]], sampler s5 [[sampler(5)]],\n"
-    "                      sampler s6 [[sampler(6)]], sampler s7 [[sampler(7)]]) {\n"
+    "                      sampler s6 [[sampler(6)]], sampler s7 [[sampler(7)]],\n"
+    "                      sampler s8 [[sampler(8)]]) {\n"
     "    float3 albedo = u.uBaseColor;\n"
     "    if (u.uUseAlbedoTex > 0.5) albedo *= uAlbedoTex.sample(s0, v.uv).rgb;\n"
     "    float metallic  = u.uMetallic;\n"
@@ -295,15 +314,10 @@ static const char *FRAGMENT_SRC =
     "    float3 V = normalize(u.uViewPos - v.worldPos);\n"
     "    float NoV = max(dot(N, V), 0.0001);\n"
     "    float3 F0 = mix(float3(0.04), albedo, metallic);\n"
-    "    float3 toLight = u.uLightPos - v.worldPos;\n"
-    "    float dist = length(toLight);\n"
-    "    float3 L = toLight / dist;\n"
-    "    float atten = 1.0 / (dist * dist);\n"
-    "    float theta = dot(-L, u.uLightDir);\n"
-    "    float cone  = smoothstep(u.uCosOuter, u.uCosInner, theta);\n"
-    "    float3 radiance = u.uLightColor * u.uLightIntensity * atten * cone;\n"
+    "    float3 L = -u.uLightDir;\n"                          /* the sun: parallel rays (P8 item 6) */
+    "    float3 radiance = u.uLightColor * u.uLightIntensity;\n"  /* directional: no falloff, no cone */
     "    float shadow = shadowFactor(v.worldPos, max(dot(N, L), 0.0), u,\n"
-    "                                uShadowMap, s4);\n"
+    "                                uShadowMap, s4, uShadowMap1, s8);\n"
     "    float3 Lo = brdfDirect(N, V, L, albedo, metallic, roughness, F0)\n"
     "              * radiance * (1.0 - shadow);\n"
     "    for (int pi = 0; pi < u.uPointCount; pi++) {\n"
@@ -396,8 +410,10 @@ static const char *FRAGMENT_SRC =
     "uniform vec3  uPointPos[8];\n"
     "uniform vec3  uPointColor[8];\n"                        /* color * intensity, premultiplied */
     "uniform float uPointRadius[8];\n"                       /* the falloff WINDOW's edge */
-    "uniform mat4  uLightVP;\n"                              /* light proj*view (item 9c); == the shadow pass's */
-    "uniform sampler2D uShadowMap;\n"                        /* depth from the light's POV (item 9b) */
+    "uniform mat4  uLightVP;\n"                              /* near cascade proj*view (P8 item 6) */
+    "uniform sampler2D uShadowMap;\n"                        /* near cascade depth */
+    "uniform mat4  uLightVP1;\n"                             /* far cascade proj*view */
+    "uniform sampler2D uShadowMap1;\n"                       /* far cascade depth */
     "uniform samplerCube uIrradianceMap;\n"                  /* diffuse IBL (B3) */
     "uniform float uUseIBL;\n"                               /* 0 = flat ambient fallback */
     "uniform float uAmbientScale;\n"                         /* 1 outdoors; <1 inside a sealed room (item 7) */
@@ -441,22 +457,31 @@ static const char *FRAGMENT_SRC =
     "vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float rough) {\n"  /* ambient F (no half-vector): view angle + roughness (B3) */
     "    return F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - cosTheta, 5.0);\n"
     "}\n"
-    "float shadowFactor(vec3 worldPos, float NoL) {\n"       /* 0 = lit, 1 = fully shadowed (item 9c) */
-    "    vec4 lpos = uLightVP * vec4(worldPos, 1.0);\n"
-    "    vec3 proj = lpos.xyz / lpos.w;\n"                    /* perspective divide -> NDC */
-    "    proj = proj * 0.5 + 0.5;\n"                          /* -> [0,1] for sampling + compare */
-    "    if (proj.z > 1.0) return 0.0;\n"                     /* beyond the light's far plane = lit */
-    "    float current = proj.z;\n"
-    "    float bias = max(0.0025 * (1.0 - NoL), 0.0008);\n"   /* slope-scaled: more at grazing angles (tunable) */
-    "    vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));\n"
-    "    float sum = 0.0;\n"                                  /* 3x3 PCF: soften the edge */
+    "float pcfShadow(sampler2D smap, vec3 proj, float bias) {\n"   /* 3x3 PCF: soften the edge */
+    "    vec2 texel = 1.0 / vec2(textureSize(smap, 0));\n"
+    "    float sum = 0.0;\n"
     "    int x, y;\n"
     "    for (x = -1; x <= 1; ++x)\n"
     "        for (y = -1; y <= 1; ++y) {\n"
-    "            float closest = texture(uShadowMap, proj.xy + vec2(x, y) * texel).r;\n"
-    "            sum += (current - bias > closest) ? 1.0 : 0.0;\n"  /* 1 = something closer to light */
+    "            float closest = texture(smap, proj.xy + vec2(x, y) * texel).r;\n"
+    "            sum += (proj.z - bias > closest) ? 1.0 : 0.0;\n"   /* 1 = something closer to the sun */
     "        }\n"
     "    return sum / 9.0;\n"
+    "}\n"
+    "bool inCascade(vec3 p) {\n"                              /* fully inside this map's [0,1] box */
+    "    return p.x > 0.0 && p.x < 1.0 && p.y > 0.0 && p.y < 1.0 && p.z <= 1.0;\n"
+    "}\n"
+    "float shadowFactor(vec3 worldPos, float NoL) {\n"       /* 0 = lit, 1 = shadowed. P8 item 6:
+                                                                pick the NEAREST covering cascade
+                                                                (near map first = crisper). */
+    "    float bias = max(0.0025 * (1.0 - NoL), 0.0008);\n"   /* slope-scaled: more at grazing angles */
+    "    vec4 l0 = uLightVP * vec4(worldPos, 1.0);\n"
+    "    vec3 p0 = l0.xyz / l0.w * 0.5 + 0.5;\n"
+    "    if (inCascade(p0)) return pcfShadow(uShadowMap, p0, bias);\n"
+    "    vec4 l1 = uLightVP1 * vec4(worldPos, 1.0);\n"
+    "    vec3 p1 = l1.xyz / l1.w * 0.5 + 0.5;\n"
+    "    if (inCascade(p1)) return pcfShadow(uShadowMap1, p1, bias);\n"
+    "    return 0.0;\n"                                       /* beyond every cascade = lit */
     "}\n"
     "\n"
     "void main() {\n"
@@ -497,14 +522,9 @@ static const char *FRAGMENT_SRC =
     "    float NoV = max(dot(N, V), 0.0001);\n"                /* the ambient terms reuse this */
     "    vec3 F0 = mix(vec3(0.04), albedo, metallic);\n"      /* dielectric 4% vs metal-tinted */
     "\n"
-    "    vec3 toLight = uLightPos - vWorldPos;\n"              /* the spot (item 9a) */
-    "    float dist = length(toLight);\n"
-    "    vec3 L = toLight / dist;\n"
-    "    float atten = 1.0 / (dist * dist);\n"                 /* inverse-square falloff */
-    "    float theta = dot(-L, uLightDir);\n"                  /* cos angle off the spot axis */
-    "    float cone  = smoothstep(uCosOuter, uCosInner, theta);\n"  /* 1 inside, 0 past outer */
-    "    vec3 radiance = uLightColor * uLightIntensity * atten * cone;\n"
-    "    float shadow = shadowFactor(vWorldPos, max(dot(N, L), 0.0));\n"  /* 9c: spot only */
+    "    vec3 L = -uLightDir;\n"                               /* the sun: parallel rays (P8 item 6) */
+    "    vec3 radiance = uLightColor * uLightIntensity;\n"     /* directional: no falloff, no cone */
+    "    float shadow = shadowFactor(vWorldPos, max(dot(N, L), 0.0));\n"
     "    vec3 Lo = brdfDirect(N, V, L, albedo, metallic, roughness, F0)\n"
     "            * radiance * (1.0 - shadow);\n"
     "\n"
@@ -1090,9 +1110,10 @@ static const char *GODRAY_FRAGMENT_SRC =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "struct VOut { float4 pos [[position]]; float2 uv; };\n"
-    "struct GU { float4x4 uInvViewProj; float4x4 uLightVP; float3 uCamPos;\n"
-    "            float3 uLightColor; float3 uLightDir; float uFogDensity;\n"
-    "            float uFogHeight; float uFogFalloff; float uGodrayIntensity; };\n"
+    "struct GU { float4x4 uInvViewProj; float4x4 uLightVP; float4x4 uLightVP1;\n"
+    "            float3 uCamPos; float3 uLightColor; float3 uLightDir;\n"
+    "            float uFogDensity; float uFogHeight; float uFogFalloff;\n"
+    "            float uGodrayIntensity; };\n"
     "static float hash12(float2 p) {\n"                       /* Dave Hoskins hash */
     "    float3 p3 = fract(float3(p.xyx) * 0.1031);\n"
     "    p3 += dot(p3, p3.yzx + 33.33);\n"
@@ -1104,10 +1125,12 @@ static const char *GODRAY_FRAGMENT_SRC =
     "}\n"
     "fragment float4 fmain(VOut v [[stage_in]],\n"
     "                      constant GU &u [[buffer(0)]],\n"
-    "                      depth2d<float> uDepth     [[texture(0)]],\n"
-    "                      depth2d<float> uShadowMap [[texture(1)]],\n"
+    "                      depth2d<float> uDepth      [[texture(0)]],\n"
+    "                      depth2d<float> uShadowMap  [[texture(1)]],\n"
+    "                      depth2d<float> uShadowMap1 [[texture(8)]],\n"   /* far cascade (P8 item 6) */
     "                      sampler s0 [[sampler(0)]],\n"
-    "                      sampler s1 [[sampler(1)]]) {\n"
+    "                      sampler s1 [[sampler(1)]],\n"
+    "                      sampler s8 [[sampler(8)]]) {\n"
     "    float  d  = uDepth.sample(s0, v.uv);\n"
     "    float4 wp = u.uInvViewProj * float4(v.uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);\n"
     "    float3 P  = wp.xyz / wp.w;\n"                         /* geometry, or far-plane for sky */
@@ -1115,21 +1138,26 @@ static const char *GODRAY_FRAGMENT_SRC =
     "    float  len = length(dir);\n"
     "    dir = (len > 1e-4) ? dir / len : float3(0.0, 0.0, 1.0);\n"
     "    const int N = 48;\n"
-    "    float stp = len / float(N);\n"
+    "    float stp = min(len, 45.0) / float(N);\n"   /* P8.6: god-rays are a NEAR-field effect — cap the
+                                                        march so a long ray into the open doesn't pile a
+                                                        giant lit column onto the sun-direction hotspot */
     "    float dither = hash12(v.uv * 4096.0);\n"
     "    float accum = 0.0;\n"
     "    int i;\n"
     "    for (i = 0; i < N; i++) {\n"
     "        float3 s = u.uCamPos + dir * (float(i) + dither) * stp;\n"
-    "        float4 lp = u.uLightVP * float4(s, 1.0);\n"
-    "        float3 pr = lp.xyz / lp.w * 0.5 + 0.5;\n"
-    "        float lit = 0.0;\n"                               /* outside the cone = dark (it is a spot) */
-    "        if (lp.w > 0.0 && pr.z <= 1.0 &&\n"
-    "            pr.x >= 0.0 && pr.x <= 1.0 && pr.y >= 0.0 && pr.y <= 1.0) {\n"
-    "            float closest = uShadowMap.sample(s1, pr.xy);\n"
-    "            lit = (pr.z - 0.002 > closest) ? 0.0 : 1.0;\n"
+    "        float lit = 1.0;\n"                               /* directional sun: lit unless a cascade shadows it (P8 item 6) */
+    "        float4 l0 = u.uLightVP * float4(s, 1.0);\n"
+    "        float3 p0 = l0.xyz / l0.w * 0.5 + 0.5;\n"
+    "        if (p0.x > 0.0 && p0.x < 1.0 && p0.y > 0.0 && p0.y < 1.0 && p0.z <= 1.0) {\n"
+    "            lit = (p0.z - 0.002 > uShadowMap.sample(s1, p0.xy)) ? 0.0 : 1.0;\n"
+    "        } else {\n"
+    "            float4 l1 = u.uLightVP1 * float4(s, 1.0);\n"
+    "            float3 p1 = l1.xyz / l1.w * 0.5 + 0.5;\n"
+    "            if (p1.x > 0.0 && p1.x < 1.0 && p1.y > 0.0 && p1.y < 1.0 && p1.z <= 1.0)\n"
+    "                lit = (p1.z - 0.002 > uShadowMap1.sample(s8, p1.xy)) ? 0.0 : 1.0;\n"
     "        }\n"
-    "        float rho = u.uFogDensity * exp(-u.uFogFalloff * (s.y - u.uFogHeight));\n"
+    "        float rho = u.uFogDensity * exp(-u.uFogFalloff * max(s.y - u.uFogHeight, 0.0));\n"   /* P8.6: a LAYER — thins upward, never thickens below (no runaway beams beneath floating islands) */
     "        accum += lit * rho * stp;\n"
     "    }\n"
     "    float phase = hg(dot(dir, u.uLightDir), 0.6);\n"      /* forward scatter toward the source */
@@ -1141,9 +1169,11 @@ static const char *GODRAY_FRAGMENT_SRC =
     "#version 330 core\n"
     "in vec2 vUV;\n"
     "uniform sampler2D uDepth;\n"
-    "uniform sampler2D uShadowMap;\n"
+    "uniform sampler2D uShadowMap;\n"                         /* near cascade (P8 item 6) */
+    "uniform sampler2D uShadowMap1;\n"                        /* far cascade */
     "uniform mat4 uInvViewProj;\n"
     "uniform mat4 uLightVP;\n"
+    "uniform mat4 uLightVP1;\n"
     "uniform vec3 uCamPos;\n"
     "uniform vec3 uLightColor;\n"
     "uniform vec3 uLightDir;\n"
@@ -1169,21 +1199,26 @@ static const char *GODRAY_FRAGMENT_SRC =
     "    float len = length(dir);\n"
     "    dir = (len > 1e-4) ? dir / len : vec3(0.0, 0.0, 1.0);\n"
     "    const int N = 48;\n"
-    "    float stp = len / float(N);\n"
+    "    float stp = min(len, 45.0) / float(N);\n"   /* P8.6: god-rays are a NEAR-field effect — cap the
+                                                        march so a long ray into the open doesn't pile a
+                                                        giant lit column onto the sun-direction hotspot */
     "    float dither = hash12(vUV * 4096.0);\n"
     "    float accum = 0.0;\n"
     "    int i;\n"
     "    for (i = 0; i < N; i++) {\n"
     "        vec3 s = uCamPos + dir * (float(i) + dither) * stp;\n"
-    "        vec4 lp = uLightVP * vec4(s, 1.0);\n"
-    "        vec3 pr = lp.xyz / lp.w * 0.5 + 0.5;\n"
-    "        float lit = 0.0;\n"                               /* outside the cone = dark (it is a spot) */
-    "        if (lp.w > 0.0 && pr.z <= 1.0 &&\n"
-    "            pr.x >= 0.0 && pr.x <= 1.0 && pr.y >= 0.0 && pr.y <= 1.0) {\n"
-    "            float closest = texture(uShadowMap, pr.xy).r;\n"
-    "            lit = (pr.z - 0.002 > closest) ? 0.0 : 1.0;\n"
+    "        float lit = 1.0;\n"                               /* directional sun: lit unless a cascade shadows it (P8 item 6) */
+    "        vec4 l0 = uLightVP * vec4(s, 1.0);\n"
+    "        vec3 p0 = l0.xyz / l0.w * 0.5 + 0.5;\n"
+    "        if (p0.x > 0.0 && p0.x < 1.0 && p0.y > 0.0 && p0.y < 1.0 && p0.z <= 1.0) {\n"
+    "            lit = (p0.z - 0.002 > texture(uShadowMap, p0.xy).r) ? 0.0 : 1.0;\n"
+    "        } else {\n"
+    "            vec4 l1 = uLightVP1 * vec4(s, 1.0);\n"
+    "            vec3 p1 = l1.xyz / l1.w * 0.5 + 0.5;\n"
+    "            if (p1.x > 0.0 && p1.x < 1.0 && p1.y > 0.0 && p1.y < 1.0 && p1.z <= 1.0)\n"
+    "                lit = (p1.z - 0.002 > texture(uShadowMap1, p1.xy).r) ? 0.0 : 1.0;\n"
     "        }\n"
-    "        float rho = uFogDensity * exp(-uFogFalloff * (s.y - uFogHeight));\n"
+    "        float rho = uFogDensity * exp(-uFogFalloff * max(s.y - uFogHeight, 0.0));\n"   /* P8.6: a LAYER — thins upward, never thickens below (no runaway beams beneath floating islands) */
     "        accum += lit * rho * stp;\n"
     "    }\n"
     "    float phase = hg(dot(dir, uLightDir), 0.6);\n"        /* forward scatter toward the source */
@@ -2185,16 +2220,20 @@ typedef struct {
     RhiRenderTarget hdr_rt;          /* scene renders here, then to the window */
     int             rt_width, rt_height;  /* size hdr_rt was built at; recreate on resize */
     float           exposure;        /* HDR exposure (item 7c); '[' / ']' scrub it live */
-    /* the one shadow-casting spot light (item 9a). Defined once here so 9b's
-       shadow matrix reads the SAME pos/dir/cone — lit cone and shadow agree. */
+    /* the shadow-casting sun (P8 item 6): now a DIRECTIONAL light. light_pos ->
+       light_target encodes only its DIRECTION (no position/cone/falloff). The
+       inner/outer/intensity fields linger for the scene-format round-trip and
+       intensity scaling; the cone is no longer applied. */
     vec3        light_pos;
-    vec3        light_target;    /* aim point; dir = normalize(target - pos) */
+    vec3        light_target;    /* with light_pos: the sun direction = normalize(target - pos) */
     vec3        light_color;
-    float       light_intensity; /* high: inverse-square falloff at room scale */
-    float       light_inner_deg; /* full-bright within this half-angle */
-    float       light_outer_deg; /* fades to black by this half-angle */
-    /* shadow map (item 9b): depth from the light's POV; fixed size, not resized */
-    RhiRenderTarget shadow_rt;
+    float       light_intensity; /* directional: a plain multiplier (no inverse-square) */
+    float       light_inner_deg; /* (legacy spot cone; unused by the directional sun) */
+    float       light_outer_deg; /* (legacy spot cone; unused by the directional sun) */
+    /* cascaded shadow maps (P8 item 6): one depth target per cascade + the
+       per-frame fitted light matrices (rebuilt each render from the camera). */
+    RhiRenderTarget shadow_rt[SHADOW_CASCADES];
+    mat4            cascade_vp[SHADOW_CASCADES];
     RhiPipeline shadow_pipeline;       /* the depth-only pass */
     RhiPipeline skinned_pipeline;        /* item 9: palette-blending twins of */
     RhiPipeline skinned_shadow_pipeline; /* the standard + shadow pipelines  */
@@ -6220,16 +6259,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
             {   /* P8 item 3: the abbey brings a low RAKING SUN, so the new
                    god-ray pass throws real shafts through the half-fallen
-                   arcade (its ruin gaps are perfect occluders). Aimed at the
-                   nave mid-height and kept close enough to sit in the 20m
-                   shadow volume — full coverage waits on cascaded shadows. */
+                   arcade (its ruin gaps are perfect occluders). With the
+                   directional sun + cascades (P8 item 6), pos/target set only
+                   the rake DIRECTION; the cascades cover the whole island, so
+                   no distance compensation is needed. */
                 vec3 ctr = vec3_add(ipos, vec3_make(0.0f, datum + 5.0f, 0.0f));
                 st->light_pos       = vec3_add(ctr, vec3_make(-10.0f, 10.0f, 5.0f));
-                st->light_target    = ctr;
+                st->light_target    = ctr;       /* sun dir = normalize(target - pos) */
                 st->light_color     = vec3_make(1.0f, 0.93f, 0.78f);
-                st->light_intensity = 320.0f;   /* the rake sits ~14m off, vs ~4m for the
-                                                   old lamp — inverse-square wants ~15x more */
-                st->light_inner_deg = 30.0f;
+                st->light_intensity = 3.5f;      /* directional: a plain multiplier */
+                st->light_inner_deg = 30.0f;     /* (cone fields unused by the sun) */
                 st->light_outer_deg = 42.0f;
             }
             rot = cp.swapped
@@ -7552,8 +7591,14 @@ static int init_scene(AppState *state) {
         RhiShader       sh_shader, dbg_shader;
         RhiPipelineDesc sh_desc = {0}, dbg_desc = {0};
 
-        state->shadow_rt = rhi_create_depth_target(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
-        if (!state->shadow_rt.id) return 0;
+        {
+            int sc;
+            for (sc = 0; sc < SHADOW_CASCADES; sc++) {
+                state->shadow_rt[sc] = rhi_create_depth_target(SHADOW_MAP_SIZE,
+                                                               SHADOW_MAP_SIZE);
+                if (!state->shadow_rt[sc].id) return 0;
+            }
+        }
 
         sh_shader = rhi_create_shader(SHADOW_VERTEX_SRC, SHADOW_FRAGMENT_SRC);
         sh_desc.shader     = sh_shader;
@@ -7876,15 +7921,14 @@ static int init_scene(AppState *state) {
     state->exposure   = 1.0f;
     state->ambient_scale = 1.0f;   /* zero-init would fade up from black */
 
-    /* the spot light: warm, aimed at the table. Moved INSIDE the item-5 room
-       (it sat at y=5, above the 3.5m ceiling — which would have shadowed the
-       entire interior); intensity drops with the shorter throw (inverse
-       square). */
+    /* the sun (P8 item 6): a DIRECTIONAL light. pos -> target sets only the
+       direction — warm light from the upper corner. No position/cone/falloff;
+       the interior is carried by IBL ambient + the point lights/lanterns. */
     state->light_pos       = vec3_make(2.2f, 3.1f, 2.2f);
-    state->light_target    = vec3_make(0.0f, 0.5f, 0.0f);
+    state->light_target    = vec3_make(0.0f, 0.5f, 0.0f);   /* sun dir = normalize(target - pos) */
     state->light_color     = vec3_make(1.0f, 0.95f, 0.85f);
-    state->light_intensity = 70.0f;
-    state->light_inner_deg = 22.0f;
+    state->light_intensity = 3.5f;                          /* directional: a plain multiplier */
+    state->light_inner_deg = 22.0f;                         /* (cone fields unused by the sun) */
     state->light_outer_deg = 38.0f;
 
     /* environment map (Phase A1): load the equirectangular HDR -> a linear float
@@ -7996,12 +8040,97 @@ static void adopt_legacy_motion(AppState *st) {
    pass call this — they MUST use the identical matrix or the cast shadow won't
    line up with the lit cone. The spot's perspective frustum IS the light matrix:
    fovy = the cone's full angle (+ slack), square map, near/far bracket the scene. */
-static mat4 light_view_proj(const AppState *state) {
-    mat4  lview = mat4_look_at(state->light_pos, state->light_target,
-                               vec3_make(0.0f, 1.0f, 0.0f));
-    float lfovy = sol_radians(2.0f * state->light_outer_deg + 6.0f);
-    mat4  lproj = mat4_perspective(lfovy, 1.0f, SHADOW_NEAR, SHADOW_FAR);
+/* ---- the sun's cascaded shadow projection (P8 item 6) ---- */
+typedef struct { mat4 vp[SHADOW_CASCADES]; } CascadeSet;
+
+/* mat4 * (p,1) keeping w (for the perspective divide of inv_cam_vp). */
+static vec4 m4_point(mat4 m, vec3 p) {
+    vec4 r;
+    r.x = m.m[0]*p.x + m.m[4]*p.y + m.m[8] *p.z + m.m[12];
+    r.y = m.m[1]*p.x + m.m[5]*p.y + m.m[9] *p.z + m.m[13];
+    r.z = m.m[2]*p.x + m.m[6]*p.y + m.m[10]*p.z + m.m[14];
+    r.w = m.m[3]*p.x + m.m[7]*p.y + m.m[11]*p.z + m.m[15];
+    return r;
+}
+static float vec3_len(vec3 v)            { return sqrtf(vec3_dot(v, v)); }
+static vec3  vec3_lerp(vec3 a, vec3 b, float t) {
+    return vec3_add(a, vec3_scale(vec3_sub(b, a), t));
+}
+
+/* Fit ONE orthographic cascade to the camera-frustum slice between view
+   fractions t_near..t_far (0 = camera near, 1 = camera far), looking down the
+   sun. A bounding-SPHERE fit makes the box size invariant to camera rotation;
+   pinning a fixed world reference (the origin) to the texel grid quantizes the
+   box's translation to whole texels — so shadow edges JUMP rather than crawl as
+   the slow camera drifts. That is the §1.3 anti-shimmer, done geometrically (no
+   TAA). inv_cam_vp = inverse(camProj * camView). */
+static mat4 cascade_fit(mat4 inv_cam_vp, vec3 sundir, float t_near, float t_far) {
+    const float xy[4][2] = { {-1.0f,-1.0f}, {1.0f,-1.0f}, {1.0f,1.0f}, {-1.0f,1.0f} };
+    vec3  corner[8];
+    vec3  center = vec3_make(0.0f, 0.0f, 0.0f);
+    vec3  up, eye;
+    float radius = 0.0f, tex;
+    mat4  lview, lproj, sm;
+    vec4  o;
+    float h, dx, dy;
+    int   i;
+    for (i = 0; i < 4; i++) {                      /* 4 frustum edges, near->far */
+        vec4 nh = m4_point(inv_cam_vp, vec3_make(xy[i][0], xy[i][1], -1.0f));
+        vec4 fh = m4_point(inv_cam_vp, vec3_make(xy[i][0], xy[i][1],  1.0f));
+        vec3 nw = vec3_scale(vec3_make(nh.x, nh.y, nh.z), 1.0f / nh.w);
+        vec3 fw = vec3_scale(vec3_make(fh.x, fh.y, fh.z), 1.0f / fh.w);
+        corner[i]     = vec3_lerp(nw, fw, t_near);  /* slice's near plane */
+        corner[i + 4] = vec3_lerp(nw, fw, t_far);   /* slice's far plane  */
+    }
+    for (i = 0; i < 8; i++) center = vec3_add(center, corner[i]);
+    center = vec3_scale(center, 1.0f / 8.0f);
+    for (i = 0; i < 8; i++) {
+        float d = vec3_len(vec3_sub(corner[i], center));
+        if (d > radius) radius = d;
+    }
+    tex = (2.0f * radius) / (float)SHADOW_MAP_SIZE;
+    up  = (fabsf(sundir.y) > 0.99f) ? vec3_make(0.0f, 0.0f, 1.0f)
+                                    : vec3_make(0.0f, 1.0f, 0.0f);
+    eye = vec3_sub(center, vec3_scale(sundir, radius + SHADOW_CASTER_PAD));
+    lview = mat4_look_at(eye, center, up);
+    lproj = mat4_ortho(-radius, radius, -radius, radius,
+                       0.1f, SHADOW_CASTER_PAD + 2.0f * radius + 1.0f);
+    /* texel-snap: nudge the projection so the world origin lands on a texel
+       center; every fragment then shifts by the same texel-aligned amount. */
+    sm = mat4_mul(lproj, lview);
+    o  = m4_point(sm, vec3_make(0.0f, 0.0f, 0.0f));   /* ortho => o.w == 1 */
+    h  = (float)SHADOW_MAP_SIZE * 0.5f;
+    dx = (floorf(o.x * h + 0.5f) - o.x * h) / h;
+    dy = (floorf(o.y * h + 0.5f) - o.y * h) / h;
+    lproj.m[12] += dx;
+    lproj.m[13] += dy;
+    (void)tex;                                    /* tex documents the texel size */
     return mat4_mul(lproj, lview);
+}
+
+/* Build all cascades for this frame from the camera's view + projection. The
+   sun's DIRECTION is encoded by light_pos -> light_target (magnitude ignored). */
+static CascadeSet sun_cascades(const AppState *state, mat4 view, mat4 proj) {
+    CascadeSet cs;
+    vec3  sundir = vec3_normalize(vec3_sub(state->light_target, state->light_pos));
+    mat4  inv    = mat4_inverse(mat4_mul(proj, view));
+    float cam_near = 0.1f, cam_far = 100.0f;      /* must match camera_proj() */
+    float split[SHADOW_CASCADES + 1];
+    int   c;
+    split[0]               = cam_near;
+    split[SHADOW_CASCADES] = SHADOW_DIST;
+    for (c = 1; c < SHADOW_CASCADES; c++) {        /* practical split (log/uniform blend) */
+        float p     = (float)c / (float)SHADOW_CASCADES;
+        float log_d = cam_near * powf(SHADOW_DIST / cam_near, p);
+        float uni_d = cam_near + (SHADOW_DIST - cam_near) * p;
+        split[c]    = 0.8f * log_d + 0.2f * uni_d; /* lambda 0.8: tighter near cascade */
+    }
+    for (c = 0; c < SHADOW_CASCADES; c++) {
+        float tN = (split[c]     - cam_near) / (cam_far - cam_near);
+        float tF = (split[c + 1] - cam_near) / (cam_far - cam_near);
+        cs.vp[c] = cascade_fit(inv, sundir, tN, tF);
+    }
+    return cs;
 }
 
 /* everything a lit surface needs, bound on the given pipeline — shared
@@ -8037,14 +8166,16 @@ static void bind_scene_uniforms(const AppState *state, RhiPipeline pipeline,
         rhi_set_uniform_float("uCosInner", ci);
         rhi_set_uniform_float("uCosOuter", co);
 
-        /* shadow map (item 9c): the SAME light matrix as the depth pass, plus the
-           depth texture on unit 4 (0-3 are albedo/MR/AO/normal). */
-        {
-            mat4 lvp = light_view_proj(state);
-            rhi_set_uniform_mat4("uLightVP", lvp.m);
-            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt), 4);
-            rhi_set_uniform_int("uShadowMap", 4);
-        }
+        /* cascaded shadow maps (P8 item 6): the SAME matrices the depth pass
+           used, one depth texture per cascade. Near cascade on unit 4 (0-3 are
+           material), far on unit 8 (5-7 are IBL). Two cascades is wired
+           explicitly here; a third would add uShadowMap2 on unit 9. */
+        rhi_set_uniform_mat4("uLightVP",   state->cascade_vp[0].m);
+        rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt[0]), 4);
+        rhi_set_uniform_int("uShadowMap",  4);
+        rhi_set_uniform_mat4("uLightVP1",  state->cascade_vp[1].m);
+        rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt[1]), 8);
+        rhi_set_uniform_int("uShadowMap1", 8);
 
         /* IBL: irradiance (diffuse, B3) unit 5; prefilter + BRDF LUT (specular, C3)
            units 6/7. (0-3 material textures, 4 shadow.) */
@@ -8253,6 +8384,118 @@ static unsigned char *vis_fill(AppState *st, mat4 vp) {
     return st->vis;
 }
 
+/* Emit every shadow caster into the currently-bound depth target, projected by
+   `lvp` and culled by `lvis` (one cascade's view volume). Factored out of pass 0
+   so the cascade loop can call it once per cascade (P8 item 6); the body is the
+   former single-map shadow pass verbatim — static meshes, the skinned fox, the
+   instanced ornament, and the FIELD forest. The depth shaders are unchanged:
+   they just multiply by whatever uLightVP is bound. */
+static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) {
+    sol_u32 i;
+    rhi_set_pipeline(state->shadow_pipeline);
+    rhi_set_uniform_mat4("uLightVP", lvp.m);
+    for (i = 0; i < state->scene.count; i++) {
+        const SceneObject *o = &state->scene.objects[i];
+        mat4 model;
+        if (o->mesh.index_count == 0) continue;   /* empties cast nothing */
+        if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
+            continue;                             /* water casts nothing */
+        if (lvis && !lvis[o->handle]) continue;   /* outside this cascade's box */
+        model = scene_world_matrix(&state->scene, o);
+        rhi_set_uniform_mat4("uModel", model.m);
+        rhi_bind_vertex_buffer(o->mesh.vbuffer);
+        rhi_bind_index_buffer(o->mesh.ibuffer);
+        rhi_draw_indexed(0, o->mesh.index_count);
+    }
+    /* skinned casters (item 9): same palette as the visible draw —
+       the shadow runs WITH the fox */
+    if (state->skinned_shadow_pipeline.id) {
+        sol_u32 sk;
+        for (sk = 0; sk < state->scene.count; sk++) {
+            const SceneObject *o  = &state->scene.objects[sk];
+            const char        *sg = scene_meta_get(&state->scene,
+                                        o->handle, "skin_glb");
+            SkinnedModel      *sm;
+            mat4               model, pal[SKEL_MAX_JOINTS];
+            int                clip;
+            float              speed;
+            if (!sg) continue;
+            sm = skinned_get(sg);
+            if (!sm) continue;
+            skin_anim_of(o, &clip, &speed);
+            skinned_palette_at(sm, clip, (float)glfwGetTime() * speed, pal);
+            rhi_set_pipeline(state->skinned_shadow_pipeline);
+            rhi_set_uniform_mat4("uLightVP", lvp.m);
+            model = scene_world_matrix(&state->scene, o);
+            rhi_set_uniform_mat4("uModel", model.m);
+            rhi_set_uniform_mat4_array("uPalette", (const float *)pal,
+                                       sm->rig.skel.joint_count);
+            rhi_bind_vertex_buffer(sm->mesh.vbuffer);
+            rhi_bind_index_buffer(sm->mesh.ibuffer);
+            rhi_draw_indexed(0, sm->mesh.index_count);
+        }
+    }
+    /* instanced ornament casts too (P6 item 10; P7 item 4: leaves
+       cast their canopy) — floating shadowless ornament reads wrong.
+       The shadow uses the UN-swayed pose (no uTime here): the rustle
+       is gentle and the canopy shadow is a blob — a flagged v1. */
+    if (state->ornament_shadow_pipeline.id && state->ornament_count > 0) {
+        int op;
+        rhi_set_pipeline(state->ornament_shadow_pipeline);
+        rhi_set_uniform_mat4("uLightVP", lvp.m);
+        for (op = 0; op < state->ornament_count; op++) {
+            OrnamentPatch *pt = &state->ornament[op];
+            Mesh          *um = &state->orn_mesh[pt->kind];
+            SceneObject   *o  = scene_get(&state->scene, pt->source);
+            mat4 model;
+            if (!o || um->index_count == 0) continue;
+            if (lvis && !lvis[o->handle]) continue;
+            model = scene_world_matrix(&state->scene, o);
+            rhi_set_uniform_mat4("uModel", model.m);
+            rhi_bind_vertex_buffer(um->vbuffer);
+            rhi_bind_index_buffer(um->ibuffer);
+            rhi_bind_instance_buffer(pt->data);
+            rhi_draw_indexed_instanced(0, um->index_count, pt->count);
+        }
+    }
+    /* the FIELD forest casts too (P7 item 5): wood + canopy, gated by this
+       cascade's view volume — the near cascade is tight, so the cost is
+       bounded to trees actually near the slice */
+    if (state->ornament_shadow_pipeline.id && state->forest_count > 0) {
+        int fp, v, lk;
+        rhi_set_pipeline(state->ornament_shadow_pipeline);
+        rhi_set_uniform_mat4("uLightVP", lvp.m);
+        for (fp = 0; fp < state->forest_count; fp++) {
+            ForestPatch *f   = &state->forest[fp];
+            SceneObject *isl = scene_get(&state->scene, f->island);
+            mat4 model;
+            if (!isl) continue;
+            if (lvis && !lvis[f->island]) continue;
+            model = scene_world_matrix(&state->scene, isl);
+            rhi_set_uniform_mat4("uModel", model.m);
+            for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+                Mesh *um = &state->forest_wood[v];
+                if (f->wood_count[v] == 0 || um->index_count == 0) continue;
+                rhi_bind_vertex_buffer(um->vbuffer);
+                rhi_bind_index_buffer(um->ibuffer);
+                rhi_bind_instance_buffer(f->wood[v]);
+                rhi_draw_indexed_instanced(0, um->index_count,
+                                           f->wood_count[v]);
+            }
+            for (lk = 0; lk < 2; lk++) {
+                Mesh *um = &state->orn_mesh[lk == 0 ? ORN_LEAF_BROAD
+                                                    : ORN_LEAF_CONIFER];
+                if (f->canopy_count[lk] == 0 || um->index_count == 0) continue;
+                rhi_bind_vertex_buffer(um->vbuffer);
+                rhi_bind_index_buffer(um->ibuffer);
+                rhi_bind_instance_buffer(f->canopy[lk]);
+                rhi_draw_indexed_instanced(0, um->index_count,
+                                           f->canopy_count[lk]);
+            }
+        }
+    }
+}
+
 static void render(AppState *state) {
     float   aspect;
     float   us;        /* UI scale: sizes track the framebuffer (see pass 3) */
@@ -8270,115 +8513,28 @@ static void render(AppState *state) {
 
     sel_root = selection_root(&state->scene, state->selected_handle);  /* 0 if nothing selected */
 
-    /* ---- pass 0: depth from the light's POV -> the shadow map (item 9b) ---- */
+    /* ---- pass 0: depth from the SUN into each cascade's shadow map (P8 item 6).
+       The camera view/proj are built HERE because the cascades fit the camera
+       frustum; pass 1 reuses them. ---- */
+    aspect = (state->fb_height > 0)
+           ? (float)state->fb_width / (float)state->fb_height
+           : 1.0f;
+    eye  = state->camera.pos;
+    view = camera_view(&state->camera);
+    proj = camera_proj(&state->camera, aspect);
     {
-        mat4 lvp = light_view_proj(state);
-        unsigned char *lvis = vis_fill(state, lvp);   /* the LIGHT's view volume */
-        rhi_begin_pass(state->shadow_rt, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);  /* clears depth to 1.0 */
-        rhi_set_pipeline(state->shadow_pipeline);
-        rhi_set_uniform_mat4("uLightVP", lvp.m);
-        for (i = 0; i < state->scene.count; i++) {
-            const SceneObject *o = &state->scene.objects[i];
-            mat4 model;
-            if (o->mesh.index_count == 0) continue;   /* empties cast nothing */
-            if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
-                continue;                             /* water casts nothing */
-            if (lvis && !lvis[o->handle]) continue;   /* outside the light's cone:
-                                                         cannot cast into the map */
-            model = scene_world_matrix(&state->scene, o);
-            rhi_set_uniform_mat4("uModel", model.m);
-            rhi_bind_vertex_buffer(o->mesh.vbuffer);
-            rhi_bind_index_buffer(o->mesh.ibuffer);
-            rhi_draw_indexed(0, o->mesh.index_count);
+        CascadeSet cs = sun_cascades(state, view, proj);
+        int c;
+        for (c = 0; c < SHADOW_CASCADES; c++) state->cascade_vp[c] = cs.vp[c];
+        for (c = 0; c < SHADOW_CASCADES; c++) {
+            /* vis_fill shares one buffer — used fully by emit before the next
+               cascade refills it, so the sequential calls don't alias */
+            unsigned char *lvis = vis_fill(state, state->cascade_vp[c]);
+            rhi_begin_pass(state->shadow_rt[c], RHI_CLEAR_ALL,
+                           0.0f, 0.0f, 0.0f, 1.0f);   /* clears depth to 1.0 */
+            emit_shadow_casters(state, state->cascade_vp[c], lvis);
+            rhi_end_pass();
         }
-        /* skinned casters (item 9): same palette as the visible draw —
-           the shadow runs WITH the fox */
-        if (state->skinned_shadow_pipeline.id) {
-            sol_u32 sk;
-            for (sk = 0; sk < state->scene.count; sk++) {
-                const SceneObject *o  = &state->scene.objects[sk];
-                const char        *sg = scene_meta_get(&state->scene,
-                                            o->handle, "skin_glb");
-                SkinnedModel      *sm;
-                mat4               model, pal[SKEL_MAX_JOINTS];
-                int                clip;
-                float              speed;
-                if (!sg) continue;
-                sm = skinned_get(sg);
-                if (!sm) continue;
-                skin_anim_of(o, &clip, &speed);
-                skinned_palette_at(sm, clip, (float)glfwGetTime() * speed, pal);
-                rhi_set_pipeline(state->skinned_shadow_pipeline);
-                rhi_set_uniform_mat4("uLightVP", lvp.m);
-                model = scene_world_matrix(&state->scene, o);
-                rhi_set_uniform_mat4("uModel", model.m);
-                rhi_set_uniform_mat4_array("uPalette", (const float *)pal,
-                                           sm->rig.skel.joint_count);
-                rhi_bind_vertex_buffer(sm->mesh.vbuffer);
-                rhi_bind_index_buffer(sm->mesh.ibuffer);
-                rhi_draw_indexed(0, sm->mesh.index_count);
-            }
-        }
-        /* instanced ornament casts too (P6 item 10; P7 item 4: leaves
-           cast their canopy) — floating shadowless ornament reads wrong.
-           The shadow uses the UN-swayed pose (no uTime here): the rustle
-           is gentle and the canopy shadow is a blob — a flagged v1. */
-        if (state->ornament_shadow_pipeline.id && state->ornament_count > 0) {
-            int op;
-            rhi_set_pipeline(state->ornament_shadow_pipeline);
-            rhi_set_uniform_mat4("uLightVP", lvp.m);
-            for (op = 0; op < state->ornament_count; op++) {
-                OrnamentPatch *pt = &state->ornament[op];
-                Mesh          *um = &state->orn_mesh[pt->kind];
-                SceneObject   *o  = scene_get(&state->scene, pt->source);
-                mat4 model;
-                if (!o || um->index_count == 0) continue;
-                if (lvis && !lvis[o->handle]) continue;
-                model = scene_world_matrix(&state->scene, o);
-                rhi_set_uniform_mat4("uModel", model.m);
-                rhi_bind_vertex_buffer(um->vbuffer);
-                rhi_bind_index_buffer(um->ibuffer);
-                rhi_bind_instance_buffer(pt->data);
-                rhi_draw_indexed_instanced(0, um->index_count, pt->count);
-            }
-        }
-        /* the FIELD forest casts too (P7 item 5): wood + canopy, gated by
-           the LIGHT's view volume — only trees near the camera, since the
-           shadow frustum is tight (SHADOW_FAR), so the cost is bounded */
-        if (state->ornament_shadow_pipeline.id && state->forest_count > 0) {
-            int fp, v, lk;
-            rhi_set_pipeline(state->ornament_shadow_pipeline);
-            rhi_set_uniform_mat4("uLightVP", lvp.m);
-            for (fp = 0; fp < state->forest_count; fp++) {
-                ForestPatch *f   = &state->forest[fp];
-                SceneObject *isl = scene_get(&state->scene, f->island);
-                mat4 model;
-                if (!isl) continue;
-                if (lvis && !lvis[f->island]) continue;
-                model = scene_world_matrix(&state->scene, isl);
-                rhi_set_uniform_mat4("uModel", model.m);
-                for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
-                    Mesh *um = &state->forest_wood[v];
-                    if (f->wood_count[v] == 0 || um->index_count == 0) continue;
-                    rhi_bind_vertex_buffer(um->vbuffer);
-                    rhi_bind_index_buffer(um->ibuffer);
-                    rhi_bind_instance_buffer(f->wood[v]);
-                    rhi_draw_indexed_instanced(0, um->index_count,
-                                               f->wood_count[v]);
-                }
-                for (lk = 0; lk < 2; lk++) {
-                    Mesh *um = &state->orn_mesh[lk == 0 ? ORN_LEAF_BROAD
-                                                        : ORN_LEAF_CONIFER];
-                    if (f->canopy_count[lk] == 0 || um->index_count == 0) continue;
-                    rhi_bind_vertex_buffer(um->vbuffer);
-                    rhi_bind_index_buffer(um->ibuffer);
-                    rhi_bind_instance_buffer(f->canopy[lk]);
-                    rhi_draw_indexed_instanced(0, um->index_count,
-                                               f->canopy_count[lk]);
-                }
-            }
-        }
-        rhi_end_pass();
     }
     rt1 = glfwGetTime();
     yardstick_ms(&state->t_shadow, rt1 - rt0);
@@ -8386,13 +8542,8 @@ static void render(AppState *state) {
     /* ---- pass 1: render the scene into the offscreen HDR target ---- */
     rhi_begin_pass(state->hdr_rt, RHI_CLEAR_ALL, 0.10f, 0.12f, 0.15f, 1.0f);
 
-    aspect = (state->fb_height > 0)
-           ? (float)state->fb_width / (float)state->fb_height
-           : 1.0f;
-    eye  = state->camera.pos;                       /* camera drives the view now */
-    view = camera_view(&state->camera);
-    proj = camera_proj(&state->camera, aspect);
-    vis  = vis_fill(state, mat4_mul(proj, view));   /* the CAMERA's view volume */
+    /* aspect/eye/view/proj were built before pass 0 (the cascades fit them) */
+    vis = vis_fill(state, mat4_mul(proj, view));    /* the CAMERA's view volume */
 
     /* point lights (P4 item 5): collect once per frame, upload once — the
        arrays are program state, so they survive draw_mesh's re-binds of the
@@ -8920,21 +9071,26 @@ static void render(AppState *state) {
         rt2 = glfwGetTime();
         yardstick_ms(&state->t_hdr, rt2 - rt1);
 
-        /* ---- god-rays (P8 item 3): half-res raymarch of the spot's shadow
-           volume into godray_rt; reads the scene depth (stop at geometry) and
-           the shadow map (lit/shadowed). Added in post like a bloom level. ---- */
+        /* ---- god-rays (P8 item 3): half-res raymarch of the SUN's cascaded
+           shadow volume into godray_rt; reads the scene depth (stop at geometry)
+           and both cascade maps (lit/shadowed). Added in post like a bloom
+           level. Now directional (P8 item 6): the rays rake the whole island
+           instead of a 20m cone — the §1.4 payoff (improve the author, every
+           reader benefits). ---- */
         {
             mat4 grivp = mat4_inverse(mat4_mul(proj, view));
-            mat4 grlvp = light_view_proj(state);
             vec3 grld  = vec3_normalize(vec3_sub(state->light_target, state->light_pos));
             rhi_begin_pass(state->godray_rt, RHI_CLEAR_COLOR, 0.0f, 0.0f, 0.0f, 1.0f);
             rhi_set_pipeline(state->godray_pipeline);
             rhi_bind_texture(rhi_render_target_depth_texture(state->hdr_rt), 0);
             rhi_set_uniform_int("uDepth", 0);
-            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt), 1);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt[0]), 1);
             rhi_set_uniform_int("uShadowMap", 1);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt[1]), 8);
+            rhi_set_uniform_int("uShadowMap1", 8);
             rhi_set_uniform_mat4("uInvViewProj", grivp.m);
-            rhi_set_uniform_mat4("uLightVP", grlvp.m);
+            rhi_set_uniform_mat4("uLightVP",  state->cascade_vp[0].m);
+            rhi_set_uniform_mat4("uLightVP1", state->cascade_vp[1].m);
             rhi_set_uniform_vec3("uCamPos", state->camera.pos.x,
                                  state->camera.pos.y, state->camera.pos.z);
             rhi_set_uniform_vec3("uLightColor", state->light_color.x,
@@ -9009,12 +9165,14 @@ static void render(AppState *state) {
 
         rhi_begin_pass(screen, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);
         if (state->show_shadow_map) {
-            /* inspector: the shadow map as linearized grayscale (item 9b debug) */
+            /* inspector: cascade 0 (the near map) as grayscale. Ortho depth is
+               already linear; the debug shader's perspective linearize just
+               makes a monotonic debug view (P8 item 6). */
             rhi_set_pipeline(state->shadow_debug_pipeline);
-            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt), 0);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt[0]), 0);
             rhi_set_uniform_int("uDepth", 0);
-            rhi_set_uniform_float("uNear", SHADOW_NEAR);
-            rhi_set_uniform_float("uFar",  SHADOW_FAR);
+            rhi_set_uniform_float("uNear", 1.0f);
+            rhi_set_uniform_float("uFar",  SHADOW_DIST);
         } else {
             rhi_set_pipeline(state->post_pipeline);
             rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
@@ -9702,7 +9860,11 @@ int main(void) {
     asset_store_free(&g_texgen_assets); /* synthesized maps: nobody names them */
     asset_store_free(&g_tex_assets);    /* textures LAST: parts may name them */
     if (state.hdr_rt.id) rhi_destroy_render_target(state.hdr_rt);
-    if (state.shadow_rt.id) rhi_destroy_render_target(state.shadow_rt);
+    {
+        int sc;
+        for (sc = 0; sc < SHADOW_CASCADES; sc++)
+            if (state.shadow_rt[sc].id) rhi_destroy_render_target(state.shadow_rt[sc]);
+    }
     rhi_shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
