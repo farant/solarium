@@ -995,11 +995,13 @@ static const char *POST_FRAGMENT_SRC =
     "                      texture2d<float> uBloom [[texture(1)]],\n"
     "                      depth2d<float>   uDepth [[texture(2)]],\n"
     "                      texture2d<float> uGodray [[texture(3)]],\n"
+    "                      texture2d<float> uAO     [[texture(4)]],\n"
     "                      sampler s0 [[sampler(0)]],\n"
     "                      sampler s1 [[sampler(1)]],\n"
     "                      sampler s2 [[sampler(2)]],\n"
-    "                      sampler s3 [[sampler(3)]]) {\n"
-    "    float3 hdr    = uHdr.sample(s0, v.uv).rgb\n"
+    "                      sampler s3 [[sampler(3)]],\n"
+    "                      sampler s4 [[sampler(4)]]) {\n"
+    "    float3 hdr    = uHdr.sample(s0, v.uv).rgb * uAO.sample(s4, v.uv).r\n"  /* P8 item 5: AO on the lit scene only */
     "                  + uBloom.sample(s1, v.uv).rgb * u.uBloomStrength\n"
     "                  + uGodray.sample(s3, v.uv).rgb;\n"
     "    hdr          *= u.uExposure;\n"
@@ -1042,6 +1044,7 @@ static const char *POST_FRAGMENT_SRC =
     "uniform float uFogHeight;\n"
     "uniform float uFogFalloff;\n"
     "uniform sampler2D uGodray;\n"                           /* P8 item 3: the shafts */
+    "uniform sampler2D uAO;\n"                               /* P8 item 5: ambient occlusion */
     "out vec4 FragColor;\n"
     "vec3 aces(vec3 x) {\n"                                  /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
@@ -1055,7 +1058,7 @@ static const char *POST_FRAGMENT_SRC =
     "    return 1.0 - exp(-L * c * ig);\n"
     "}\n"
     "void main() {\n"
-    "    vec3 hdr    = texture(uHdr, vUV).rgb\n"
+    "    vec3 hdr    = texture(uHdr, vUV).rgb * texture(uAO, vUV).r\n"  /* P8 item 5: AO on the lit scene only */
     "                + texture(uBloom, vUV).rgb * uBloomStrength\n"
     "                + texture(uGodray, vUV).rgb;\n"  /* the glow is
                                                                 radiance too: add BEFORE
@@ -1211,6 +1214,170 @@ static const char *DEPTHCOPY_FRAGMENT_SRC =
     "out vec4 FragColor;\n"
     "void main() {\n"
     "    FragColor = vec4(texture(uDepth, vUV).r);\n"
+    "}\n";
+#endif
+
+/* --- SSAO (P8 item 5): hemisphere ambient occlusion. Reconstruct view pos +
+   a derivative normal from the depth, sample a baked 16-pt hemisphere kernel
+   (per-pixel hash-rotated), count how many land inside closer geometry within
+   uRadius (a range check kills haloing across big gaps). Then a bilateral blur
+   denoises. Half-res; post-multiplied into the lit scene. Shares
+   POST_VERTEX_SRC. --- */
+#ifdef SOL_RHI_METAL
+static const char *SSAO_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "struct SU { float4x4 uProj; float4x4 uInvProj; float uRadius; float uBias; float uStrength; };\n"
+    "static float3 vpos(float2 uv, depth2d<float> dT, sampler s, constant SU &u) {\n"
+    "    float d = dT.sample(s, uv);\n"
+    "    float4 c = u.uInvProj * float4(uv*2.0-1.0, d*2.0-1.0, 1.0);\n"
+    "    return c.xyz / c.w;\n"
+    "}\n"
+    "static float h12(float2 p) {\n"
+    "    float3 p3 = fract(float3(p.xyx) * 0.1031);\n"
+    "    p3 += dot(p3, p3.yzx + 33.33);\n"
+    "    return fract((p3.x + p3.y) * p3.z);\n"
+    "}\n"
+    "static float3 kern(int i) {\n"                              /* a hemisphere spiral, clustered near the origin */
+    "    float fi = (float(i) + 0.5) / 16.0;\n"
+    "    float z = fi; float r = sqrt(max(0.0, 1.0 - z*z));\n"
+    "    float a = float(i) * 2.4;\n"
+    "    return float3(cos(a)*r, sin(a)*r, z) * mix(0.1, 1.0, fi*fi);\n"
+    "}\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      constant SU &u [[buffer(0)]],\n"
+    "                      depth2d<float> uDepth [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float d = uDepth.sample(s0, v.uv);\n"
+    "    if (d >= 1.0) return float4(1.0);\n"                    /* sky: no occlusion */
+    "    float3 P = vpos(v.uv, uDepth, s0, u);\n"
+    "    float2 e = 1.5 / float2(uDepth.get_width(), uDepth.get_height());\n"  /* best-neighbor normal (P8 item 5) */
+    "    float3 Pr = vpos(v.uv + float2(e.x,0.0), uDepth, s0, u);\n"
+    "    float3 Pl = vpos(v.uv - float2(e.x,0.0), uDepth, s0, u);\n"
+    "    float3 Pu = vpos(v.uv + float2(0.0,e.y), uDepth, s0, u);\n"
+    "    float3 Pd = vpos(v.uv - float2(0.0,e.y), uDepth, s0, u);\n"
+    "    float3 ddx = abs(Pr.z - P.z) < abs(Pl.z - P.z) ? (Pr - P) : (P - Pl);\n"
+    "    float3 ddy = abs(Pu.z - P.z) < abs(Pd.z - P.z) ? (Pu - P) : (P - Pd);\n"
+    "    float3 Nrm = normalize(cross(ddx, ddy));\n"
+    "    float rot = h12(fmod(v.pos.xy, 4.0)) * 6.2831853;\n"    /* 4x4 tile, killed exactly by the 4x4 box blur */
+    "    float3 rv = float3(cos(rot), sin(rot), 0.0);\n"
+    "    float3 T = normalize(rv - Nrm * dot(rv, Nrm));\n"
+    "    float3x3 TBN = float3x3(T, cross(Nrm, T), Nrm);\n"
+    "    float occ = 0.0;\n"
+    "    for (int i = 0; i < 16; i++) {\n"
+    "        float3 sp = P + (TBN * kern(i)) * u.uRadius;\n"
+    "        float4 off = u.uProj * float4(sp, 1.0);\n"
+    "        float2 suv = (off.xy / off.w) * 0.5 + 0.5;\n"
+    "        if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;\n"
+    "        float sz = vpos(suv, uDepth, s0, u).z;\n"
+    "        float rc = smoothstep(0.0, 1.0, u.uRadius / max(0.001, abs(P.z - sz)));\n"
+    "        if (sz >= sp.z + u.uBias) occ += rc;\n"
+    "    }\n"
+    "    float ao = 1.0 - (occ / 16.0) * u.uStrength;\n"
+    "    return float4(ao);\n"
+    "}\n";
+static const char *SSAO_BLUR_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "struct BU { float uNear; float uFar; };\n"
+    "static float lin(float d, constant BU &u) {\n"
+    "    return (2.0*u.uNear*u.uFar)/(u.uFar+u.uNear-(2.0*d-1.0)*(u.uFar-u.uNear));\n"
+    "}\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      constant BU &u [[buffer(0)]],\n"
+    "                      texture2d<float> uAO    [[texture(0)]],\n"
+    "                      depth2d<float>   uDepth [[texture(1)]],\n"
+    "                      sampler s0 [[sampler(0)]],\n"
+    "                      sampler s1 [[sampler(1)]]) {\n"
+    "    float2 texel = 1.0 / float2(uAO.get_width(), uAO.get_height());\n"
+    "    float cd = lin(uDepth.sample(s1, v.uv), u);\n"          /* LINEAR depth: slope vs silhouette in metres */
+    "    float sum = 0.0, wsum = 0.0;\n"
+    "    for (int x = -2; x <= 1; x++)\n"
+    "        for (int y = -2; y <= 1; y++) {\n"
+    "            float2 uv = v.uv + float2(x, y) * texel;\n"
+    "            float w = max(0.0, 1.0 - abs(lin(uDepth.sample(s1, uv), u) - cd) / 0.5);\n"
+    "            sum += uAO.sample(s0, uv).r * w; wsum += w;\n"
+    "        }\n"
+    "    return float4(wsum > 0.0 ? sum / wsum : uAO.sample(s0, v.uv).r);\n"
+    "}\n";
+#else
+static const char *SSAO_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uDepth;\n"
+    "uniform mat4 uProj;\n"
+    "uniform mat4 uInvProj;\n"
+    "uniform float uRadius;\n"
+    "uniform float uBias;\n"
+    "uniform float uStrength;\n"
+    "out vec4 FragColor;\n"
+    "vec3 vpos(vec2 uv) {\n"
+    "    float d = texture(uDepth, uv).r;\n"
+    "    vec4 c = uInvProj * vec4(uv*2.0-1.0, d*2.0-1.0, 1.0);\n"
+    "    return c.xyz / c.w;\n"
+    "}\n"
+    "float h12(vec2 p) {\n"
+    "    vec3 p3 = fract(vec3(p.xyx) * 0.1031);\n"
+    "    p3 += dot(p3, p3.yzx + 33.33);\n"
+    "    return fract((p3.x + p3.y) * p3.z);\n"
+    "}\n"
+    "vec3 kern(int i) {\n"                                       /* a hemisphere spiral, clustered near the origin */
+    "    float fi = (float(i) + 0.5) / 16.0;\n"
+    "    float z = fi; float r = sqrt(max(0.0, 1.0 - z*z));\n"
+    "    float a = float(i) * 2.4;\n"
+    "    return vec3(cos(a)*r, sin(a)*r, z) * mix(0.1, 1.0, fi*fi);\n"
+    "}\n"
+    "void main() {\n"
+    "    float d = texture(uDepth, vUV).r;\n"
+    "    if (d >= 1.0) { FragColor = vec4(1.0); return; }\n"     /* sky: no occlusion */
+    "    vec3 P = vpos(vUV);\n"
+    "    vec2 e = 1.5 / vec2(textureSize(uDepth, 0));\n"        /* best-neighbor normal (P8 item 5) */
+    "    vec3 Pr = vpos(vUV + vec2(e.x,0.0)), Pl = vpos(vUV - vec2(e.x,0.0));\n"
+    "    vec3 Pu = vpos(vUV + vec2(0.0,e.y)), Pd = vpos(vUV - vec2(0.0,e.y));\n"
+    "    vec3 ddx = abs(Pr.z - P.z) < abs(Pl.z - P.z) ? (Pr - P) : (P - Pl);\n"
+    "    vec3 ddy = abs(Pu.z - P.z) < abs(Pd.z - P.z) ? (Pu - P) : (P - Pd);\n"
+    "    vec3 Nrm = normalize(cross(ddx, ddy));\n"
+    "    float rot = h12(mod(gl_FragCoord.xy, 4.0)) * 6.2831853;\n"  /* 4x4 tile, killed exactly by the 4x4 box blur */
+    "    vec3 rv = vec3(cos(rot), sin(rot), 0.0);\n"
+    "    vec3 T = normalize(rv - Nrm * dot(rv, Nrm));\n"
+    "    mat3 TBN = mat3(T, cross(Nrm, T), Nrm);\n"
+    "    float occ = 0.0;\n"
+    "    int i;\n"
+    "    for (i = 0; i < 16; i++) {\n"
+    "        vec3 sp = P + (TBN * kern(i)) * uRadius;\n"
+    "        vec4 off = uProj * vec4(sp, 1.0);\n"
+    "        vec2 suv = (off.xy / off.w) * 0.5 + 0.5;\n"
+    "        if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;\n"
+    "        float sz = vpos(suv).z;\n"
+    "        float rc = smoothstep(0.0, 1.0, uRadius / max(0.001, abs(P.z - sz)));\n"
+    "        if (sz >= sp.z + uBias) occ += rc;\n"
+    "    }\n"
+    "    float ao = 1.0 - (occ / 16.0) * uStrength;\n"
+    "    FragColor = vec4(ao);\n"
+    "}\n";
+static const char *SSAO_BLUR_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uAO;\n"
+    "uniform sampler2D uDepth;\n"
+    "uniform float uNear;\n"
+    "uniform float uFar;\n"
+    "out vec4 FragColor;\n"
+    "float lin(float d) { return (2.0*uNear*uFar)/(uFar+uNear-(2.0*d-1.0)*(uFar-uNear)); }\n"
+    "void main() {\n"
+    "    vec2 texel = 1.0 / vec2(textureSize(uAO, 0));\n"
+    "    float cd = lin(texture(uDepth, vUV).r);\n"              /* LINEAR depth: slope vs silhouette in metres */
+    "    float sum = 0.0, wsum = 0.0;\n"
+    "    int x, y;\n"
+    "    for (x = -2; x <= 1; x++)\n"
+    "        for (y = -2; y <= 1; y++) {\n"
+    "            vec2 uv = vUV + vec2(x, y) * texel;\n"
+    "            float w = max(0.0, 1.0 - abs(lin(texture(uDepth, uv).r) - cd) / 0.5);\n"
+    "            sum += texture(uAO, uv).r * w; wsum += w;\n"
+    "        }\n"
+    "    FragColor = vec4(wsum > 0.0 ? sum / wsum : texture(uAO, vUV).r);\n"
     "}\n";
 #endif
 
@@ -2089,6 +2256,11 @@ typedef struct {
        scene depth without a feedback loop on the live depth attachment */
     RhiRenderTarget depthcopy_rt;
     RhiPipeline     copy_pipeline;
+    /* SSAO (P8 item 5): a half-res occlusion factor + a bilateral blur,
+       post-multiplied into the lit scene */
+    RhiRenderTarget ssao_rt, ssao_blur_rt;
+    int             ssao_w, ssao_h;
+    RhiPipeline     ssao_pipeline, ssao_blur_pipeline;
     /* the meadow (P4 item 3): per-island instanced grass — DERIVED data
        (the arrows pattern at landscape scale), rebuilt on load and mint,
        never serialized */
@@ -7362,6 +7534,18 @@ static int init_scene(AppState *state) {
         state->copy_pipeline = rhi_create_pipeline(&cp_desc);
     }
 
+    {   /* SSAO (P8 item 5): the occlusion pass + its bilateral blur */
+        RhiPipelineDesc sd = {0}, sbd = {0};
+        sd.shader     = rhi_create_shader(POST_VERTEX_SRC, SSAO_FRAGMENT_SRC);
+        sd.attr_count = 0; sd.stride = 0;
+        sd.depth_test = SOL_FALSE; sd.blend = SOL_FALSE;
+        state->ssao_pipeline = rhi_create_pipeline(&sd);
+        sbd.shader     = rhi_create_shader(POST_VERTEX_SRC, SSAO_BLUR_FRAGMENT_SRC);
+        sbd.attr_count = 0; sbd.stride = 0;
+        sbd.depth_test = SOL_FALSE; sbd.blend = SOL_FALSE;
+        state->ssao_blur_pipeline = rhi_create_pipeline(&sbd);
+    }
+
     /* the shadow map + its two pipelines (item 9b): a depth-only pass that reads
        just position, and a fullscreen inspector that shows the depth map. */
     {
@@ -7969,6 +8153,14 @@ static void ensure_render_target(AppState *state, int w, int h) {
     if (state->depthcopy_rt.id != 0)
         rhi_destroy_render_target(state->depthcopy_rt);
     state->depthcopy_rt = rhi_create_render_target(w, h, RHI_TEX_RGBA16F);
+
+    /* SSAO (P8 item 5): half-res occlusion + its blur, like the god-ray buffer */
+    state->ssao_w = w / 2; if (state->ssao_w < 8) state->ssao_w = 8;
+    state->ssao_h = h / 2; if (state->ssao_h < 8) state->ssao_h = 8;
+    if (state->ssao_rt.id != 0)      rhi_destroy_render_target(state->ssao_rt);
+    if (state->ssao_blur_rt.id != 0) rhi_destroy_render_target(state->ssao_blur_rt);
+    state->ssao_rt      = rhi_create_render_target(state->ssao_w, state->ssao_h, RHI_TEX_RGBA16F);
+    state->ssao_blur_rt = rhi_create_render_target(state->ssao_w, state->ssao_h, RHI_TEX_RGBA16F);
 }
 
 /* fold a per-frame sample (seconds) into a readable ms readout. Fixed blend:
@@ -8756,6 +8948,34 @@ static void render(AppState *state) {
             rhi_end_pass();
         }
 
+        /* ---- SSAO (P8 item 5): a half-res occlusion factor + a bilateral
+           blur, both reading the scene depth like the god-ray pass ---- */
+        {
+            mat4 ssivp = mat4_inverse(proj);
+            rhi_begin_pass(state->ssao_rt, RHI_CLEAR_COLOR, 1.0f, 1.0f, 1.0f, 1.0f);
+            rhi_set_pipeline(state->ssao_pipeline);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->hdr_rt), 0);
+            rhi_set_uniform_int("uDepth", 0);
+            rhi_set_uniform_mat4("uProj", proj.m);
+            rhi_set_uniform_mat4("uInvProj", ssivp.m);
+            rhi_set_uniform_float("uRadius", 0.5f);
+            rhi_set_uniform_float("uBias", 0.03f);
+            rhi_set_uniform_float("uStrength", 1.4f);
+            rhi_draw(0, 3);
+            rhi_end_pass();
+
+            rhi_begin_pass(state->ssao_blur_rt, RHI_CLEAR_COLOR, 1.0f, 1.0f, 1.0f, 1.0f);
+            rhi_set_pipeline(state->ssao_blur_pipeline);
+            rhi_bind_texture(rhi_render_target_texture(state->ssao_rt), 0);
+            rhi_set_uniform_int("uAO", 0);
+            rhi_bind_texture(rhi_render_target_depth_texture(state->hdr_rt), 1);
+            rhi_set_uniform_int("uDepth", 1);
+            rhi_set_uniform_float("uNear", 0.1f);   /* match camera_proj */
+            rhi_set_uniform_float("uFar", 100.0f);
+            rhi_draw(0, 3);
+            rhi_end_pass();
+        }
+
         /* ---- the bloom chain (P4 item 5): extract, walk down, walk up ---- */
         if (state->bloom_on && state->bloom_up_pipeline.id) {
             int lv;
@@ -8800,9 +9020,11 @@ static void render(AppState *state) {
             rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
             rhi_bind_texture(rhi_render_target_texture(state->bloom_rt[0]), 1);
             rhi_bind_texture(rhi_render_target_texture(state->godray_rt), 3);
+            rhi_bind_texture(rhi_render_target_texture(state->ssao_blur_rt), 4);
             rhi_set_uniform_int("uHdr", 0);             /* sampler -> texture unit 0 */
             rhi_set_uniform_int("uBloom", 1);
             rhi_set_uniform_int("uGodray", 3);          /* P8 item 3: the shafts buffer */
+            rhi_set_uniform_int("uAO", 4);              /* P8 item 5: ambient occlusion */
             rhi_set_uniform_float("uBloomStrength",
                                   state->bloom_on ? 0.06f : 0.0f);
             rhi_set_uniform_float("uExposure", state->exposure);
