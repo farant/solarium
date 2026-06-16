@@ -218,6 +218,10 @@ static id<MTLRenderCommandEncoder> g_encoder;      /* the open pass; nil between
 static sol_bool                   g_pass_alive;    /* encoder usable */
 static MTLPixelFormat             g_pass_color_fmt;
 static MTLPixelFormat             g_pass_depth_fmt;
+static volatile double            g_frame_gpu_ms = -1.0;  /* P8 item 1: whole-frame
+                                        GPU ms, set on the completion queue
+                                        (GPUEndTime-GPUStartTime), read on the
+                                        main thread next frame — a benign race */
 
 /* bound state, applied lazily at draw time (GL is a state machine; the app
    may set state in any order around passes — recording + late application
@@ -1216,6 +1220,16 @@ void rhi_draw_indexed_instanced(int first_index, int index_count,
                        instanceCount:(NSUInteger)instance_count];
 }
 
+/* GPU timers (P8 item 1). v1: whole-frame only — cb.GPUStartTime/EndTime
+   captured in the completion handler below, free and universally supported.
+   The per-pass path (MTLCounterSampleBuffer sampled at stage boundaries) is
+   the gated follow-up; until then rhi_timer_ms reports unavailable and the
+   scopes no-op. */
+void   rhi_timer_begin(int slot) { (void)slot; }
+void   rhi_timer_end(void)       { }
+double rhi_timer_ms(int slot)    { (void)slot; return -1.0; }
+double rhi_timer_frame_ms(void)  { return g_frame_gpu_ms; }
+
 void rhi_present(void) {
     if (g_encoder) { [g_encoder endEncoding]; g_encoder = nil; }
     g_pass_alive = SOL_FALSE;
@@ -1223,7 +1237,7 @@ void rhi_present(void) {
         dispatch_semaphore_t sem = g_inflight;
         if (g_drawable) [g_cmdbuf presentDrawable:g_drawable];
         [g_cmdbuf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-            (void)cb;
+            g_frame_gpu_ms = (cb.GPUEndTime - cb.GPUStartTime) * 1000.0;  /* P8 item 1 */
             dispatch_semaphore_signal(sem);
         }];
         [g_cmdbuf commit];

@@ -180,6 +180,20 @@ RhiTexture rhi_render_target_depth_texture(RhiRenderTarget rt);
 
 void rhi_present(void);
 
+/* ---- GPU timers (P8 item 1) ---- the GPU twin of main.c's CPU yardstick.
+   The backend owns the timing and a deferred read so nothing stalls; the RHI
+   stays ignorant of what a pass MEANS — it sees opaque numbered slots, and
+   main.c assigns them meaning. Both calls return milliseconds, or < 0 when
+   the backend cannot measure (macOS GL's timer queries are stubbed to zero,
+   so GL reports < 0 for both and keeps only its CPU yardstick; Metal reports
+   the whole frame today, and per-pass once the counter-sample path lands).
+   Pair rhi_timer_begin/end around a pass; rhi_timer_end closes the open one. */
+#define RHI_TIMER_SLOTS 16
+void   rhi_timer_begin(int slot);   /* GPU stopwatch start, inside a pass */
+void   rhi_timer_end(void);         /* ...stop the currently-open slot */
+double rhi_timer_ms(int slot);      /* per-pass GPU ms; < 0 if unavailable */
+double rhi_timer_frame_ms(void);    /* whole-frame GPU ms; < 0 if unavailable */
+
 /* ---- resource teardown ---- */
 void rhi_destroy_buffer(RhiBuffer buffer);
 void rhi_destroy_shader(RhiShader shader);

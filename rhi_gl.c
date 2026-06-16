@@ -738,6 +738,17 @@ void rhi_present(void) {
     glfwSwapBuffers(g_window);
 }
 
+/* GPU timers (P8 item 1): macOS GL is a translation layer over Metal
+   ("4.1 Metal - 88.1") whose ARB_timer_query is a no-op stub — both
+   glQueryCounter(GL_TIMESTAMP) and GL_TIME_ELAPSED return 0 with no error
+   (the gate spike proved it on the M2). So GL honestly reports "unavailable"
+   (< 0); the HUD shows GPU times on the Metal backend only, and GL keeps its
+   CPU yardstick. */
+void   rhi_timer_begin(int slot) { (void)slot; }
+void   rhi_timer_end(void)       { }
+double rhi_timer_ms(int slot)    { (void)slot; return -1.0; }
+double rhi_timer_frame_ms(void)  { return -1.0; }
+
 /* ---- resource teardown (free-list keeps create/destroy loops bounded) ---- */
 void rhi_destroy_buffer(RhiBuffer buffer) {
     sol_u32 idx;

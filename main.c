@@ -1854,6 +1854,7 @@ typedef struct {
        numbers that can MOVE are encode/update cost and the draw counts —
        culling and instancing claims point here, not at fps. All in ms. */
     float t_frame, t_cpu, t_update, t_shadow, t_hdr, t_post, t_swap;
+    float t_frame_gpu;              /* P8 item 1: whole-frame GPU ms (Metal); < 0 = n/a (GL) */
     int   draws_done, draws_total;  /* scene objects drawn / with geometry */
     /* the spatial index (P4 item 2): world AABBs of everything with
        geometry, build-or-refit on demand (ids compared each refresh —
@@ -8588,9 +8589,14 @@ static void render(AppState *state) {
                the documented swap cadence); cpu = everything we control;
                the sub-times are per-pass ENCODE cost, where culling and
                instancing wins will actually show. */
-            sprintf(line, "frame %4.1f cpu %4.2f swap %4.1f",
-                    (double)state->t_frame, (double)state->t_cpu,
-                    (double)state->t_swap);
+            if (state->t_frame_gpu > 0.0f)
+                sprintf(line, "frame %4.1f cpu %4.2f gpu %4.1f swap %4.1f",
+                        (double)state->t_frame, (double)state->t_cpu,
+                        (double)state->t_frame_gpu, (double)state->t_swap);
+            else
+                sprintf(line, "frame %4.1f cpu %4.2f swap %4.1f",
+                        (double)state->t_frame, (double)state->t_cpu,
+                        (double)state->t_swap);
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
             sprintf(line, "up %4.2f shadow %4.2f hdr %4.2f",
@@ -9116,6 +9122,18 @@ int main(void) {
         yardstick_ms(&state.t_cpu, y2 - now);         /* all the work we control */
         rhi_present();
         yardstick_ms(&state.t_swap, glfwGetTime() - y2);  /* the vsync block */
+        {   /* P8 item 1: the GPU yardstick — Metal reports the completed
+               frame's GPU time (a few frames deferred); GL returns < 0 (its
+               timer queries are stubbed). Snap on the first real sample so the
+               -1/0 sentinel doesn't smear into the smoothed value. */
+            double gpu = rhi_timer_frame_ms();
+            if (gpu >= 0.0) {
+                if (state.t_frame_gpu <= 0.0f) state.t_frame_gpu = (float)gpu;
+                else state.t_frame_gpu += ((float)gpu - state.t_frame_gpu) * 0.08f;
+            } else {
+                state.t_frame_gpu = -1.0f;
+            }
+        }
     }
 
     plan_overlay_drop(&state);
