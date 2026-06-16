@@ -56,8 +56,9 @@ void particles_spawn(ParticlePool *pp, const Particle *p);
 
 /* One Euler step for every live particle; the dead are removed by
    swap-with-last (order scrambles — additive blending is commutative,
-   so draw order is a freedom the renderer already paid for). */
-void particles_update(ParticlePool *pp, float dt);
+   so draw order is a freedom the renderer already paid for). `wind` is
+   a global drift acceleration (P7 item 9); {0,0,0} = the old behavior. */
+void particles_update(ParticlePool *pp, float dt, vec3 wind);
 
 /* Writes up to max_count instances (PARTICLE_INST_FLOATS floats each)
    and returns how many: position, lerped size, lerped color with the

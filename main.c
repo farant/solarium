@@ -560,7 +560,8 @@ static const char *MEADOW_VERTEX_SRC =        /* [[instance_id]] = gl_InstanceID
     "    float4 inst [[attribute(1)]];\n"
     "    float4 tint [[attribute(2)]];\n"
     "};\n"
-    "struct VU { float4x4 uView; float4x4 uProj; float uTime; };\n"
+    "struct VU { float4x4 uView; float4x4 uProj; float uTime;\n"
+    "            float3 uWind; };\n"
     "struct VOut { float4 pos [[position]]; float3 tint; float root; };\n"
     "vertex VOut vmain(VIn v [[stage_in]], uint iid [[instance_id]],\n"
     "                  constant VU &u [[buffer(2)]]) {\n"
@@ -568,8 +569,10 @@ static const char *MEADOW_VERTEX_SRC =        /* [[instance_id]] = gl_InstanceID
     "    float a = (float)iid * 2.39996;\n"
     "    float c = cos(a), s = sin(a);\n"
     "    float3 p = float3(c*v.pos.x + s*v.pos.z, v.pos.y, -s*v.pos.x + c*v.pos.z) * v.inst.w;\n"
-    "    p.x += sin(u.uTime * 1.4 + a * 5.0) * 0.10 * v.pos.y * v.inst.w;\n"
-    "    p.z += cos(u.uTime * 1.1 + a * 3.0) * 0.06 * v.pos.y * v.inst.w;\n"
+    "    float ph = u.uTime * 1.5 + dot(v.inst.xz, u.uWind.xy) * 0.4 + a;\n"  /* gust front */
+    "    float bend = sin(ph) * (0.05 + 0.18 * u.uWind.z) * v.pos.y * v.inst.w;\n"
+    "    p.x += u.uWind.x * bend + sin(u.uTime*2.1 + a*5.0) * 0.02 * v.pos.y * v.inst.w;\n"
+    "    p.z += u.uWind.y * bend + cos(u.uTime*1.7 + a*3.0) * 0.02 * v.pos.y * v.inst.w;\n"
     "    o.tint = v.tint.rgb;\n"
     "    o.root = v.pos.y;\n"
     "    o.pos = u.uProj * (u.uView * float4(v.inst.xyz + p, 1.0));\n"
@@ -592,14 +595,17 @@ static const char *MEADOW_VERTEX_SRC =
     "uniform mat4 uView;\n"
     "uniform mat4 uProj;\n"
     "uniform float uTime;\n"
+    "uniform vec3 uWind;\n"
     "out vec3  vTint;\n"
     "out float vRoot;\n"
     "void main() {\n"
     "    float a = float(gl_InstanceID) * 2.39996;\n"   /* the golden angle */
     "    float c = cos(a), s = sin(a);\n"
     "    vec3 p = vec3(c*aPos.x + s*aPos.z, aPos.y, -s*aPos.x + c*aPos.z) * aInst.w;\n"
-    "    p.x += sin(uTime * 1.4 + a * 5.0) * 0.10 * aPos.y * aInst.w;\n"
-    "    p.z += cos(uTime * 1.1 + a * 3.0) * 0.06 * aPos.y * aInst.w;\n"
+    "    float ph = uTime * 1.5 + dot(aInst.xz, uWind.xy) * 0.4 + a;\n"   /* gust front */
+    "    float bend = sin(ph) * (0.05 + 0.18 * uWind.z) * aPos.y * aInst.w;\n"
+    "    p.x += uWind.x * bend + sin(uTime*2.1 + a*5.0) * 0.02 * aPos.y * aInst.w;\n"
+    "    p.z += uWind.y * bend + cos(uTime*1.7 + a*3.0) * 0.02 * aPos.y * aInst.w;\n"
     "    vTint = aTint.rgb;\n"
     "    vRoot = aPos.y;\n"
     "    gl_Position = uProj * uView * vec4(aInst.xyz + p, 1.0);\n"
@@ -641,6 +647,7 @@ static const char *ORNAMENT_VERTEX_SRC =
     "    float4x4 uProj;\n"
     "    float3x3 uNormalMatrix;\n"
     "    float    uTime;\n"
+    "    float3   uWind;\n"
     "};\n"
     "struct VOut {\n"
     "    float4 pos [[position]];\n"
@@ -655,8 +662,10 @@ static const char *ORNAMENT_VERTEX_SRC =
     "    float3 sp = float3(v.pos.x * v.instB.x, v.pos.y * v.instB.y, v.pos.z * v.instB.x);\n"
     "    float3 lp = float3(c*sp.x + s*sp.z, sp.y, -s*sp.x + c*sp.z) + v.instA.xyz;\n"
     "    float sway = v.instB.w * sp.y;\n"   /* amp 0 = no move (balusters) */
-    "    lp.x += sway * sin(u.uTime * 1.3 + v.instB.z);\n"
-    "    lp.z += sway * 0.7 * cos(u.uTime * 1.05 + v.instB.z);\n"
+    "    float wph = u.uTime * 1.4 + dot(v.instA.xz, u.uWind.xy) * 0.4 + v.instB.z;\n"
+    "    float bend = sway * (0.5 + 0.9 * u.uWind.z) * sin(wph);\n"
+    "    lp.x += u.uWind.x * bend + sway * sin(u.uTime*2.0 + v.instB.z) * 0.3;\n"
+    "    lp.z += u.uWind.y * bend + sway * cos(u.uTime*1.6 + v.instB.z) * 0.3;\n"
     "    float4 worldPos = u.uModel * float4(lp, 1.0);\n"
     "    o.pos = u.uProj * (u.uView * worldPos);\n"
     "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"   /* GL clip z -> Metal */
@@ -703,6 +712,7 @@ static const char *ORNAMENT_VERTEX_SRC =
     "uniform mat4 uProj;\n"
     "uniform mat3 uNormalMatrix;\n"
     "uniform float uTime;\n"
+    "uniform vec3 uWind;\n"
     "out vec3 vNormal;\n"
     "out vec3 vWorldPos;\n"
     "out vec2 vUV;\n"
@@ -712,8 +722,10 @@ static const char *ORNAMENT_VERTEX_SRC =
     "    vec3 sp = vec3(aPos.x * aInstB.x, aPos.y * aInstB.y, aPos.z * aInstB.x);\n"
     "    vec3 lp = vec3(c*sp.x + s*sp.z, sp.y, -s*sp.x + c*sp.z) + aInstA.xyz;\n"
     "    float sway = aInstB.w * sp.y;\n"      /* amp 0 = no move (balusters) */
-    "    lp.x += sway * sin(uTime * 1.3 + aInstB.z);\n"
-    "    lp.z += sway * 0.7 * cos(uTime * 1.05 + aInstB.z);\n"
+    "    float wph = uTime * 1.4 + dot(aInstA.xz, uWind.xy) * 0.4 + aInstB.z;\n"
+    "    float bend = sway * (0.5 + 0.9 * uWind.z) * sin(wph);\n"
+    "    lp.x += uWind.x * bend + sway * sin(uTime*2.0 + aInstB.z) * 0.3;\n"
+    "    lp.z += uWind.y * bend + sway * cos(uTime*1.6 + aInstB.z) * 0.3;\n"
     "    vec4 worldPos = uModel * vec4(lp, 1.0);\n"
     "    gl_Position = uProj * uView * worldPos;\n"
     "    vec3 ln = vec3(aNormal.x / aInstB.x, aNormal.y / aInstB.y, aNormal.z / aInstB.x);\n"
@@ -1899,6 +1911,10 @@ typedef struct {
        normal map; ponds are scene objects the scene pass skips */
     RhiPipeline  water_pipeline;
     RhiTexture   water_ripple;
+
+    /* the one wind (P7 item 9): evaluated once per frame at the camera,
+       read by the meadow + canopy shaders, particle drift, and audio */
+    float        wind_dx, wind_dz, wind_gust;
     sol_bool     e_was_down;    /* 'E' mints a dust emitter */
     sol_bool     y_was_down;    /* 'Y' mints a fox (item 9) */
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
@@ -2326,6 +2342,25 @@ static void bvh_refresh(AppState *st) {
 static float meadow_rnd(sol_u32 *rng) {
     *rng = *rng * 1664525u + 1013904223u;
     return (float)((*rng >> 8) & 0xFFFFu) / 65535.0f;
+}
+
+/* THE ONE WIND (P7 item 9): a tiny pure field — a prevailing direction
+   that slowly wobbles, and a GUST scalar (0..1) that swells and fades.
+   Evaluated once per frame at the camera; the meadow + canopy sway,
+   particle drift, and the audio wind gain all read it, so the island
+   gusts TOGETHER (one gust, four senses — the lantern's law at weather
+   scale). The traveling-wave crossing lives in the shaders: they add
+   dot(worldPos.xz, dir) to the phase, so a gust front sweeps the field. */
+static void wind_at(float t, float x, float z,
+                    float *dx, float *dz, float *gust) {
+    float ang = 0.7f + 0.40f * sinf(t * 0.07f) + 0.18f * sinf(t * 0.019f);
+    float g   = 0.55f * sinf(t * 0.42f + x * 0.03f - z * 0.021f)
+              + 0.30f * sinf(t * 0.91f + x * 0.06f)
+              + 0.15f * sinf(t * 1.70f - z * 0.05f);
+    *dx = cosf(ang);
+    *dz = sinf(ang);
+    g = 0.5f + 0.5f * g;                 /* into 0..1 */
+    *gust = g < 0.0f ? 0.0f : g > 1.0f ? 1.0f : g;
 }
 
 /* flowers cluster in PATCHES (item 7): a per-cell hash over a coarse
@@ -2908,8 +2943,11 @@ static void update_audio(AppState *st, float dt) {
     int    i;
 
     /* wind breathes with containment: outdoors full, indoors a memory —
-       the same derived query that dims the ambient dims the air */
+       the same derived query that dims the ambient dims the air. AND it
+       swells with the gust (P7 item 9): the wind you SEE crossing the
+       grass is the wind you HEAR rise — one gust, four senses. */
     target = (st->current_room == 0) ? 0.20f : 0.02f;
+    target *= 0.6f + 0.8f * st->wind_gust;
     ease   = 1.0f - expf(-dt * 2.5f);
     g_wind_cur += (target - g_wind_cur) * ease;
     if (fabsf(g_wind_cur - g_wind_sent) > 0.003f) {
@@ -7869,6 +7907,7 @@ static void render(AppState *state) {
         rhi_set_uniform_mat4("uView", view.m);
         rhi_set_uniform_mat4("uProj", proj.m);
         rhi_set_uniform_float("uTime", (float)glfwGetTime());
+        rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
         rhi_bind_vertex_buffer(state->meadow_vbuf);
         rhi_bind_index_buffer(state->meadow_ibuf);
         for (mp = 0; mp < state->meadow_count; mp++) {
@@ -7916,6 +7955,7 @@ static void render(AppState *state) {
                 bind_scene_uniforms(state, state->ornament_pipeline, model,
                                     view, proj, eye, 0.0f, f->wood_mat[v]);
                 rhi_set_uniform_float("uTime", (float)glfwGetTime());
+                rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
                 rhi_bind_vertex_buffer(um->vbuffer);
                 rhi_bind_instance_buffer(f->wood[v]);
                 rhi_bind_index_buffer(um->ibuffer);
@@ -7931,6 +7971,7 @@ static void render(AppState *state) {
                     bind_scene_uniforms(state, state->ornament_pipeline, model,
                                         view, proj, eye, 0.0f, leafmat[lk]);
                     rhi_set_uniform_float("uTime", (float)glfwGetTime());
+                    rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
                     rhi_bind_vertex_buffer(um->vbuffer);
                     rhi_bind_instance_buffer(f->canopy[lk]);
                     rhi_bind_index_buffer(um->ibuffer);
@@ -7945,6 +7986,7 @@ static void render(AppState *state) {
                                     view, proj, eye, 0.0f,
                                     forest_scree_material());
                 rhi_set_uniform_float("uTime", (float)glfwGetTime());
+                rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
                 rhi_bind_vertex_buffer(um->vbuffer);
                 rhi_bind_instance_buffer(f->scree);
                 rhi_bind_index_buffer(um->ibuffer);
@@ -7975,6 +8017,7 @@ static void render(AppState *state) {
                                 view, proj, eye,
                                 o->handle == sel_root ? 1.0f : 0.0f, mat);
             rhi_set_uniform_float("uTime", (float)glfwGetTime());
+            rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
             rhi_bind_vertex_buffer(um->vbuffer);
             rhi_bind_instance_buffer(pt->data);
             rhi_bind_index_buffer(um->ibuffer);
@@ -8879,14 +8922,21 @@ int main(void) {
             }
         }
         y1 = glfwGetTime();
+        /* THE ONE WIND (P7 item 9): one evaluation per frame at the
+           camera, read by every consumer this frame */
+        wind_at((float)now, state.camera.pos.x, state.camera.pos.z,
+                &state.wind_dx, &state.wind_dz, &state.wind_gust);
         update(&state, dt);                           /* animate the scene */
         components_update(&state.scene, (float)now, (float)dt);  /* overlays
                                                          rewrite BEFORE the tree
                                                          and render read poses */
-        particles_update(&state.particles, (float)dt); /* spawn-then-step: the
-                                                         emitters above deposited
-                                                         newborns; one Euler step
-                                                         ages everything (item 7) */
+        {   /* particle drift rides the wind: motes + falling leaves blow
+               downwind, harder in a gust (light dust, stronger push) */
+            vec3 wind = vec3_make(state.wind_dx * (0.4f + 1.8f * state.wind_gust),
+                                  0.0f,
+                                  state.wind_dz * (0.4f + 1.8f * state.wind_gust));
+            particles_update(&state.particles, (float)dt, wind);
+        }
         update_audio(&state, (float)dt);              /* wind by containment,
                                                          lantern crackles in 3D,
                                                          footsteps (item 8) */

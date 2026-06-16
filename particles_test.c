@@ -34,6 +34,7 @@ int main(void) {
     Particle p;
     float    inst[8 * PARTICLE_INST_FLOATS];
     int      i, n;
+    vec3     zero_wind = { 0.0f, 0.0f, 0.0f };   /* item 9: drift off here */
 
     /* empty pool: nothing lives, fill writes nothing */
     particles_init(&pool);
@@ -63,7 +64,7 @@ int main(void) {
     p.vel = (vec3){ 1.0f, 2.0f, 3.0f };
     p.acc = (vec3){ 0.0f, -1.0f, 0.0f };
     particles_spawn(&pool, &p);
-    particles_update(&pool, 0.5f);
+    particles_update(&pool, 0.5f, zero_wind);
     if (!feq(pool.items[0].vel.y, 1.5f) ||
         !feq(pool.items[0].pos.x, 0.5f) ||
         !feq(pool.items[0].pos.y, 0.75f) ||
@@ -80,7 +81,7 @@ int main(void) {
     p = base_particle(); p.life = 0.5f;  p.size0 = 1.0f; particles_spawn(&pool, &p);
     p = base_particle(); p.life = 10.0f; p.size0 = 2.0f; particles_spawn(&pool, &p);
     p = base_particle(); p.life = 10.0f; p.size0 = 3.0f; particles_spawn(&pool, &p);
-    particles_update(&pool, 1.0f);
+    particles_update(&pool, 1.0f, zero_wind);
     if (pool.live != 2) {
         printf("FAIL: the short-lived particle must die\n"); return 1;
     }
@@ -102,7 +103,7 @@ int main(void) {
     particles_init(&pool);
     p = base_particle(); p.life = 1.0f;
     particles_spawn(&pool, &p);
-    particles_update(&pool, 1.0f);
+    particles_update(&pool, 1.0f, zero_wind);
     if (pool.live != 0) {
         printf("FAIL: age == life must die\n"); return 1;
     }
@@ -151,7 +152,7 @@ int main(void) {
     p = base_particle();
     p.life = 10.0f;
     for (i = 0; i < PARTICLE_CAP - 1; i++) particles_spawn(&pool, &p);
-    particles_update(&pool, 1.0f);                /* the old guard: u = 0.1 */
+    particles_update(&pool, 1.0f, zero_wind);                /* the old guard: u = 0.1 */
     p.size0 = 777.0f;                             /* the newborn: u = 0 */
     particles_spawn(&pool, &p);
     if (pool.live != PARTICLE_CAP) {

@@ -30,7 +30,7 @@ void particles_spawn(ParticlePool *pp, const Particle *p) {
     pp->items[slot] = *p;
 }
 
-void particles_update(ParticlePool *pp, float dt) {
+void particles_update(ParticlePool *pp, float dt, vec3 wind) {
     int i = 0;
     while (i < pp->live) {
         Particle *p = &pp->items[i];
@@ -41,9 +41,11 @@ void particles_update(ParticlePool *pp, float dt) {
             pp->live -= 1;
             continue;
         }
-        p->vel.x += p->acc.x * dt;
-        p->vel.y += p->acc.y * dt;
-        p->vel.z += p->acc.z * dt;
+        /* the one wind (P7 item 9): a global drift acceleration — pass
+           {0,0,0} for the old behavior (the headless test does) */
+        p->vel.x += (p->acc.x + wind.x) * dt;
+        p->vel.y += (p->acc.y + wind.y) * dt;
+        p->vel.z += (p->acc.z + wind.z) * dt;
         p->pos.x += p->vel.x * dt;
         p->pos.y += p->vel.y * dt;
         p->pos.z += p->vel.z * dt;
