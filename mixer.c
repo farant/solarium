@@ -6,6 +6,7 @@
 
 void mixer_init(Mixer *m) {
     int i;
+    reverb_init(&m->rev);
     for (i = 0; i < MIX_VOICES; i++) {
         m->v[i].active = 0;
         m->v[i].gen    = 0u;
@@ -36,6 +37,9 @@ void mixer_apply(Mixer *m, const MixCmd *c) {
             v->pan  = c->pan;
         }
         break;
+    case MIX_CMD_REVERB:                       /* no voice — the global reverb (P8 item 8) */
+        reverb_set(&m->rev, c->rv_decay, c->rv_damp, c->rv_wet);
+        break;
     default: break;
     }
 }
@@ -63,6 +67,8 @@ void mixer_render(Mixer *m, float *out_lr, int frames) {
             out_lr[s * 2 + 1] += x * pr;
         }
     }
+
+    reverb_process(&m->rev, out_lr, frames);   /* the room's tail (P8 item 8), before the clamp */
 
     for (i = 0; i < frames * 2; i++) {
         if (out_lr[i] >  1.0f) out_lr[i] =  1.0f;

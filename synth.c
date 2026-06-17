@@ -39,7 +39,11 @@ static const SynthPreset PRESETS[] = {
     { "laser",  { 0.0f, 0.0f,  0.04f,  0.3f, 0.18f, 1400.0f,-9.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.18f,0.3f, 0.0f,    0.0f,   0.0f, 0.0f, 0.35f, 0.2f } },
     /* loop-shaped (attack/decay 0): a flame's sputter — slow sample-held
        noise so the crunch is CHUNKS, band-passed to the fire register */
-    { "crackle",{ 4.0f, 0.0f,  3.0f,   0.0f, 0.0f,   18.0f,  0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.5f, 0.0f, 2000.0f, 400.0f, 0.0f, 0.0f, 0.50f, 0.0f } }
+    { "crackle",{ 4.0f, 0.0f,  3.0f,   0.0f, 0.0f,   18.0f,  0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.5f, 0.0f, 2000.0f, 400.0f, 0.0f, 0.0f, 0.50f, 0.0f } },
+    /* loop-shaped: a pond's trickle — fine sample-held noise band-passed to
+       the water register (low rumble cut, top rolled off) so it reads as
+       moving water, not wind (P8 item 8 — the spatializer's demo source) */
+    { "water",  { 4.0f, 0.0f,  2.0f,   0.0f, 0.0f,   900.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,  0.5f, 0.0f, 2600.0f, 520.0f, 0.0f, 0.0f, 0.30f, 0.0f } }
 };
 #define PRESET_COUNT ((int)(sizeof PRESETS / sizeof PRESETS[0]))
 

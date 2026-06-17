@@ -3301,6 +3301,8 @@ static float g_snd_wind[SND_LOOP_MAX];
 static int   g_snd_wind_frames = 0;
 static float g_snd_crackle[SND_LOOP_MAX];
 static int   g_snd_crackle_frames = 0;
+static float g_snd_water[SND_LOOP_MAX];           /* P8 item 8: the pond's trickle */
+static int   g_snd_water_frames = 0;
 
 /* sounds.stml: <sounds><sound type="step" lpcut="900"/></sounds> — knobs
    by NAME from the synth schema, any subset over the preset (the mesh-ref
@@ -3385,15 +3387,23 @@ static void sound_bank_mint(void) {
     lp[1] = 0.0f; lp[4] = 0.0f;
     g_snd_crackle_frames = synth_render_loop(lp, 7u, g_snd_crackle,
                                              SND_LOOP_MAX, SYNTH_RATE / 4);
+    memcpy(lp, snd_params("water"), sizeof lp);
+    lp[1] = 0.0f; lp[4] = 0.0f;
+    g_snd_water_frames = synth_render_loop(lp, 7u, g_snd_water,
+                                           SND_LOOP_MAX, SYNTH_RATE / 4);
 }
 
-/* ---- the living voices: wind on slot 0, lantern crackles on 1..7. All
-   allocation logic is PRODUCER-side; the consumer only obeys. */
+/* ---- the living voices: wind on slot 0, lantern crackles on 1..6, the
+   nearest pond's water on 7 (P8 item 8). All allocation logic is
+   PRODUCER-side; the consumer only obeys. */
 #define VOICE_LANTERN_BASE 1
-#define VOICE_LANTERN_MAX  7
+#define VOICE_LANTERN_MAX  6
+#define VOICE_WATER        7
 
 static sol_u32 g_lantern_handle[VOICE_LANTERN_MAX];
 static sol_u32 g_lantern_gen[VOICE_LANTERN_MAX];
+static sol_u32 g_water_handle = 0u;               /* the pond holding the water voice (P8 item 8) */
+static sol_u32 g_water_gen    = 0u;
 static float   g_wind_cur = 0.0f, g_wind_sent = -1.0f;
 static sol_u32 g_wind_gen = 0u;
 static int     g_loop_voices = 0;                /* the HUD's number */
@@ -3429,6 +3439,61 @@ static void audio_loops_restart(void) {
     }
 }
 
+/* place a world sound in the stereo field (P8 item 8): a windowed
+   inverse-square attenuation (the item-5 light law, heard) + a constant-power
+   auto-pan from the camera's flattened right vector. Lifted from the lantern
+   crackle so any located source — a flame, a pond, a future bell — shares one
+   law. The caller applies its own gain shaping (a flame's flicker, a cap). */
+static void spatialize(vec3 src, vec3 campos, vec3 right, float radius,
+                       float *att, float *pan) {
+    vec3  dv = vec3_sub(src, campos);
+    float d  = sqrtf(vec3_dot(dv, dv));
+    float w  = 1.0f - (d / radius) * (d / radius) * (d / radius) * (d / radius);
+    if (w < 0.0f) w = 0.0f;
+    *att = (w * w) / (d * d + 1.0f);
+    *pan = 0.0f;
+    if (d > 0.001f) {
+        float p = vec3_dot(vec3_scale(dv, 1.0f / d), right);
+        if (p < -1.0f) p = -1.0f;
+        if (p >  1.0f) p =  1.0f;
+        *pan = p;
+    }
+}
+
+/* the reverb the LISTENER's environment calls for (P8 item 8): 0 = dry/open
+   air, 1 = a small enclosed room, 2 = a church (long + bright). Regular rooms
+   come straight from room_containing; a church has no 'room' shell, so a
+   generous proximity cylinder around each church anchor stands in for true
+   wall-containment — the eased send smooths the threshold either way. */
+static int listener_reverb_kind(AppState *st) {
+    sol_u32 i;
+    vec3    cam = st->camera.pos;
+    if (st->current_room != 0) {
+        const char *rt = scene_meta_get(&st->scene, st->current_room, "room_type");
+        return (rt && strcmp(rt, "church") == 0) ? 2 : 1;
+    }
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o  = &st->scene.objects[i];
+        const char  *rt = scene_meta_get(&st->scene, o->handle, "room_type");
+        mat4         wm;
+        vec3         a;
+        float        dx, dz;
+        if (!rt || strcmp(rt, "church") != 0) continue;
+        wm = scene_world_matrix(&st->scene, o);
+        a  = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
+        dx = cam.x - a.x; dz = cam.z - a.z;
+        if (dx * dx + dz * dz > 13.0f * 13.0f) continue;   /* ~the abbey footprint */
+        if (cam.y < a.y - 1.5f || cam.y > a.y + 14.0f) continue;
+        return 2;
+    }
+    return 0;
+}
+
+/* one global reverb (P8 item 8), eased then pushed over the same ring as the
+   wind. {decay, damp, wet} per listener-room kind — kinds-are-presets. */
+static float g_rv_decay = 0.5f, g_rv_damp = 0.5f, g_rv_wet = 0.0f;
+static float g_rv_decay_sent = -1.0f, g_rv_damp_sent = -1.0f, g_rv_wet_sent = -1.0f;
+
 static void update_audio(AppState *st, float dt) {
     MixCmd c;
     vec3   fwd, right;
@@ -3450,6 +3515,34 @@ static void update_audio(AppState *st, float dt) {
         c.gen  = g_wind_gen;
         c.gain = g_wind_cur;
         if (audio_push(&c)) g_wind_sent = g_wind_cur;
+    }
+
+    /* reverb breathes with the listener's room (P8 item 8): the church rings
+       long + bright, a small room is short + dark, open air is dry. Same
+       containment that dims the ambient, eased so the tail grows/dries with
+       no pop at the threshold, sent only when it moves (drop-never-block). */
+    {
+        int   k = listener_reverb_kind(st);
+        float td = (k == 2) ? 0.92f : (k == 1) ? 0.52f : 0.40f;  /* decay */
+        float tm = (k == 2) ? 0.18f : (k == 1) ? 0.55f : 0.50f;  /* damp  */
+        float tw = (k == 2) ? 0.50f : (k == 1) ? 0.20f : 0.00f;  /* wet   */
+        g_rv_decay += (td - g_rv_decay) * ease;
+        g_rv_damp  += (tm - g_rv_damp)  * ease;
+        g_rv_wet   += (tw - g_rv_wet)   * ease;
+        if (fabsf(g_rv_decay - g_rv_decay_sent) > 0.002f ||
+            fabsf(g_rv_damp  - g_rv_damp_sent)  > 0.002f ||
+            fabsf(g_rv_wet   - g_rv_wet_sent)   > 0.002f) {
+            memset(&c, 0, sizeof c);
+            c.kind     = MIX_CMD_REVERB;
+            c.rv_decay = g_rv_decay;
+            c.rv_damp  = g_rv_damp;
+            c.rv_wet   = g_rv_wet;
+            if (audio_push(&c)) {
+                g_rv_decay_sent = g_rv_decay;
+                g_rv_damp_sent  = g_rv_damp;
+                g_rv_wet_sent   = g_rv_wet;
+            }
+        }
     }
 
     /* the camera's right, for panning the world (flattened: tilting your
@@ -3526,8 +3619,8 @@ static void update_audio(AppState *st, float dt) {
         for (i = 0; i < VOICE_LANTERN_MAX; i++) {   /* drive gain + pan */
             SceneObject *o;
             mat4  wm;
-            vec3  p, dv;
-            float d, r, w, att, gain, pan;
+            vec3  p;
+            float r, att, gain, pan;
             const char *s;
             if (g_lantern_handle[i] == 0u) continue;
             o = scene_get(&st->scene, g_lantern_handle[i]);
@@ -3535,21 +3628,12 @@ static void update_audio(AppState *st, float dt) {
             g_loop_voices++;
             wm = scene_world_matrix(&st->scene, o);
             p  = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
-            dv = vec3_sub(p, st->camera.pos);
-            d  = sqrtf(vec3_dot(dv, dv));
             r  = 9.0f;
             s  = scene_meta_get(&st->scene, o->handle, "light_radius");
             if (s) r = (float)atof(s);
-            w = 1.0f - (d / r) * (d / r) * (d / r) * (d / r);
-            if (w < 0.0f) w = 0.0f;
-            att  = (w * w) / (d * d + 1.0f);
-            gain = 0.9f * att * o->overlay_glow;
+            spatialize(p, st->camera.pos, right, r, &att, &pan);
+            gain = 0.9f * att * o->overlay_glow;     /* the flame's flicker, heard */
             if (gain > 0.5f) gain = 0.5f;
-            pan = 0.0f;
-            if (d > 0.001f)
-                pan = vec3_dot(vec3_scale(dv, 1.0f / d), right);
-            if (pan < -1.0f) pan = -1.0f;
-            if (pan >  1.0f) pan =  1.0f;
             memset(&c, 0, sizeof c);
             c.kind = MIX_CMD_SET;
             c.slot = VOICE_LANTERN_BASE + i;
@@ -3557,6 +3641,61 @@ static void update_audio(AppState *st, float dt) {
             c.gain = gain;
             c.pan  = pan;
             audio_push(&c);
+        }
+
+        /* the nearest pond's water (P8 item 8): one located loop on its own
+           slot, the spatializer's demo source. Started lazily, then driven
+           like a lantern — pans + fades as you walk the tarn. */
+        {
+            sol_u32 k, near = 0u;
+            float   nd2 = 1e30f;
+            for (k = 0; k < st->scene.count; k++) {
+                SceneObject *o = &st->scene.objects[k];
+                mat4 wm; vec3 p; float dx, dz, d2;
+                if (!o->mesh_ref || strcmp(o->mesh_ref, "pond") != 0) continue;
+                wm = scene_world_matrix(&st->scene, o);
+                p  = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
+                dx = p.x - st->camera.pos.x; dz = p.z - st->camera.pos.z;
+                d2 = dx * dx + dz * dz;
+                if (d2 < nd2) { nd2 = d2; near = o->handle; }
+            }
+            if (near == 0u) {                        /* no pond -> silence the voice */
+                if (g_water_handle != 0u) {
+                    memset(&c, 0, sizeof c);
+                    c.kind = MIX_CMD_STOP;
+                    c.slot = VOICE_WATER;
+                    c.gen  = g_water_gen;
+                    audio_push(&c);
+                    g_water_handle = 0u;
+                }
+            } else {
+                SceneObject *o = scene_get(&st->scene, near);
+                mat4  wm = scene_world_matrix(&st->scene, o);
+                vec3  p  = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
+                float att, pan;
+                if (g_water_handle != near && g_snd_water_frames > 0) {
+                    memset(&c, 0, sizeof c);          /* (re)start on the new pond */
+                    c.kind   = MIX_CMD_START;
+                    c.slot   = VOICE_WATER;
+                    c.gen    = ++g_voice_gen;
+                    c.buf    = g_snd_water;
+                    c.frames = g_snd_water_frames;
+                    c.gain   = 0.0f;
+                    c.loop   = 1;
+                    if (audio_push(&c)) { g_water_handle = near; g_water_gen = c.gen; }
+                }
+                if (g_water_handle == near) {
+                    spatialize(p, st->camera.pos, right, 14.0f, &att, &pan);
+                    g_loop_voices++;
+                    memset(&c, 0, sizeof c);
+                    c.kind = MIX_CMD_SET;
+                    c.slot = VOICE_WATER;
+                    c.gen  = g_water_gen;
+                    c.gain = 0.7f * att;
+                    c.pan  = pan;
+                    audio_push(&c);
+                }
+            }
         }
     }
 

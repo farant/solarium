@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <math.h>
+#include <string.h>    /* memset, for the reverb-command tests */
 
 static Mixer m;
 static float ramp[100];
@@ -139,6 +140,66 @@ int main(void) {
         return 1;
     }
     printf("hot-mix clamp: ok\n");
+
+    /* reverb (P8 item 8): a one-frame click leaves a tail that OUTLIVES the
+       input and DECAYS; wet=0 stays dry; same input -> identical samples. */
+    {
+        static float click[1];
+        static float echunk[24];
+        static float capA[1024], capB[1024];
+        float peak = 0.0f, dry_e = 0.0f;
+        int   k, s, q;
+        click[0] = 1.0f;
+
+        /* a long, fully-wet reverb */
+        mixer_init(&m);
+        memset(&c, 0, sizeof c);
+        c.kind = MIX_CMD_REVERB; c.rv_decay = 0.9f; c.rv_damp = 0.2f; c.rv_wet = 1.0f;
+        mixer_apply(&m, &c);
+        c = start_cmd(0, 1u, click, 1, 1.0f, 0.0f, 0);
+        mixer_apply(&m, &c);
+        for (k = 0; k < 24; k++) {                 /* 24 chunks x 512 frames */
+            mixer_render(&m, out, 512);
+            echunk[k] = 0.0f;
+            for (s = 0; s < 1024; s++) echunk[k] += out[s] * out[s];
+        }
+        /* the shortest comb delay is ~1214 frames, so the wet tail BLOOMS only
+           after the dry-click chunk — its peak lives in the later chunks */
+        for (k = 2; k < 24; k++) if (echunk[k] > peak) peak = echunk[k];
+        if (peak <= 1e-6f) { printf("FAIL: reverb must leave a tail\n"); return 1; }
+        if (echunk[23] >= peak) { printf("FAIL: reverb tail must decay\n"); return 1; }
+
+        /* wet=0 -> no tail after the dry click chunk */
+        mixer_init(&m);
+        memset(&c, 0, sizeof c);
+        c.kind = MIX_CMD_REVERB; c.rv_decay = 0.9f; c.rv_damp = 0.2f; c.rv_wet = 0.0f;
+        mixer_apply(&m, &c);
+        c = start_cmd(0, 1u, click, 1, 1.0f, 0.0f, 0);
+        mixer_apply(&m, &c);
+        for (k = 0; k < 8; k++) {
+            mixer_render(&m, out, 512);
+            if (k == 0) continue;                  /* the dry click itself */
+            for (s = 0; s < 1024; s++) dry_e += out[s] * out[s];
+        }
+        if (dry_e > 1e-9f) { printf("FAIL: wet=0 must be dry (no tail)\n"); return 1; }
+
+        /* deterministic: the same impulse + params, captured deep in the tail */
+        for (q = 0; q < 2; q++) {
+            float *cap = q ? capB : capA;
+            int    n;
+            mixer_init(&m);
+            memset(&c, 0, sizeof c);
+            c.kind = MIX_CMD_REVERB; c.rv_decay = 0.9f; c.rv_damp = 0.2f; c.rv_wet = 1.0f;
+            mixer_apply(&m, &c);
+            c = start_cmd(0, 1u, click, 1, 1.0f, 0.0f, 0);
+            mixer_apply(&m, &c);
+            for (n = 0; n < 4; n++) mixer_render(&m, out, 512);  /* into the tail */
+            mixer_render(&m, cap, 512);
+        }
+        for (q = 0; q < 1024; q++)
+            if (capA[q] != capB[q]) { printf("FAIL: reverb not deterministic\n"); return 1; }
+        printf("reverb tail + decay + dry + deterministic: ok\n");
+    }
 
     printf("mixer_test: ALL OK\n");
     return 0;

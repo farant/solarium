@@ -21,11 +21,14 @@
 #define MIXER_H
 
 #include "sol_base.h"
+#include "reverb.h"
 
 #define MIX_RATE   48000
 #define MIX_VOICES 24
 
-enum { MIX_CMD_START, MIX_CMD_STOP, MIX_CMD_SET };
+/* MIX_CMD_REVERB carries no voice — it sets the one global reverb (P8 item 8)
+   from the listener's room, via the rv_* fields below. */
+enum { MIX_CMD_START, MIX_CMD_STOP, MIX_CMD_SET, MIX_CMD_REVERB };
 
 /* one fixed-size command — the ring's whole vocabulary */
 typedef struct {
@@ -37,6 +40,9 @@ typedef struct {
     float        gain;
     float        pan;        /* -1 left .. +1 right */
     int          loop;
+    float        rv_decay;   /* MIX_CMD_REVERB: decay/damp/wet, each [0,1] (P8 item 8) */
+    float        rv_damp;
+    float        rv_wet;
 } MixCmd;
 
 typedef struct {
@@ -49,6 +55,7 @@ typedef struct {
 
 typedef struct {
     MixVoice v[MIX_VOICES];
+    Reverb   rev;            /* the one global reverb (P8 item 8) */
 } Mixer;
 
 void mixer_init(Mixer *m);
