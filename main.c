@@ -1056,7 +1056,9 @@ static const char *POST_FRAGMENT_SRC =
     "struct VOut { float4 pos [[position]]; float2 uv; };\n"
     "struct FU { float4x4 uInvViewProj; float3 uFogColor; float3 uAerialColor;\n"
     "            float3 uCamPos; float uBloomStrength; float uExposure;\n"
-    "            float uFogStrength; float uFogDensity; float uFogHeight; float uFogFalloff; };\n"
+    "            float uFogStrength; float uFogDensity; float uFogHeight; float uFogFalloff;\n"
+    "            float3 uGradeTint; float uGradeContrast; float uGradeSaturation;\n"
+    "            float uVignetteStrength; float uVignetteRadius; };\n"
     "static float3 aces(float3 x) {\n"            /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
     "}\n"
@@ -1092,7 +1094,14 @@ static const char *POST_FRAGMENT_SRC =
     "    float3 mapped = aces(hdr);\n"
     "    float3 ldr    = pow(mapped, float3(1.0 / 2.2));\n"
     "    ldr           = mix(ldr, u.uFogColor, u.uFogStrength);\n"   /* under-water tint */
-    "    return float4(ldr, 1.0);\n"
+    "    ldr *= u.uGradeTint;\n"                                     /* P9 item 1: color grade */
+    "    ldr  = (ldr - 0.5) * u.uGradeContrast + 0.5;\n"
+    "    float glum = dot(ldr, float3(0.2126, 0.7152, 0.0722));\n"
+    "    ldr  = mix(float3(glum), ldr, u.uGradeSaturation);\n"
+    "    float2 vd = v.uv - 0.5;\n"
+    "    float vig = 1.0 - u.uVignetteStrength * smoothstep(u.uVignetteRadius, 1.0, length(vd) * 1.41421356);\n"
+    "    ldr *= vig;\n"
+    "    return float4(clamp(ldr, 0.0, 1.0), 1.0);\n"
     "}\n";
 
 #else /* GLSL */
@@ -1124,6 +1133,11 @@ static const char *POST_FRAGMENT_SRC =
     "uniform float uFogFalloff;\n"
     "uniform sampler2D uGodray;\n"                           /* P8 item 3: the shafts */
     "uniform sampler2D uAO;\n"                               /* P8 item 5: ambient occlusion */
+    "uniform vec3 uGradeTint;\n"                             /* P9 item 1: color grade */
+    "uniform float uGradeContrast;\n"
+    "uniform float uGradeSaturation;\n"
+    "uniform float uVignetteStrength;\n"
+    "uniform float uVignetteRadius;\n"
     "out vec4 FragColor;\n"
     "vec3 aces(vec3 x) {\n"                                  /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
@@ -1152,7 +1166,14 @@ static const char *POST_FRAGMENT_SRC =
     "    vec3 mapped = aces(hdr);\n"                           /* tonemap: roll off HDR -> [0,1] */
     "    vec3 ldr    = pow(mapped, vec3(1.0 / 2.2));\n"        /* linear -> sRGB for display */
     "    ldr         = mix(ldr, uFogColor, uFogStrength);\n"   /* wading under the surface */
-    "    FragColor   = vec4(ldr, 1.0);\n"
+    "    ldr        *= uGradeTint;\n"                          /* P9 item 1: color grade */
+    "    ldr         = (ldr - 0.5) * uGradeContrast + 0.5;\n"
+    "    float glum  = dot(ldr, vec3(0.2126, 0.7152, 0.0722));\n"
+    "    ldr         = mix(vec3(glum), ldr, uGradeSaturation);\n"
+    "    vec2 vd     = vUV - 0.5;\n"
+    "    float vig   = 1.0 - uVignetteStrength * smoothstep(uVignetteRadius, 1.0, length(vd) * 1.41421356);\n"
+    "    ldr        *= vig;\n"
+    "    FragColor   = vec4(clamp(ldr, 0.0, 1.0), 1.0);\n"
     "}\n";
 
 #endif /* SOL_RHI_METAL — the post pair */
@@ -2263,6 +2284,20 @@ typedef struct {
     float wb;
 } LeafShape;
 
+/* P9 item 1: color-grade presets (display-referred). Mode 0 is neutral — exact
+   identity, today's image bit-for-bit. '9' cycles. Synthesized, no binary. */
+typedef struct {
+    float contrast, saturation, tint_r, tint_g, tint_b, vig_strength, vig_radius;
+} GradePreset;
+static const GradePreset GRADE_PRESETS[] = {
+    { 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 0.00f, 0.50f },  /* 0 neutral (off) */
+    { 1.08f, 1.05f, 1.06f, 1.00f, 0.92f, 0.35f, 0.45f },  /* 1 warm dusk */
+    { 1.05f, 0.92f, 0.92f, 0.98f, 1.10f, 0.30f, 0.50f },  /* 2 cool */
+    { 1.18f, 0.80f, 1.00f, 1.00f, 1.00f, 0.45f, 0.40f }   /* 3 dramatic */
+};
+static const char *GRADE_PRESET_NAMES[] = { "neutral (off)", "warm dusk", "cool", "dramatic" };
+#define GRADE_PRESET_COUNT 4
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
@@ -2279,6 +2314,9 @@ typedef struct {
     RhiRenderTarget hdr_rt;          /* scene renders here, then to the window */
     int             rt_width, rt_height;  /* size hdr_rt was built at; recreate on resize */
     float           exposure;        /* HDR exposure (item 7c); '[' / ']' scrub it live */
+    int             grade_mode;      /* P9 item 1: 0=neutral(off), then preset slots; '9' cycles */
+    RhiTexture      grade_lut;       /* P9 item 1 (LUT half): the 2D-strip color LUT */
+    sol_bool        grade_was_down;  /* edge-detect for the grade-cycle key */
     /* the shadow-casting sun (P8 item 6): now a DIRECTIONAL light. light_pos ->
        light_target encodes only its DIRECTION (no position/cone/falloff). The
        inner/outer/intensity fields linger for the scene-format round-trip and
@@ -5832,6 +5870,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             apply_time_of_day(st);
         }
         st->bt_was_down = bt_now;
+    }
+
+    /* 9 cycles the color grade preset (P9 item 1): neutral(off) -> warm -> cool -> dramatic */
+    {
+        sol_bool g9_now = glfwGetKey(w, GLFW_KEY_9) == GLFW_PRESS;
+        if (g9_now && !st->grade_was_down) {
+            st->grade_mode = (st->grade_mode + 1) % GRADE_PRESET_COUNT;
+            printf("grade: %s\n", GRADE_PRESET_NAMES[st->grade_mode]);
+        }
+        st->grade_was_down = g9_now;
     }
 
     /* I toggles the skybox source: env cubemap vs irradiance map (B2, edge) */
@@ -9563,6 +9611,15 @@ static void render(AppState *state) {
                 }
                 rhi_set_uniform_vec3("uFogColor", fr, fg, fb);
                 rhi_set_uniform_float("uFogStrength", fa);
+            }
+            {   /* P9 item 1: color grade — a display-referred preset (mode 0 =
+                   neutral = today's image, exact). '9' cycles. */
+                const GradePreset *gp = &GRADE_PRESETS[state->grade_mode % GRADE_PRESET_COUNT];
+                rhi_set_uniform_vec3 ("uGradeTint", gp->tint_r, gp->tint_g, gp->tint_b);
+                rhi_set_uniform_float("uGradeContrast",    gp->contrast);
+                rhi_set_uniform_float("uGradeSaturation",  gp->saturation);
+                rhi_set_uniform_float("uVignetteStrength", gp->vig_strength);
+                rhi_set_uniform_float("uVignetteRadius",   gp->vig_radius);
             }
         }
         rhi_draw(0, 3);
