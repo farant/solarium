@@ -1212,6 +1212,59 @@ static const char *POST_FRAGMENT_SRC =
 
 #endif /* SOL_RHI_METAL — the post pair */
 
+/* --- P9 item 3: weathering decals — an UNLIT textured-alpha quad. The atlas
+   carries color + an alpha mask (stains dark, moss green); alpha-over into the
+   HDR buffer modulates the lit wall. Reuses the 12-float mesh layout (reads
+   only pos + uv). --- */
+#ifdef SOL_RHI_METAL
+static const char *DECAL_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn { float3 pos [[attribute(0)]]; float2 uv [[attribute(2)]]; };\n"
+    "struct DU { float4x4 uModel; float4x4 uView; float4x4 uProj; };\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant DU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float4 wp = u.uModel * float4(v.pos, 1.0);\n"
+    "    o.pos = u.uProj * (u.uView * wp);\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"
+    "    o.uv = v.uv;\n"
+    "    return o;\n"
+    "}\n";
+static const char *DECAL_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "fragment float4 fmain(VOut v [[stage_in]],\n"
+    "                      texture2d<float> uDecalAtlas [[texture(0)]],\n"
+    "                      sampler s0 [[sampler(0)]]) {\n"
+    "    float4 t = uDecalAtlas.sample(s0, v.uv);\n"
+    "    return float4(t.rgb, t.a);\n"
+    "}\n";
+#else /* GLSL */
+static const char *DECAL_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 2) in vec2 aUV;\n"
+    "uniform mat4 uModel;\n"
+    "uniform mat4 uView;\n"
+    "uniform mat4 uProj;\n"
+    "out vec2 vUV;\n"
+    "void main() {\n"
+    "    vUV = aUV;\n"
+    "    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);\n"
+    "}\n";
+static const char *DECAL_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uDecalAtlas;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    vec4 t = texture(uDecalAtlas, vUV);\n"
+    "    FragColor = vec4(t.rgb, t.a);\n"
+    "}\n";
+#endif /* SOL_RHI_METAL — the decal pair */
+
 /* --- god-rays (P8 item 3): march the view ray through the spot-light's
    shadow volume, accumulating in-scatter wherever the ray is LIT. The medium
    is the SAME height-fog field as item 2 (lit, not ambient). Crude on purpose
@@ -2377,11 +2430,59 @@ static RhiTexture build_grade_lut(int look) {
     return rhi_create_texture(px, W, N, RHI_TEX_RGBA8);
 }
 
+/* P9 item 3: synthesize the decal atlas — left half stains (dark vertical
+   streaks, denser under the sill), right half moss (green blotches, denser at
+   the foot). Alpha is the mask, color is what it pulls toward. No binary. */
+#define DECAL_ATLAS_W 128
+#define DECAL_ATLAS_H 128
+
+static float decal_hash(int x, int y, int s) {
+    unsigned h = (unsigned)(x * 374761393 + y * 668265263 + s * 2147483647);
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return (float)((h ^ (h >> 16)) & 0xFFFFu) / 65535.0f;
+}
+
+static unsigned char decal_u8(float v) {
+    if (v <= 0.0f) return 0;
+    if (v >= 1.0f) return 255;
+    return (unsigned char)(v * 255.0f + 0.5f);
+}
+
+static RhiTexture build_decal_atlas(void) {
+    static unsigned char px[DECAL_ATLAS_W * DECAL_ATLAS_H * 4];
+    int x, y, half = DECAL_ATLAS_W / 2;
+    for (y = 0; y < DECAL_ATLAS_H; y++) {
+        for (x = 0; x < DECAL_ATLAS_W; x++) {
+            int   o  = (y * DECAL_ATLAS_W + x) * 4;
+            float fy = (float)y / (float)(DECAL_ATLAS_H - 1);   /* 0 bottom .. 1 top */
+            float r = 0.0f, g = 0.0f, bl = 0.0f, a;
+            if (x < half) {                              /* STAIN: dark streaks */
+                float band   = decal_hash(x / 3, 0, 11);
+                float n      = 0.6f + 0.4f * decal_hash(x, y / 4, 12);
+                a = band * band * n * (0.35f + 0.65f * fy);     /* stronger near top */
+            } else {                                     /* MOSS: green blotches */
+                int   mx     = x - half;
+                float blob   = decal_hash(mx / 5, y / 5, 21);
+                float n      = decal_hash(mx, y, 22);
+                a = blob * blob * (0.5f + 0.5f * n) * (0.4f + 0.6f * (1.0f - fy));
+                r = 0.10f; g = 0.22f; bl = 0.06f;
+            }
+            px[o + 0] = decal_u8(r);
+            px[o + 1] = decal_u8(g);
+            px[o + 2] = decal_u8(bl);
+            px[o + 3] = decal_u8(a);
+        }
+    }
+    return rhi_create_texture(px, DECAL_ATLAS_W, DECAL_ATLAS_H, RHI_TEX_RGBA8);
+}
+
 typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
     RhiPipeline post_pipeline;  /* fullscreen tonemap/encode pass (item 7b) */
     RhiPipeline glass_pipeline; /* P9 item 2: church_glass — alpha-blend, depth-write-off */
+    RhiPipeline decal_pipeline; /* P9 item 3: church_decals — unlit alpha quads */
+    RhiTexture  decal_atlas;    /* P9 item 3: synthesized stain (left) + moss (right) */
     RhiTexture  albedo_tex;     /* decoded page image (item 5b); 0 if load failed */
     Scene       scene;
     sol_u32     box_handle;     /* so update() can animate the box object */
@@ -6476,12 +6577,13 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     scene_meta_set(&st->scene, anchor, "name", title);
                 }
                 {
-                    static const char *refs[4] = {
+                    static const char *refs[5] = {
                         "church_stone", "church_glass",
-                        "church_roof",  "church_floor"
+                        "church_roof",  "church_floor",
+                        "church_decals"
                     };
                     int r2;
-                    for (r2 = 0; r2 < 4; r2++) {
+                    for (r2 = 0; r2 < 5; r2++) {
                         sol_u32 ch = scene_add(&st->scene, anchor, empty,
                                                vec3_make(0, 0, 0),
                                                quat_identity(), one);
@@ -6632,12 +6734,13 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     scene_meta_set(&st->scene, anchor, "plot", iso->nid);
             }
             {
-                static const char *refs[4] = {
+                static const char *refs[5] = {
                     "church_stone", "church_glass",
-                    "church_roof",  "church_floor"
+                    "church_roof",  "church_floor",
+                    "church_decals"
                 };
                 int r2;
-                for (r2 = 0; r2 < 4; r2++) {
+                for (r2 = 0; r2 < 5; r2++) {
                     sol_u32 ch = scene_add(&st->scene, anchor, empty,
                                            vec3_make(0, 0, 0),
                                            quat_identity(), one);
@@ -7870,6 +7973,14 @@ static int init_scene(AppState *state) {
         gd.depth_write_off = SOL_TRUE;
         state->glass_pipeline = rhi_create_pipeline(&gd);
     }
+    {   /* P9 item 3: the decal pipeline — same vertex layout, the unlit decal
+           shader, alpha-blend + depth-write-off (weathering quads). */
+        RhiPipelineDesc dd = desc;
+        dd.shader          = rhi_create_shader(DECAL_VERTEX_SRC, DECAL_FRAGMENT_SRC);
+        dd.blend           = RHI_BLEND_ALPHA;
+        dd.depth_write_off = SOL_TRUE;
+        if (dd.shader.id) state->decal_pipeline = rhi_create_pipeline(&dd);
+    }
 
     /* the skinned twins (item 9): the canonical 12 floats + joints4 +
        weights4 = 20-float stride; same fragment shader (a skinned surface
@@ -7932,6 +8043,7 @@ static int init_scene(AppState *state) {
         state->post_pipeline = rhi_create_pipeline(&post_desc);
         state->grade_luts[0] = build_grade_lut(0);   /* P9 item 1: identity strip */
         state->grade_luts[1] = build_grade_lut(1);   /* P9 item 1: filmic split-tone */
+        state->decal_atlas   = build_decal_atlas();  /* P9 item 3: stain + moss atlas */
     }
 
     {   /* god-rays (P8 item 3): a fullscreen raymarch, same desc shape as post */
@@ -9101,6 +9213,8 @@ static void render(AppState *state) {
             continue;                             /* ponds: the WATER PASS draws them */
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_glass") == 0)
             continue;                             /* P9 item 2: the GLASS sub-pass draws them */
+        if (o->mesh_ref && strcmp(o->mesh_ref, "church_decals") == 0)
+            continue;                             /* P9 item 3: the DECAL sub-pass draws them */
         state->draws_total++;                     /* the yardstick: would draw */
         if (vis && !vis[o->handle]) continue;     /* outside the camera frustum
                                                      (piece 4): the HUD's left
@@ -9511,6 +9625,30 @@ static void render(AppState *state) {
             dm.emissive.y *= o->overlay_glow;
             dm.emissive.z *= o->overlay_glow;
             draw_glass(state, o->mesh, model, view, proj, eye, dm);
+        }
+    }
+
+    /* P9 item 3: weathering decals — the church_decals objects, unlit textured
+       alpha quads modulating the lit walls (stains darken, moss tints), into
+       the HDR buffer (so they bloom + grade). After opaque, depth-tested. */
+    if (state->decal_pipeline.id && state->decal_atlas.id) {
+        sol_u32 di;
+        rhi_set_pipeline(state->decal_pipeline);
+        rhi_bind_texture(state->decal_atlas, 0);
+        rhi_set_uniform_int ("uDecalAtlas", 0);
+        rhi_set_uniform_mat4("uView", view.m);
+        rhi_set_uniform_mat4("uProj", proj.m);
+        for (di = 0; di < state->scene.count; di++) {
+            const SceneObject *o = &state->scene.objects[di];
+            mat4 model;
+            if (o->mesh.index_count == 0) continue;
+            if (!o->mesh_ref || strcmp(o->mesh_ref, "church_decals") != 0) continue;
+            if (vis && !vis[o->handle]) continue;
+            model = scene_world_matrix(&state->scene, o);
+            rhi_set_uniform_mat4("uModel", model.m);
+            rhi_bind_vertex_buffer(o->mesh.vbuffer);
+            rhi_bind_index_buffer(o->mesh.ibuffer);
+            rhi_draw_indexed(0, o->mesh.index_count);
         }
     }
 

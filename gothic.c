@@ -2587,6 +2587,78 @@ void church_glass(MeshBuilder *b, const float *params, int count) {
     church_windows((MeshBuilder *)0, b, &plan);
 }
 
+/* a flat quad on a S/N wall face: x in [x0,x1], y in [y0,y1], constant z;
+   v maps to y (0 bottom, 1 top). No-cull means winding is free. */
+static void decal_quad(MeshBuilder *b, float x0, float y0, float x1, float y1,
+                       float z, float nz, float u0, float u1) {
+    sol_u32 a = mb_push_vertex(b, x0, y0, z, 0.0f, 0.0f, nz, u0, 0.0f);
+    sol_u32 c = mb_push_vertex(b, x1, y0, z, 0.0f, 0.0f, nz, u1, 0.0f);
+    sol_u32 d = mb_push_vertex(b, x1, y1, z, 0.0f, 0.0f, nz, u1, 1.0f);
+    sol_u32 e = mb_push_vertex(b, x0, y1, z, 0.0f, 0.0f, nz, u0, 1.0f);
+    mb_push_triangle(b, a, c, d);
+    mb_push_triangle(b, a, d, e);
+}
+
+/* one decal cell with an optional U-mirror — so a tiled row of cells doesn't
+   read as one stamp repeated. Same quad, v maps to y. */
+static void decal_cell(MeshBuilder *b, float x0, float y0, float x1, float y1,
+                       float z, float nz, float u0, float u1, int mirror) {
+    float ua = mirror ? u1 : u0, ub = mirror ? u0 : u1;
+    sol_u32 a = mb_push_vertex(b, x0, y0, z, 0.0f, 0.0f, nz, ua, 0.0f);
+    sol_u32 c = mb_push_vertex(b, x1, y0, z, 0.0f, 0.0f, nz, ub, 0.0f);
+    sol_u32 d = mb_push_vertex(b, x1, y1, z, 0.0f, 0.0f, nz, ub, 1.0f);
+    sol_u32 e = mb_push_vertex(b, x0, y1, z, 0.0f, 0.0f, nz, ua, 1.0f);
+    mb_push_triangle(b, a, c, d);
+    mb_push_triangle(b, a, d, e);
+}
+
+/* P9 item 3: the weathering decals — stains hanging below the aisle windows,
+   moss banding the wall feet, on the nave-side face (= side * hwid, the wall
+   centerline less half its thickness, per stone_wall_run). Built in plan-local
+   coords; the spawned object's anchor applies the datum lift + swap, exactly as
+   church_glass relies on. */
+void church_decals(MeshBuilder *b, const float *params, int count) {
+    ChurchPlan p;
+    float hwid;
+    int   side, i;
+    if (!b) return;
+    church_plan(&p, params, count);
+    hwid = 0.5f * p.nave_w + p.aisle_w;
+    for (side = -1; side <= 1; side += 2) {
+        float zf    = (float)side * (hwid - 0.02f);   /* nave-side face, proud */
+        float nz    = (float)(-side);                 /* normal toward the nave */
+        int   jl    = side > 0 ? 2 : 0;
+        int   wallq = side > 0 ? WALL_AISLE_N : WALL_AISLE_S;
+        for (i = 0; i < p.nbays; i++) {
+            GothicOpening o;
+            float xc = p.west_x + p.tower_d + ((float)i + 0.5f) * p.bay_l;
+            if (!church_survives(&p, ELEM_WALL, i, jl, (float *)0)) continue;
+            /* moss banding the foot: a ROW of ~1:2 cells (matching the atlas
+               moss region's aspect) so the blotches keep their shape — no
+               horizontal smear — each U-mirrored by a hash for variety */
+            {
+                float mx0 = xc - 0.42f * p.bay_l, mx1 = xc + 0.42f * p.bay_l;
+                float my0 = p.plinth_h, my1 = p.plinth_h + 0.6f;
+                int   nmc = (int)((mx1 - mx0) / 0.30f + 0.5f), mc;
+                if (nmc < 1) nmc = 1;
+                for (mc = 0; mc < nmc; mc++) {
+                    float cx0 = mx0 + (mx1 - mx0) * (float)mc / (float)nmc;
+                    float cx1 = mx0 + (mx1 - mx0) * (float)(mc + 1) / (float)nmc;
+                    int   mir = gothic_hash01(p.seed, LANE_RUIN, i, mc + side) > 0.5f;
+                    decal_cell(b, cx0, my0, cx1, my1, zf, nz, 0.52f, 0.98f, mir);
+                }
+            }
+            /* a stain hanging from the window sill down to the plinth */
+            plan_opening(&p, wallq, i, &o);
+            if (o.kind == GOTHIC_OPEN_WINDOW && o.sill > p.plinth_h + 0.5f) {
+                float hw = 0.28f * o.w;
+                decal_quad(b, o.cx - hw, p.plinth_h, o.cx + hw, o.sill,
+                           zf, nz, 0.02f, 0.48f);
+            }
+        }
+    }
+}
+
 /* ================== item 7: roof, tower & spire ==================
    The silhouette: after this item the ruin = 0 church is COMPLETE.
    Roofs are skins behind the parapets; the spire crosses square to

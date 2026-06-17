@@ -292,6 +292,11 @@ int gothic_tracery(const GothicOpening *o, float divisor, GothicTracery *t);
    schema as church_stone, same plan, same windows. */
 void church_glass(MeshBuilder *b, const float *params, int count);
 
+/* P9 item 3: weathering decals — stains below the aisle windows, moss at the
+   wall feet, on the nave-side face. A plan reader like church_glass; the quads
+   carry UVs into the decal atlas (u < 0.5 = stain, >= 0.5 = moss). */
+void church_decals(MeshBuilder *b, const float *params, int count);
+
 /* ---- item 7: roof, tower & spire — the silhouette ----
    Everything above the parapet. The roof is its SKIN (no trusses):
    the hall's single great roof vs the basilica's stepped section is

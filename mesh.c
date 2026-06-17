@@ -773,6 +773,9 @@ static void emit_church_roof(MeshBuilder *b, const float *p) {
 static void emit_church_floor(MeshBuilder *b, const float *p) {
     church_floor(b, p, 8);
 }
+static void emit_church_decals(MeshBuilder *b, const float *p) {
+    church_decals(b, p, 8);
+}
 static void emit_pinnacle(MeshBuilder *b, const float *p) {
     gothic_pinnacle(b, p[0], (unsigned)(p[1] + 0.5f));
 }
@@ -884,6 +887,9 @@ static const MeshRefEntry REGISTRY[] = {
     { "church_floor", 8,
       { "w", "d", "seed", "style", "ruin", "built", "acute", "reserved" },
       { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_floor },
+    { "church_decals", 8,
+      { "w", "d", "seed", "style", "ruin", "built", "acute", "reserved" },
+      { 18.0f, 30.0f, 7.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f }, emit_church_decals },
     /* the standalone pinnacle (P6 item 7; item 10 instances it) */
     { "pinnacle", 2, { "h", "seed" }, { 1.8f, 7.0f }, emit_pinnacle },
     /* the follies (P6 item 10): the kit's vocabulary, placeable alone —
