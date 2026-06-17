@@ -96,6 +96,13 @@ typedef struct {
 #define SHADOW_DIST       60.0f    /* sun shadows fitted out to here (camera far = 100) */
 #define SHADOW_CASTER_PAD 40.0f    /* world units pulled toward the sun so tall/behind
                                       geometry still casts into the slice's box */
+/* a shadow-casting SPOT sconce (P8 item 7): candle-light that throws pier
+   shadows. ONE designated caster (opt-in via meta cast=1), a single perspective
+   depth map — the spot path Item 6 retired from the sun, re-homed on a lamp. */
+#define SPOT_SHADOW_SIZE  1024     /* one room, not the island — smaller than the sun's 2048 */
+#define SPOT_SHADOW_NEAR  0.3f
+#define SPOT_SHADOW_FAR   18.0f
+#define SPOT_SWAY_AMP     0.035f   /* metres the flame dances → the shadows sway */
 
 /* P8 items 2 & 3: ONE fog medium — the atmospheric haze (item 2) and the
    god-ray in-scatter density (item 3) read the same field, so shafts and
@@ -207,6 +214,14 @@ static const char *FRAGMENT_SRC =
     "    float    uPointRadius[8];\n"
     "    float4x4 uLightVP;\n"                                /* near cascade (P8 item 6) */
     "    float4x4 uLightVP1;\n"                               /* far cascade */
+    "    float4x4 uSpotVP;\n"                                 /* the sconce's shadow matrix (P8 item 7) */
+    "    float3   uSpotPos;\n"
+    "    float3   uSpotDir;\n"
+    "    float3   uSpotColor;\n"                              /* premultiplied by intensity*flicker */
+    "    float    uSpotRadius;\n"
+    "    float    uSpotCosInner;\n"
+    "    float    uSpotCosOuter;\n"
+    "    float    uSpotEnabled;\n"                            /* 0 = no caster */
     "    float    uUseIBL;\n"
     "    float    uAmbientScale;\n"
     "};\n"
@@ -268,6 +283,13 @@ static const char *FRAGMENT_SRC =
     "    if (inCascade(p1)) return pcfShadow(m1, sm1, p1, bias);\n"
     "    return 0.0;\n"
     "}\n"
+    "static float spotShadow(float3 worldPos, constant FU &u,\n"
+    "                        depth2d<float> smap, sampler smp) {\n"   /* P8 item 7: one perspective map */
+    "    float4 lp = u.uSpotVP * float4(worldPos, 1.0);\n"
+    "    float3 pr = lp.xyz / lp.w * 0.5 + 0.5;\n"
+    "    if (lp.w <= 0.0 || !inCascade(pr)) return 0.0;\n"
+    "    return pcfShadow(smap, smp, pr, 0.0015);\n"
+    "}\n"
     "fragment float4 fmain(VOut v [[stage_in]],\n"
     "                      constant FU &u [[buffer(0)]],\n"
     "                      texture2d<float>   uAlbedoTex     [[texture(0)]],\n"
@@ -279,11 +301,12 @@ static const char *FRAGMENT_SRC =
     "                      texturecube<float> uPrefilterMap  [[texture(6)]],\n"
     "                      texture2d<float>   uBrdfLUT       [[texture(7)]],\n"
     "                      depth2d<float>     uShadowMap1    [[texture(8)]],\n"   /* far cascade (P8 item 6) */
+    "                      depth2d<float>     uSpotShadowMap [[texture(9)]],\n"   /* the sconce (P8 item 7) */
     "                      sampler s0 [[sampler(0)]], sampler s1 [[sampler(1)]],\n"
     "                      sampler s2 [[sampler(2)]], sampler s3 [[sampler(3)]],\n"
     "                      sampler s4 [[sampler(4)]], sampler s5 [[sampler(5)]],\n"
     "                      sampler s6 [[sampler(6)]], sampler s7 [[sampler(7)]],\n"
-    "                      sampler s8 [[sampler(8)]]) {\n"
+    "                      sampler s8 [[sampler(8)]], sampler s9 [[sampler(9)]]) {\n"
     "    float3 albedo = u.uBaseColor;\n"
     "    if (u.uUseAlbedoTex > 0.5) albedo *= uAlbedoTex.sample(s0, v.uv).rgb;\n"
     "    float metallic  = u.uMetallic;\n"
@@ -320,6 +343,16 @@ static const char *FRAGMENT_SRC =
     "                                uShadowMap, s4, uShadowMap1, s8);\n"
     "    float3 Lo = brdfDirect(N, V, L, albedo, metallic, roughness, F0)\n"
     "              * radiance * (1.0 - shadow);\n"
+    "    if (u.uSpotEnabled > 0.5) {\n"                        /* the shadow-casting sconce (P8 item 7) */
+    "        float3 sl    = u.uSpotPos - v.worldPos;\n"
+    "        float  sd    = length(sl);\n"
+    "        float3 Ls    = sl / max(sd, 0.0001);\n"
+    "        float  swf   = clamp(1.0 - pow(sd / u.uSpotRadius, 4.0), 0.0, 1.0);\n"
+    "        float  scone = smoothstep(u.uSpotCosOuter, u.uSpotCosInner, dot(-Ls, u.uSpotDir));\n"
+    "        float3 srad  = u.uSpotColor * (swf * swf / (sd * sd + 1.0)) * scone;\n"
+    "        float3 Lspot = brdfDirect(N, V, Ls, albedo, metallic, roughness, F0) * srad;\n"
+    "        Lo += Lspot * (1.0 - spotShadow(v.worldPos, u, uSpotShadowMap, s9));\n"
+    "    }\n"
     "    for (int pi = 0; pi < u.uPointCount; pi++) {\n"
     "        float3 pl = u.uPointPos[pi] - v.worldPos;\n"
     "        float d2 = dot(pl, pl);\n"
@@ -414,6 +447,15 @@ static const char *FRAGMENT_SRC =
     "uniform sampler2D uShadowMap;\n"                        /* near cascade depth */
     "uniform mat4  uLightVP1;\n"                             /* far cascade proj*view */
     "uniform sampler2D uShadowMap1;\n"                       /* far cascade depth */
+    "uniform float uSpotEnabled;\n"                          /* shadow-casting sconce (P8 item 7); 0 = none */
+    "uniform vec3  uSpotPos;\n"
+    "uniform vec3  uSpotDir;\n"
+    "uniform vec3  uSpotColor;\n"                            /* premultiplied by intensity*flicker */
+    "uniform float uSpotRadius;\n"
+    "uniform float uSpotCosInner;\n"
+    "uniform float uSpotCosOuter;\n"
+    "uniform mat4  uSpotVP;\n"                               /* the sconce's perspective shadow matrix */
+    "uniform sampler2D uSpotShadowMap;\n"                    /* unit 9 */
     "uniform samplerCube uIrradianceMap;\n"                  /* diffuse IBL (B3) */
     "uniform float uUseIBL;\n"                               /* 0 = flat ambient fallback */
     "uniform float uAmbientScale;\n"                         /* 1 outdoors; <1 inside a sealed room (item 7) */
@@ -483,6 +525,12 @@ static const char *FRAGMENT_SRC =
     "    if (inCascade(p1)) return pcfShadow(uShadowMap1, p1, bias);\n"
     "    return 0.0;\n"                                       /* beyond every cascade = lit */
     "}\n"
+    "float spotShadow(vec3 worldPos) {\n"                    /* P8 item 7: one perspective map (the spot path item 6 retired) */
+    "    vec4 lp = uSpotVP * vec4(worldPos, 1.0);\n"
+    "    vec3 pr = lp.xyz / lp.w * 0.5 + 0.5;\n"
+    "    if (lp.w <= 0.0 || !inCascade(pr)) return 0.0;\n"    /* outside the cone's frustum = lit */
+    "    return pcfShadow(uSpotShadowMap, pr, 0.0015);\n"
+    "}\n"
     "\n"
     "void main() {\n"
     "    vec3 albedo = uBaseColor;\n"
@@ -527,6 +575,17 @@ static const char *FRAGMENT_SRC =
     "    float shadow = shadowFactor(vWorldPos, max(dot(N, L), 0.0));\n"
     "    vec3 Lo = brdfDirect(N, V, L, albedo, metallic, roughness, F0)\n"
     "            * radiance * (1.0 - shadow);\n"
+    "\n"
+    "    if (uSpotEnabled > 0.5) {\n"                          /* the shadow-casting sconce (P8 item 7) */
+    "        vec3  sl    = uSpotPos - vWorldPos;\n"
+    "        float sd    = length(sl);\n"
+    "        vec3  Ls    = sl / max(sd, 0.0001);\n"
+    "        float swf   = clamp(1.0 - pow(sd / uSpotRadius, 4.0), 0.0, 1.0);\n"   /* windowed inverse-square */
+    "        float scone = smoothstep(uSpotCosOuter, uSpotCosInner, dot(-Ls, uSpotDir));\n"
+    "        vec3  srad  = uSpotColor * (swf * swf / (sd * sd + 1.0)) * scone;\n"
+    "        vec3  Lspot = brdfDirect(N, V, Ls, albedo, metallic, roughness, F0) * srad;\n"
+    "        Lo += Lspot * (1.0 - spotShadow(vWorldPos));\n"
+    "    }\n"
     "\n"
     "    for (int pi = 0; pi < uPointCount; pi++) {\n"         /* point lights (P4 item 5) */
     "        vec3  pl = uPointPos[pi] - vWorldPos;\n"
@@ -2234,6 +2293,13 @@ typedef struct {
        per-frame fitted light matrices (rebuilt each render from the camera). */
     RhiRenderTarget shadow_rt[SHADOW_CASCADES];
     mat4            cascade_vp[SHADOW_CASCADES];
+    /* the shadow-casting spot sconce (P8 item 7): one perspective map + the
+       resolved caster, rebuilt each frame (position swayed by the flicker). */
+    RhiRenderTarget spot_shadow_rt;
+    mat4            spot_vp;
+    vec3            spot_pos, spot_dir, spot_color;  /* color premultiplied by intensity*glow */
+    float           spot_radius, spot_cos_inner, spot_cos_outer;
+    sol_bool        spot_enabled;                    /* 0 = no caster -> today's lighting */
     RhiPipeline shadow_pipeline;       /* the depth-only pass */
     RhiPipeline skinned_pipeline;        /* item 9: palette-blending twins of */
     RhiPipeline skinned_shadow_pipeline; /* the standard + shadow pipelines  */
@@ -2265,7 +2331,7 @@ typedef struct {
        Wall clock is vsync-pinned (the documented swap cadence), so the
        numbers that can MOVE are encode/update cost and the draw counts —
        culling and instancing claims point here, not at fps. All in ms. */
-    float t_frame, t_cpu, t_update, t_shadow, t_hdr, t_post, t_swap;
+    float t_frame, t_cpu, t_update, t_shadow, t_spot_shadow, t_hdr, t_post, t_swap;
     float t_frame_gpu;              /* P8 item 1: whole-frame GPU ms (Metal); < 0 = n/a (GL) */
     int   draws_done, draws_total;  /* scene objects drawn / with geometry */
     /* the spatial index (P4 item 2): world AABBs of everything with
@@ -6430,6 +6496,13 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                    "1.0 0.62 0.30");
                     scene_meta_set(&st->scene, h2, "light_intensity", "9");
                     scene_meta_set(&st->scene, h2, "light_radius", "7");
+                    if (sc == 0) {     /* one designated shadow-caster (P8 item 7):
+                                          aimed down the nave + to the floor so it
+                                          rakes the piers and throws their shadows */
+                        scene_meta_set(&st->scene, h2, "cast", "1");
+                        scene_meta_set(&st->scene, h2, "light_dir", "-0.7 -0.55 0.25");
+                        scene_meta_set(&st->scene, h2, "light_cone", "48");
+                    }
                     scene_component_add(&st->scene, h2, "flicker",
                                         (const float *)0, 0);
                     {
@@ -7599,6 +7672,11 @@ static int init_scene(AppState *state) {
                 if (!state->shadow_rt[sc].id) return 0;
             }
         }
+        /* the spot sconce's map (P8 item 7): created unconditionally so unit 9
+           is always bindable; rendered into only when a caster exists */
+        state->spot_shadow_rt = rhi_create_depth_target(SPOT_SHADOW_SIZE,
+                                                        SPOT_SHADOW_SIZE);
+        if (!state->spot_shadow_rt.id) return 0;
 
         sh_shader = rhi_create_shader(SHADOW_VERTEX_SRC, SHADOW_FRAGMENT_SRC);
         sh_desc.shader     = sh_shader;
@@ -8133,6 +8211,65 @@ static CascadeSet sun_cascades(const AppState *state, mat4 view, mat4 proj) {
     return cs;
 }
 
+/* Resolve the ONE shadow-casting spot sconce (P8 item 7): the nearest scene
+   object tagged light=point AND cast=1. Reads its pos/color/intensity/radius,
+   an optional aim (light_dir meta; default straight down) and cone (light_cone
+   half-angle deg). The position is SWAYED by two incommensurate sines (handle-
+   seeded desync) so the flame dances and the shadows swing; intensity breathes
+   through overlay_glow like the fills. Builds the perspective shadow matrix.
+   Sets spot_enabled = 0 when no caster exists -> the FS term vanishes. */
+static void resolve_spot_caster(AppState *state, float t) {
+    sol_u32 k;
+    state->spot_enabled = SOL_FALSE;
+    for (k = 0; k < state->scene.count; k++) {
+        SceneObject *o    = &state->scene.objects[k];
+        const char  *lt   = scene_meta_get(&state->scene, o->handle, "light");
+        const char  *cast = scene_meta_get(&state->scene, o->handle, "cast");
+        const char  *s;
+        float r = 1.0f, g = 1.0f, b = 1.0f, inten = 10.0f, radius = 8.0f;
+        float outer = 45.0f, inner, ph;
+        vec3  dir = vec3_make(0.0f, -1.0f, 0.0f), pos, up;
+        mat4  wm, lview, lproj;
+        if (!lt || strcmp(lt, "point") != 0)  continue;
+        if (!cast || atoi(cast) == 0)         continue;
+        wm  = scene_world_matrix(&state->scene, o);
+        pos = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
+        s = scene_meta_get(&state->scene, o->handle, "light_color");
+        if (s) sscanf(s, "%f %f %f", &r, &g, &b);
+        s = scene_meta_get(&state->scene, o->handle, "light_intensity");
+        if (s) inten = (float)atof(s);
+        s = scene_meta_get(&state->scene, o->handle, "light_radius");
+        if (s) radius = (float)atof(s);
+        s = scene_meta_get(&state->scene, o->handle, "light_dir");
+        if (s) {
+            float dx, dy, dz;
+            if (sscanf(s, "%f %f %f", &dx, &dy, &dz) == 3)
+                dir = vec3_normalize(vec3_make(dx, dy, dz));
+        }
+        s = scene_meta_get(&state->scene, o->handle, "light_cone");
+        if (s) outer = (float)atof(s);
+        inner = outer * 0.7f;                      /* full-bright core inside the falloff */
+        inten *= o->overlay_glow;                  /* the flame breathes (same channel as fills) */
+        ph    = (float)o->handle * 0.7f;           /* desync each flame */
+        pos.x += sinf(t * 5.3f + ph)        * SPOT_SWAY_AMP;   /* the flame dances -> shadows sway */
+        pos.z += sinf(t * 4.1f + ph * 1.7f) * SPOT_SWAY_AMP;
+        state->spot_pos       = pos;
+        state->spot_dir       = dir;
+        state->spot_color     = vec3_make(r * inten, g * inten, b * inten);  /* premultiplied */
+        state->spot_radius    = radius;
+        state->spot_cos_inner = cosf(sol_radians(inner));
+        state->spot_cos_outer = cosf(sol_radians(outer));
+        up    = (fabsf(dir.y) > 0.99f) ? vec3_make(0.0f, 0.0f, 1.0f)
+                                       : vec3_make(0.0f, 1.0f, 0.0f);
+        lview = mat4_look_at(pos, vec3_add(pos, dir), up);
+        lproj = mat4_perspective(sol_radians(2.0f * outer + 8.0f), 1.0f,
+                                 SPOT_SHADOW_NEAR, SPOT_SHADOW_FAR);
+        state->spot_vp        = mat4_mul(lproj, lview);
+        state->spot_enabled   = SOL_TRUE;
+        break;                                     /* one caster in v1 */
+    }
+}
+
 /* everything a lit surface needs, bound on the given pipeline — shared
    verbatim by the standard draw and (item 9) the skinned one: a skinned
    surface is lit like any surface, so the uniform vocabulary is ONE. */
@@ -8176,6 +8313,20 @@ static void bind_scene_uniforms(const AppState *state, RhiPipeline pipeline,
         rhi_set_uniform_mat4("uLightVP1",  state->cascade_vp[1].m);
         rhi_bind_texture(rhi_render_target_depth_texture(state->shadow_rt[1]), 8);
         rhi_set_uniform_int("uShadowMap1", 8);
+
+        /* spot sconce (P8 item 7): unit 9 is ALWAYS bound (Metal needs a texture
+           there); the FS gates the term on uSpotEnabled, so a stale matrix when
+           disabled is never sampled. */
+        rhi_set_uniform_float("uSpotEnabled", state->spot_enabled ? 1.0f : 0.0f);
+        rhi_set_uniform_vec3 ("uSpotPos",   state->spot_pos.x, state->spot_pos.y, state->spot_pos.z);
+        rhi_set_uniform_vec3 ("uSpotDir",   state->spot_dir.x, state->spot_dir.y, state->spot_dir.z);
+        rhi_set_uniform_vec3 ("uSpotColor", state->spot_color.x, state->spot_color.y, state->spot_color.z);
+        rhi_set_uniform_float("uSpotRadius",   state->spot_radius);
+        rhi_set_uniform_float("uSpotCosInner", state->spot_cos_inner);
+        rhi_set_uniform_float("uSpotCosOuter", state->spot_cos_outer);
+        rhi_set_uniform_mat4 ("uSpotVP", state->spot_vp.m);
+        rhi_bind_texture(rhi_render_target_depth_texture(state->spot_shadow_rt), 9);
+        rhi_set_uniform_int  ("uSpotShadowMap", 9);
 
         /* IBL: irradiance (diffuse, B3) unit 5; prefilter + BRDF LUT (specular, C3)
            units 6/7. (0-3 material textures, 4 shadow.) */
@@ -8313,13 +8464,16 @@ static int collect_point_lights(AppState *st, vec3 *pos, vec3 *col, float *rad) 
     int     n = 0, i, j, count;
     sol_u32 k;
     for (k = 0; k < st->scene.count && n < 32; k++) {
-        SceneObject *o  = &st->scene.objects[k];
-        const char  *lt = scene_meta_get(&st->scene, o->handle, "light");
+        SceneObject *o    = &st->scene.objects[k];
+        const char  *lt   = scene_meta_get(&st->scene, o->handle, "light");
+        const char  *cast = scene_meta_get(&st->scene, o->handle, "cast");
         const char  *s;
         float        r = 1.0f, g = 1.0f, b = 1.0f, inten = 10.0f, radius = 8.0f;
         mat4         wm;
         vec3         p, dd;
         if (!lt || strcmp(lt, "point") != 0) continue;
+        if (cast && atoi(cast) != 0) continue;    /* the shadow-caster is its own
+                                                     dedicated term (P8 item 7) */
         wm = scene_world_matrix(&st->scene, o);
         p  = vec3_make(wm.m[12], wm.m[13], wm.m[14]);
         s = scene_meta_get(&st->scene, o->handle, "light_color");
@@ -8522,6 +8676,7 @@ static void render(AppState *state) {
     eye  = state->camera.pos;
     view = camera_view(&state->camera);
     proj = camera_proj(&state->camera, aspect);
+    resolve_spot_caster(state, (float)glfwGetTime());   /* the casting sconce (P8 item 7) */
     {
         CascadeSet cs = sun_cascades(state, view, proj);
         int c;
@@ -8538,6 +8693,21 @@ static void render(AppState *state) {
     }
     rt1 = glfwGetTime();
     yardstick_ms(&state->t_shadow, rt1 - rt0);
+
+    /* ---- pass 0b: the spot sconce's shadow map (P8 item 7), one extra depth
+       render via the same emit helper — timed separately so the per-caster
+       cost shows on the HUD. ---- */
+    if (state->spot_enabled) {
+        unsigned char *svis = vis_fill(state, state->spot_vp);
+        rhi_begin_pass(state->spot_shadow_rt, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);
+        emit_shadow_casters(state, state->spot_vp, svis);
+        rhi_end_pass();
+    }
+    {
+        double rts = glfwGetTime();
+        yardstick_ms(&state->t_spot_shadow, rts - rt1);
+        rt1 = rts;                                  /* pass 1 timing starts after the sconce */
+    }
 
     /* ---- pass 1: render the scene into the offscreen HDR target ---- */
     rhi_begin_pass(state->hdr_rt, RHI_CLEAR_ALL, 0.10f, 0.12f, 0.15f, 1.0f);
@@ -9305,9 +9475,9 @@ static void render(AppState *state) {
                         (double)state->t_swap);
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
-            sprintf(line, "up %4.2f shadow %4.2f hdr %4.2f",
+            sprintf(line, "up %4.2f shadow %4.2f spot %4.2f hdr %4.2f",
                     (double)state->t_update, (double)state->t_shadow,
-                    (double)state->t_hdr);
+                    (double)state->t_spot_shadow, (double)state->t_hdr);
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
             sprintf(line, "post %4.2f draws %d/%d parts %d",
@@ -9865,6 +10035,7 @@ int main(void) {
         for (sc = 0; sc < SHADOW_CASCADES; sc++)
             if (state.shadow_rt[sc].id) rhi_destroy_render_target(state.shadow_rt[sc]);
     }
+    if (state.spot_shadow_rt.id) rhi_destroy_render_target(state.spot_shadow_rt);
     rhi_shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
