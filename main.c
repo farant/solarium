@@ -1058,7 +1058,7 @@ static const char *POST_FRAGMENT_SRC =
     "            float3 uCamPos; float uBloomStrength; float uExposure;\n"
     "            float uFogStrength; float uFogDensity; float uFogHeight; float uFogFalloff;\n"
     "            float3 uGradeTint; float uGradeContrast; float uGradeSaturation;\n"
-    "            float uVignetteStrength; float uVignetteRadius; };\n"
+    "            float uVignetteStrength; float uVignetteRadius; float uLutMix; };\n"
     "static float3 aces(float3 x) {\n"            /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
     "}\n"
@@ -1070,6 +1070,19 @@ static const char *POST_FRAGMENT_SRC =
     "    float ig = (abs(bd) > 1e-4) ? (1.0 - exp(-bd)) / bd : 1.0;\n"
     "    return 1.0 - exp(-L * c * ig);\n"
     "}\n"
+    "static float3 lut3(texture2d<float> lut, sampler s, float3 c) {\n"  /* P9 item 1: 2D-strip LUT, trilinear by hand */
+    "    float N = 16.0, W = N * N;\n"
+    "    c = clamp(c, 0.0, 1.0);\n"
+    "    float bf = c.b * (N - 1.0);\n"
+    "    float b0 = floor(bf), bfrac = bf - b0;\n"
+    "    float b1 = min(b0 + 1.0, N - 1.0);\n"
+    "    float u0 = (b0 * N + 0.5 + c.r * (N - 1.0)) / W;\n"           /* half-texel insets keep each tap inside its blue slice */
+    "    float u1 = (b1 * N + 0.5 + c.r * (N - 1.0)) / W;\n"
+    "    float vv = (c.g * (N - 1.0) + 0.5) / N;\n"
+    "    float3 a = lut.sample(s, float2(u0, vv), level(0)).rgb;\n"     /* level(0): ignore GL's mip chain */
+    "    float3 b = lut.sample(s, float2(u1, vv), level(0)).rgb;\n"
+    "    return mix(a, b, bfrac);\n"
+    "}\n"
     "fragment float4 fmain(VOut v [[stage_in]],\n"
     "                      constant FU &u [[buffer(0)]],\n"
     "                      texture2d<float> uHdr   [[texture(0)]],\n"
@@ -1077,11 +1090,13 @@ static const char *POST_FRAGMENT_SRC =
     "                      depth2d<float>   uDepth [[texture(2)]],\n"
     "                      texture2d<float> uGodray [[texture(3)]],\n"
     "                      texture2d<float> uAO     [[texture(4)]],\n"
+    "                      texture2d<float> uLut    [[texture(5)]],\n"
     "                      sampler s0 [[sampler(0)]],\n"
     "                      sampler s1 [[sampler(1)]],\n"
     "                      sampler s2 [[sampler(2)]],\n"
     "                      sampler s3 [[sampler(3)]],\n"
-    "                      sampler s4 [[sampler(4)]]) {\n"
+    "                      sampler s4 [[sampler(4)]],\n"
+    "                      sampler s5 [[sampler(5)]]) {\n"
     "    float3 hdr    = uHdr.sample(s0, v.uv).rgb * uAO.sample(s4, v.uv).r\n"  /* P8 item 5: AO on the lit scene only */
     "                  + uBloom.sample(s1, v.uv).rgb * u.uBloomStrength\n"
     "                  + uGodray.sample(s3, v.uv).rgb;\n"
@@ -1098,6 +1113,7 @@ static const char *POST_FRAGMENT_SRC =
     "    ldr  = (ldr - 0.5) * u.uGradeContrast + 0.5;\n"
     "    float glum = dot(ldr, float3(0.2126, 0.7152, 0.0722));\n"
     "    ldr  = mix(float3(glum), ldr, u.uGradeSaturation);\n"
+    "    ldr  = mix(ldr, lut3(uLut, s5, ldr), u.uLutMix);\n"          /* P9 item 1: the baked LUT look */
     "    float2 vd = v.uv - 0.5;\n"
     "    float vig = 1.0 - u.uVignetteStrength * smoothstep(u.uVignetteRadius, 1.0, length(vd) * 1.41421356);\n"
     "    ldr *= vig;\n"
@@ -1138,6 +1154,8 @@ static const char *POST_FRAGMENT_SRC =
     "uniform float uGradeSaturation;\n"
     "uniform float uVignetteStrength;\n"
     "uniform float uVignetteRadius;\n"
+    "uniform sampler2D uLut;\n"                              /* P9 item 1: 2D-strip color LUT */
+    "uniform float uLutMix;\n"
     "out vec4 FragColor;\n"
     "vec3 aces(vec3 x) {\n"                                  /* Narkowicz ACES filmic fit */
     "    return clamp((x * (2.51*x + 0.03)) / (x * (2.43*x + 0.59) + 0.14), 0.0, 1.0);\n"
@@ -1149,6 +1167,19 @@ static const char *POST_FRAGMENT_SRC =
     "    float bd = uFogFalloff * dY;\n"
     "    float ig = (abs(bd) > 1e-4) ? (1.0 - exp(-bd)) / bd : 1.0;\n"
     "    return 1.0 - exp(-L * c * ig);\n"
+    "}\n"
+    "vec3 lut3(vec3 c) {\n"                                  /* P9 item 1: 2D-strip LUT, trilinear by hand */
+    "    float N = 16.0, W = N * N;\n"
+    "    c = clamp(c, 0.0, 1.0);\n"
+    "    float bf = c.b * (N - 1.0);\n"
+    "    float b0 = floor(bf), bfrac = bf - b0;\n"
+    "    float b1 = min(b0 + 1.0, N - 1.0);\n"
+    "    float u0 = (b0 * N + 0.5 + c.r * (N - 1.0)) / W;\n"  /* half-texel insets keep each tap inside its blue slice */
+    "    float u1 = (b1 * N + 0.5 + c.r * (N - 1.0)) / W;\n"
+    "    float vv = (c.g * (N - 1.0) + 0.5) / N;\n"
+    "    vec3 a = textureLod(uLut, vec2(u0, vv), 0.0).rgb;\n"  /* LOD 0: ignore GL's mip chain */
+    "    vec3 b = textureLod(uLut, vec2(u1, vv), 0.0).rgb;\n"
+    "    return mix(a, b, bfrac);\n"
     "}\n"
     "void main() {\n"
     "    vec3 hdr    = texture(uHdr, vUV).rgb * texture(uAO, vUV).r\n"  /* P8 item 5: AO on the lit scene only */
@@ -1170,6 +1201,7 @@ static const char *POST_FRAGMENT_SRC =
     "    ldr         = (ldr - 0.5) * uGradeContrast + 0.5;\n"
     "    float glum  = dot(ldr, vec3(0.2126, 0.7152, 0.0722));\n"
     "    ldr         = mix(vec3(glum), ldr, uGradeSaturation);\n"
+    "    ldr         = mix(ldr, lut3(ldr), uLutMix);\n"             /* P9 item 1: the baked LUT look */
     "    vec2 vd     = vUV - 0.5;\n"
     "    float vig   = 1.0 - uVignetteStrength * smoothstep(uVignetteRadius, 1.0, length(vd) * 1.41421356);\n"
     "    ldr        *= vig;\n"
@@ -2285,18 +2317,63 @@ typedef struct {
 } LeafShape;
 
 /* P9 item 1: color-grade presets (display-referred). Mode 0 is neutral — exact
-   identity, today's image bit-for-bit. '9' cycles. Synthesized, no binary. */
+   identity, today's image bit-for-bit. '9' cycles. Synthesized, no binary. The
+   lut field indexes grade_luts[]; lut_mix 0 bypasses it (exact), 1 = full LUT. */
 typedef struct {
     float contrast, saturation, tint_r, tint_g, tint_b, vig_strength, vig_radius;
+    int   lut;
+    float lut_mix;
 } GradePreset;
 static const GradePreset GRADE_PRESETS[] = {
-    { 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 0.00f, 0.50f },  /* 0 neutral (off) */
-    { 1.08f, 1.05f, 1.06f, 1.00f, 0.92f, 0.35f, 0.45f },  /* 1 warm dusk */
-    { 1.05f, 0.92f, 0.92f, 0.98f, 1.10f, 0.30f, 0.50f },  /* 2 cool */
-    { 1.18f, 0.80f, 1.00f, 1.00f, 1.00f, 0.45f, 0.40f }   /* 3 dramatic */
+    { 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 0.00f, 0.50f, 0, 0.0f },  /* 0 neutral (off) */
+    { 1.08f, 1.05f, 1.06f, 1.00f, 0.92f, 0.35f, 0.45f, 0, 0.0f },  /* 1 warm dusk */
+    { 1.05f, 0.92f, 0.92f, 0.98f, 1.10f, 0.30f, 0.50f, 0, 0.0f },  /* 2 cool */
+    { 1.18f, 0.80f, 1.00f, 1.00f, 1.00f, 0.45f, 0.40f, 0, 0.0f },  /* 3 dramatic */
+    { 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 0.00f, 0.50f, 0, 1.0f },  /* 4 LUT identity (passthrough test) */
+    { 1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 0.00f, 0.50f, 1, 1.0f }   /* 5 filmic (teal/orange split-tone) */
 };
-static const char *GRADE_PRESET_NAMES[] = { "neutral (off)", "warm dusk", "cool", "dramatic" };
-#define GRADE_PRESET_COUNT 4
+static const char *GRADE_PRESET_NAMES[] = {
+    "neutral (off)", "warm dusk", "cool", "dramatic", "LUT identity (test)", "filmic"
+};
+#define GRADE_PRESET_COUNT 6
+
+/* P9 item 1 (LUT half): bake a 16-cube color grade into a 256x16 RGBA8 strip.
+   Tile = blue slice (x / 16); within a tile, (x % 16) = red, y = green. The
+   shader rebuilds trilinear by hand (two slice taps + a blue lerp) with half-
+   texel insets, so GL's REPEAT + mips are sidestepped. look 0 = identity. */
+#define GRADE_LUT_N 16
+
+static unsigned char grade_u8(float v) {
+    if (v <= 0.0f) return 0;
+    if (v >= 1.0f) return 255;
+    return (unsigned char)(v * 255.0f + 0.5f);
+}
+
+static RhiTexture build_grade_lut(int look) {
+    unsigned char px[GRADE_LUT_N * GRADE_LUT_N * GRADE_LUT_N * 4];
+    int N = GRADE_LUT_N, W = N * N;
+    int bs, gy, rx;
+    for (bs = 0; bs < N; bs++)
+        for (gy = 0; gy < N; gy++)
+            for (rx = 0; rx < N; rx++) {
+                float r  = (float)rx / (float)(N - 1);
+                float g  = (float)gy / (float)(N - 1);
+                float b  = (float)bs / (float)(N - 1);
+                float cr = r, cg = g, cb = b;
+                int   o  = (gy * W + bs * N + rx) * 4;
+                if (look == 1) {                       /* filmic: shadows cool, highlights warm */
+                    float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                    float t   = lum * lum * (3.0f - 2.0f * lum);   /* smoothstep(0,1,lum) */
+                    cr = r * (0.90f + 0.22f * t);
+                    cb = b * (1.12f - 0.24f * t);
+                }
+                px[o + 0] = grade_u8(cr);
+                px[o + 1] = grade_u8(cg);
+                px[o + 2] = grade_u8(cb);
+                px[o + 3] = 255;
+            }
+    return rhi_create_texture(px, W, N, RHI_TEX_RGBA8);
+}
 
 typedef struct {
     int         fb_width, fb_height;
@@ -2315,7 +2392,7 @@ typedef struct {
     int             rt_width, rt_height;  /* size hdr_rt was built at; recreate on resize */
     float           exposure;        /* HDR exposure (item 7c); '[' / ']' scrub it live */
     int             grade_mode;      /* P9 item 1: 0=neutral(off), then preset slots; '9' cycles */
-    RhiTexture      grade_lut;       /* P9 item 1 (LUT half): the 2D-strip color LUT */
+    RhiTexture      grade_luts[2];   /* P9 item 1: [0]=identity, [1]=filmic split-tone */
     sol_bool        grade_was_down;  /* edge-detect for the grade-cycle key */
     /* the shadow-casting sun (P8 item 6): now a DIRECTIONAL light. light_pos ->
        light_target encodes only its DIRECTION (no position/cone/falloff). The
@@ -7843,6 +7920,8 @@ static int init_scene(AppState *state) {
         post_desc.depth_test = SOL_FALSE;
         post_desc.blend      = SOL_FALSE;
         state->post_pipeline = rhi_create_pipeline(&post_desc);
+        state->grade_luts[0] = build_grade_lut(0);   /* P9 item 1: identity strip */
+        state->grade_luts[1] = build_grade_lut(1);   /* P9 item 1: filmic split-tone */
     }
 
     {   /* god-rays (P8 item 3): a fullscreen raymarch, same desc shape as post */
@@ -9620,6 +9699,9 @@ static void render(AppState *state) {
                 rhi_set_uniform_float("uGradeSaturation",  gp->saturation);
                 rhi_set_uniform_float("uVignetteStrength", gp->vig_strength);
                 rhi_set_uniform_float("uVignetteRadius",   gp->vig_radius);
+                rhi_bind_texture(state->grade_luts[gp->lut], 5);   /* P9 item 1: the LUT */
+                rhi_set_uniform_int  ("uLut", 5);
+                rhi_set_uniform_float("uLutMix", gp->lut_mix);
             }
         }
         rhi_draw(0, 3);
