@@ -2327,6 +2327,8 @@ typedef struct {
     sol_bool    r_was_down;     /* edge-detect the mirror-rescan key (P3 item 6c) */
     sol_bool    bs_was_down;    /* edge-detect tombstone dismissal (Backspace) */
     sol_bool    g_was_down;     /* edge-detect gather-to-workspace (P3 item 6d) */
+    sol_bool    night;          /* P8 item 9: the day/night lever's state (` toggles) */
+    sol_bool    bt_was_down;    /* edge-detect the backtick day/night toggle */
     /* the yardstick (P4 item 2): smoothed CPU-side timings + draw counts.
        Wall clock is vsync-pinned (the documented swap cadence), so the
        numbers that can MOVE are encode/update cost and the draw counts —
@@ -4042,6 +4044,7 @@ static void scene_resolve_meshes(Scene *s);    /* defined with init_scene below 
 static void hdr_reload(AppState *st, const char *path);  /* the abbey key
                                           switches the sky (defined with
                                           the watcher below) */
+static void apply_time_of_day(AppState *st);   /* P8 item 9: `-toggle's sky + sun */
 static void apply_kind_materials(Scene *s);    /* likewise */
 static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
@@ -5821,6 +5824,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->show_shadow_map = !st->show_shadow_map;
     st->m_was_down = m_now;
 
+    /* ` (backtick) flips day <-> night: swaps the sky/IBL + the sun (P8 item 9) */
+    {
+        sol_bool bt_now = glfwGetKey(w, GLFW_KEY_GRAVE_ACCENT) == GLFW_PRESS;
+        if (bt_now && !st->bt_was_down) {
+            st->night = !st->night;
+            apply_time_of_day(st);
+        }
+        st->bt_was_down = bt_now;
+    }
+
     /* I toggles the skybox source: env cubemap vs irradiance map (B2, edge) */
     i_now = glfwGetKey(w, GLFW_KEY_I) == GLFW_PRESS;
     if (i_now && !st->i_was_down && st->irradiance_cubemap.id)
@@ -6758,6 +6771,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                                   and through the roofless bays */
             scene_save(&st->scene, "scene.stml");
             hdr_reload(st, "rogland_clear_night_4k.hdr");  /* dusk falls */
+            st->night = SOL_TRUE;                          /* so ` flips to day next (P8 item 9) */
             printf("the abbey rises on its hill (datum %.2f) — night falls\n",
                    datum);
         }
@@ -7191,6 +7205,24 @@ static void hdr_reload(AppState *st, const char *path) {
     build_irradiance_map(st);
     build_prefilter_map(st);
     printf("environment hot-reloaded: %s\n", path);
+}
+
+/* the day/night lever (P8 item 9, reserved decision #7 = swap-only): the
+   backtick toggles st->night, and this swaps BOTH the sky/IBL (hdr_reload's
+   full re-bake) and the directional sun — a warm bright day vs a dim cool
+   MOONLIGHT, so night actually reads as night. The cascades cast either way;
+   night shadows just go softer and cooler. No day/night CYCLE system (that
+   brushes GI, deferred) — just the two curated ends. */
+static void apply_time_of_day(AppState *st) {
+    if (st->night) {
+        hdr_reload(st, "rogland_clear_night_4k.hdr");
+        st->light_color     = vec3_make(0.55f, 0.62f, 0.85f);   /* cool moonlight */
+        st->light_intensity = 0.8f;
+    } else {
+        hdr_reload(st, "horn-koppe_spring_4k.hdr");
+        st->light_color     = vec3_make(1.0f, 0.95f, 0.85f);    /* warm day */
+        st->light_intensity = 3.5f;
+    }
 }
 
 static void watch_poll(AppState *st) {
