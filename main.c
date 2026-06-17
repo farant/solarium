@@ -208,6 +208,7 @@ static const char *FRAGMENT_SRC =
     "    float    uCosInner;\n"
     "    float    uCosOuter;\n"
     "    float3   uEmissive;\n"
+    "    float    uOpacity;\n"
     "    int      uPointCount;\n"
     "    float3   uPointPos[8];\n"
     "    float3   uPointColor[8];\n"
@@ -380,7 +381,7 @@ static const char *FRAGMENT_SRC =
     "    }\n"
     "    float3 color = ambient * u.uAmbientScale + Lo + u.uEmissive;\n"
     "    color = mix(color, float3(1.0, 0.85, 0.30), u.uHighlight * 0.5);\n"
-    "    return float4(color, 1.0);\n"
+    "    return float4(color, u.uOpacity);\n"
     "}\n";
 
 #else /* GLSL */
@@ -439,6 +440,7 @@ static const char *FRAGMENT_SRC =
     "uniform float uCosInner;\n"                             /* cos(inner half-angle) */
     "uniform float uCosOuter;\n"                             /* cos(outer half-angle) */
     "uniform vec3  uEmissive;\n"                             /* emitted light (P4 item 5) */
+    "uniform float uOpacity;\n"                              /* P9 item 2: 1=opaque, <1=glass */
     "uniform int   uPointCount;\n"                           /* point lights (P4 item 5) */
     "uniform vec3  uPointPos[8];\n"
     "uniform vec3  uPointColor[8];\n"                        /* color * intensity, premultiplied */
@@ -621,7 +623,7 @@ static const char *FRAGMENT_SRC =
                                                                 the camera, felt by nobody
                                                                 (P4 item 5) */
     "    color = mix(color, vec3(1.0, 0.85, 0.30), uHighlight * 0.5);\n"  /* selection tint (linear) */
-    "    FragColor = vec4(color, 1.0);\n"                     /* LINEAR -> the HDR buffer; 7c tonemaps + encodes */
+    "    FragColor = vec4(color, uOpacity);\n"               /* LINEAR -> HDR; alpha = P9 item 2 opacity */
     "}\n";
 
 #endif /* SOL_RHI_METAL — the core pair */
@@ -2379,6 +2381,7 @@ typedef struct {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
     RhiPipeline post_pipeline;  /* fullscreen tonemap/encode pass (item 7b) */
+    RhiPipeline glass_pipeline; /* P9 item 2: church_glass — alpha-blend, depth-write-off */
     RhiTexture  albedo_tex;     /* decoded page image (item 5b); 0 if load failed */
     Scene       scene;
     sol_u32     box_handle;     /* so update() can animate the box object */
@@ -7860,6 +7863,13 @@ static int init_scene(AppState *state) {
     desc.depth_test = SOL_TRUE;
     desc.blend      = SOL_FALSE;
     state->pipeline = rhi_create_pipeline(&desc);
+    {   /* P9 item 2: the glass twin — same PBR shader + vertex layout, but
+           alpha-blended and depth-write-off (the water precedent). */
+        RhiPipelineDesc gd = desc;
+        gd.blend           = RHI_BLEND_ALPHA;
+        gd.depth_write_off = SOL_TRUE;
+        state->glass_pipeline = rhi_create_pipeline(&gd);
+    }
 
     /* the skinned twins (item 9): the canonical 12 floats + joints4 +
        weights4 = 20-float stride; same fragment shader (a skinned surface
@@ -8665,6 +8675,7 @@ static void bind_scene_uniforms(const AppState *state, RhiPipeline pipeline,
         rhi_bind_texture(mat.normal_tex, 3);
         rhi_set_uniform_int("uNormalTex", 3);   /* sampler -> texture unit 3 */
     }
+    rhi_set_uniform_float("uOpacity", 1.0f);    /* P9 item 2: opaque default; draw_glass overrides */
 }
 
 static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
@@ -8672,6 +8683,20 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
                       Material mat) {
     bind_scene_uniforms(state, state->pipeline, model, view, proj, eye,
                         highlight, mat);
+    rhi_bind_vertex_buffer(mesh.vbuffer);
+    rhi_bind_index_buffer(mesh.ibuffer);
+    rhi_draw_indexed(0, mesh.index_count);
+}
+
+#define GLASS_OPACITY 0.6f   /* P9 item 2: stained-glass surface opacity (tune by eye) */
+/* P9 item 2: the stained-glass draw — the SAME PBR shader (glass stays lit + IBL
+   + emissive), on the alpha-blend / depth-write-off glass pipeline, with the
+   surface opacity overriding bind_scene_uniforms' opaque default. */
+static void draw_glass(const AppState *state, Mesh mesh, mat4 model, mat4 view,
+                       mat4 proj, vec3 eye, Material mat) {
+    bind_scene_uniforms(state, state->glass_pipeline, model, view, proj, eye,
+                        0.0f, mat);
+    rhi_set_uniform_float("uOpacity", GLASS_OPACITY);
     rhi_bind_vertex_buffer(mesh.vbuffer);
     rhi_bind_index_buffer(mesh.ibuffer);
     rhi_draw_indexed(0, mesh.index_count);
@@ -9074,6 +9099,8 @@ static void render(AppState *state) {
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
         if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
             continue;                             /* ponds: the WATER PASS draws them */
+        if (o->mesh_ref && strcmp(o->mesh_ref, "church_glass") == 0)
+            continue;                             /* P9 item 2: the GLASS sub-pass draws them */
         state->draws_total++;                     /* the yardstick: would draw */
         if (vis && !vis[o->handle]) continue;     /* outside the camera frustum
                                                      (piece 4): the HUD's left
@@ -9443,6 +9470,47 @@ static void render(AppState *state) {
                                 bpx2m, usable, ink_r, ink_g, ink_b);
                 }
             }
+        }
+    }
+
+    /* P9 item 2: stained glass — the church_glass objects, translucent, drawn
+       AFTER all opaque (tests their depth), back-to-front by distance, into the
+       HDR buffer (so it blooms + tonemaps + grades). One mesh per church; the
+       object-level sort orders multiple churches. */
+    {
+        sol_u32 gidx[16];
+        float   gdist[16];
+        int     gn = 0, ga, gb;
+        for (i = 0; i < state->scene.count && gn < 16; i++) {
+            const SceneObject *o = &state->scene.objects[i];
+            mat4  gm;
+            float dx, dy, dz;
+            if (o->mesh.index_count == 0) continue;
+            if (!o->mesh_ref || strcmp(o->mesh_ref, "church_glass") != 0) continue;
+            if (vis && !vis[o->handle]) continue;
+            gm = scene_world_matrix(&state->scene, o);
+            dx = gm.m[12] - eye.x; dy = gm.m[13] - eye.y; dz = gm.m[14] - eye.z;
+            gidx[gn]  = (sol_u32)i;
+            gdist[gn] = dx * dx + dy * dy + dz * dz;
+            gn++;
+        }
+        for (ga = 1; ga < gn; ga++) {             /* insertion sort: far -> near */
+            sol_u32 ki = gidx[ga];
+            float   kd = gdist[ga];
+            gb = ga - 1;
+            while (gb >= 0 && gdist[gb] < kd) {
+                gidx[gb + 1] = gidx[gb]; gdist[gb + 1] = gdist[gb]; gb--;
+            }
+            gidx[gb + 1] = ki; gdist[gb + 1] = kd;
+        }
+        for (ga = 0; ga < gn; ga++) {
+            const SceneObject *o     = &state->scene.objects[gidx[ga]];
+            mat4               model = scene_world_matrix(&state->scene, o);
+            Material           dm    = o->material;
+            dm.emissive.x *= o->overlay_glow;     /* the glass breathes like the sconces */
+            dm.emissive.y *= o->overlay_glow;
+            dm.emissive.z *= o->overlay_glow;
+            draw_glass(state, o->mesh, model, view, proj, eye, dm);
         }
     }
 
