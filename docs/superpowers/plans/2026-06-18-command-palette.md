@@ -637,15 +637,31 @@ In `on_key` (main.c:10214), after fetching `st`, add two blocks **before** the e
 
 (Keep the existing `edit_handle` key handling below these blocks unchanged.)
 
-- [ ] **Step 6: Extend the read_input blackhole and the dispatch guard**
+- [ ] **Step 6: Suppress world input while the palette is open**
 
-In `read_input`, the dispatch loop guard added in Task 2 (`if (st->edit_handle == 0)`) becomes:
+`read_input` already early-returns when a note is being edited (main.c:5745: `if (st->edit_handle != 0) { …zero inputs…; return; }`) — which is why the Task 2 dispatch loop is correctly *unguarded*. Extend that same early-return to also fire while the palette is open, so movement/look are zeroed and the dispatch loop below it is never reached while you type in the palette. Change the condition and keep the note-only blur guarded:
 
 ```c
-    if (st->edit_handle == 0 && !st->palette.open) {
+    if (st->edit_handle != 0 || st->palette.open) {
+        in->forward = in->back = in->left = in->right = SOL_FALSE;
+        in->up = in->down = SOL_FALSE;
+        in->look_dx = 0.0f;
+        in->look_dy = 0.0f;
+        in->zoom    = 0.0f;
+        st->scroll_accum = 0.0;
+        glfwGetCursorPos(w, &mx, &my);
+        if (st->edit_handle != 0) {     /* note blur is edit-only */
+            sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (lmb && !st->lmb_was_down) note_edit_end(st);
+            st->lmb_was_down = lmb;
+        }
+        st->mouse_last_x = mx;
+        st->mouse_last_y = my;
+        return;
+    }
 ```
 
-Also extend the existing movement/look suppression (the note-editing blackhole near main.c:5730) so it also triggers while the palette is open — change its condition from `st->edit_handle != 0` (or equivalent) to `st->edit_handle != 0 || st->palette.open`.
+Leave the dispatch loop itself unchanged (it is correctly unguarded after Task 2).
 
 - [ ] **Step 7: Draw the palette in the 2D UI pass**
 
