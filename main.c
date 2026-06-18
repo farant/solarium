@@ -2499,7 +2499,6 @@ typedef struct AppState {
     float           exposure;        /* HDR exposure (item 7c); '[' / ']' scrub it live */
     int             grade_mode;      /* P9 item 1: 0=neutral(off), then preset slots; '9' cycles */
     RhiTexture      grade_luts[2];   /* P9 item 1: [0]=identity, [1]=filmic split-tone */
-    sol_bool        grade_was_down;  /* edge-detect for the grade-cycle key */
     /* the shadow-casting sun (P8 item 6): now a DIRECTIONAL light. light_pos ->
        light_target encodes only its DIRECTION (no position/cone/falloff). The
        inner/outer/intensity fields linger for the scene-format round-trip and
@@ -2526,7 +2525,6 @@ typedef struct AppState {
     RhiPipeline skinned_shadow_pipeline; /* the standard + shadow pipelines  */
     RhiPipeline shadow_debug_pipeline; /* fullscreen depth-map inspector */
     sol_bool    show_shadow_map;       /* 'M' toggles the inspector view */
-    sol_bool    m_was_down;            /* edge-detect the inspector toggle */
     /* environment / skybox (Phase A): equirectangular HDR, linear radiance */
     RhiTexture  skybox_tex;            /* equirect HDR; 0 if the .hdr failed to load */
     RhiPipeline skybox_pipeline;       /* fullscreen-triangle equirect draw (A2; also the equirect->cube tool) */
@@ -2535,21 +2533,15 @@ typedef struct AppState {
     RhiTexture  irradiance_cubemap;    /* diffuse irradiance convolution (B2) */
     RhiPipeline irradiance_pipeline;   /* the convolution pass */
     sol_bool    show_irradiance;       /* 'I' toggles the skybox source: env vs irradiance */
-    sol_bool    i_was_down;            /* edge-detect the inspector toggle */
     RhiTexture  prefilter_cubemap;     /* specular prefilter, roughness mip chain (C1) */
     RhiPipeline prefilter_pipeline;    /* the GGX importance-sampling pass */
     sol_bool    show_prefilter;        /* 'P' cycles the prefilter-mip inspector */
     int         prefilter_mip;         /* which roughness level the inspector shows */
-    sol_bool    p_was_down;
     RhiRenderTarget brdf_lut_rt;       /* BRDF integration LUT, 2D RG (C2) */
     RhiPipeline     brdf_lut_pipeline;
-    sol_bool    f_was_down;     /* edge-detect the walk/fly toggle key */
-    sol_bool    l_was_down;     /* edge-detect the scene-reload key (P3 item 1) */
-    sol_bool    r_was_down;     /* edge-detect the mirror-rescan key (P3 item 6c) */
     sol_bool    bs_was_down;    /* edge-detect tombstone dismissal (Backspace) */
     sol_bool    g_was_down;     /* edge-detect gather-to-workspace (P3 item 6d) */
     sol_bool    night;          /* P8 item 9: the day/night lever's state (` toggles) */
-    sol_bool    bt_was_down;    /* edge-detect the backtick day/night toggle */
     /* the yardstick (P4 item 2): smoothed CPU-side timings + draw counts.
        Wall clock is vsync-pinned (the documented swap cadence), so the
        numbers that can MOVE are encode/update cost and the draw counts —
@@ -2636,7 +2628,6 @@ typedef struct AppState {
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
     sol_bool    ghost;          /* 'X': debug no-clip — building wants to pass through walls */
-    sol_bool    x_was_down;
     /* room graph (P3 item 7) */
     sol_u32     current_room;   /* containing room's anchor handle; 0 = outside (derived per frame) */
     float       ambient_scale;  /* eased toward the room's ambient (sealed = dim) */
@@ -2644,7 +2635,6 @@ typedef struct AppState {
     Font       *ui_font;        /* DejaVu Sans, SDF atlas; NULL if load failed */
     Font       *mono_font;      /* DejaVu Sans Mono — code + aligned readouts */
     int         text_inspect;   /* 'T' cycles: 0 off, 1 atlas, 2 type specimen */
-    sol_bool    t_was_down;
     /* mouse-look / cursor state (item 3c/3d) */
     double      mouse_last_x, mouse_last_y;
     int         mouse_skip;        /* swallow N frames of delta after a cursor-mode change */
@@ -2730,9 +2720,6 @@ typedef struct AppState {
     sol_bool    h_was_down;        /* edge-detect mint-island (H) */
     sol_bool    o_was_down;        /* edge-detect mint-lantern (O, P4 item 5) */
     sol_bool    q_was_down;        /* edge-detect mint-pond (Q, P7 item 8) */
-    /* the floor-plan overlay (P6 item 3): J toggles; the island underfoot
-       is the plot, so every island shows its destined church */
-    sol_bool    j_was_down;
     sol_bool    u_was_down;        /* edge-detect mint-church (U, P6 item 9) */
     sol_bool    z_was_down;        /* edge-detect mint-abbey (Z, P6 item 10) */
     sol_bool    plan_on;
@@ -5726,15 +5713,109 @@ static void cmd_toggle_bloom(AppState *st) {
     printf("bloom %s\n", st->bloom_on ? "on" : "off");
 }
 
+/* F toggles walk/fly in first person (precondition: not in orbit) */
+static sol_bool can_toggle_fly(AppState *st) {
+    return st->camera.mode != CAMERA_ORBIT;
+}
+static void cmd_toggle_fly(AppState *st) {
+    st->camera.mode = (st->camera.mode == CAMERA_WALK) ? CAMERA_FLY : CAMERA_WALK;
+}
+
+/* X toggles ghost — debug no-clip (P4 item 1; fly collides by decision,
+   so building and inspection need an explicit way through walls) */
+static void cmd_toggle_ghost(AppState *st) {
+    st->ghost = !st->ghost;
+    printf("ghost %s\n", st->ghost ? "ON — collision off"
+                                   : "off — the world pushes back");
+}
+
+/* M toggles the shadow-map inspector (item 9b) */
+static void cmd_toggle_shadowmap(AppState *st) {
+    st->show_shadow_map = !st->show_shadow_map;
+}
+
+/* ` (backtick) flips day <-> night: swaps the sky/IBL + the sun (P8 item 9) */
+static void cmd_toggle_daynight(AppState *st) {
+    st->night = !st->night;
+    apply_time_of_day(st);
+}
+
+/* 9 cycles the color grade preset (P9 item 1): neutral(off) -> warm -> cool -> dramatic */
+static void cmd_cycle_grade(AppState *st) {
+    st->grade_mode = (st->grade_mode + 1) % GRADE_PRESET_COUNT;
+    printf("grade: %s\n", GRADE_PRESET_NAMES[st->grade_mode]);
+}
+
+/* I toggles the skybox source: env cubemap vs irradiance map (B2) */
+static sol_bool can_toggle_irradiance(AppState *st) {
+    return st->irradiance_cubemap.id != 0;
+}
+static void cmd_toggle_irradiance(AppState *st) {
+    st->show_irradiance = !st->show_irradiance;
+}
+
+/* P cycles the prefilter inspector: off -> roughness 0 -> .. -> 1 -> off (C1) */
+static sol_bool can_cycle_prefilter(AppState *st) {
+    return st->prefilter_cubemap.id != 0;
+}
+static void cmd_cycle_prefilter(AppState *st) {
+    if (!st->show_prefilter) { st->show_prefilter = SOL_TRUE; st->prefilter_mip = 0; }
+    else {
+        st->prefilter_mip++;
+        if (st->prefilter_mip >= PREFILTER_MIPS) st->show_prefilter = SOL_FALSE;
+    }
+}
+
+/* T cycles the text inspectors (P3 item 3): off -> SDF atlas -> specimen */
+static sol_bool can_cycle_textinspect(AppState *st) {
+    return st->ui_font != NULL;
+}
+static void cmd_cycle_textinspect(AppState *st) {
+    st->text_inspect = (st->text_inspect + 1) % 3;
+}
+
+/* J toggles the floor-plan overlay (drops the overlay mesh when it goes off) */
+static void cmd_toggle_floorplan(AppState *st) {
+    st->plan_on = !st->plan_on;
+    if (!st->plan_on) plan_overlay_drop(st);
+}
+
+/* R reconciles every mirror to its disk (item 6c): new files tray up unplaced,
+   vanished files tombstone, returned files resurrect. Changes are real -> saved. */
+static void cmd_rescan_mirrors(AppState *st) {
+    int total = rescan_mirrors(st);
+    if (total > 0) scene_save(&st->scene, "scene.stml");
+    printf("rescan: %d change(s)\n", total);
+}
+
+/* L reverts to the palace on disk mid-session (the manual "reload my save" key) */
+static void cmd_reload_scene(AppState *st) {
+    if (load_palace(st))
+        printf("reloaded scene.stml: %u objects\n", (unsigned)st->scene.count);
+    else
+        fprintf(stderr, "scene.stml did not load — keeping the live scene\n");
+}
+
 static Command g_commands[] = {
-    { "Toggle bloom", "K", GLFW_KEY_K, cmd_toggle_bloom, NULL, SOL_FALSE }
+    { "Toggle bloom",                "K", GLFW_KEY_K, cmd_toggle_bloom,      NULL,                  SOL_FALSE },
+    { "Toggle walk/fly",             "F", GLFW_KEY_F, cmd_toggle_fly,        can_toggle_fly,        SOL_FALSE },
+    { "Toggle ghost (no-clip)",      "X", GLFW_KEY_X, cmd_toggle_ghost,      NULL,                  SOL_FALSE },
+    { "Toggle shadow-map inspector", "M", GLFW_KEY_M, cmd_toggle_shadowmap,  NULL,                  SOL_FALSE },
+    { "Toggle day/night",            "`", GLFW_KEY_GRAVE_ACCENT, cmd_toggle_daynight, NULL,         SOL_FALSE },
+    { "Cycle color grade",           "9", GLFW_KEY_9, cmd_cycle_grade,       NULL,                  SOL_FALSE },
+    { "Toggle irradiance view",      "I", GLFW_KEY_I, cmd_toggle_irradiance, can_toggle_irradiance, SOL_FALSE },
+    { "Cycle prefilter inspector",   "P", GLFW_KEY_P, cmd_cycle_prefilter,   can_cycle_prefilter,   SOL_FALSE },
+    { "Cycle text inspector",        "T", GLFW_KEY_T, cmd_cycle_textinspect, can_cycle_textinspect, SOL_FALSE },
+    { "Toggle floor-plan overlay",   "J", GLFW_KEY_J, cmd_toggle_floorplan,  NULL,                  SOL_FALSE },
+    { "Rescan mirrors",              "R", GLFW_KEY_R, cmd_rescan_mirrors,    NULL,                  SOL_FALSE },
+    { "Reload scene",                "L", GLFW_KEY_L, cmd_reload_scene,      NULL,                  SOL_FALSE }
 };
 
 #define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
 
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool f_now, tab_now, m_now, i_now, p_now, l_now, x_now, dragging, fp;
+    sol_bool tab_now, dragging, fp;
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
@@ -6041,86 +6122,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 cmd->run(st);
             cmd->was_down = now;
         }
-    }
-
-    /* F toggles walk/fly in first person (edge) */
-    f_now = glfwGetKey(w, GLFW_KEY_F) == GLFW_PRESS;
-    if (f_now && !st->f_was_down && st->camera.mode != CAMERA_ORBIT)
-        st->camera.mode = (st->camera.mode == CAMERA_WALK) ? CAMERA_FLY : CAMERA_WALK;
-    st->f_was_down = f_now;
-
-    /* X toggles ghost — debug no-clip (P4 item 1; fly collides by decision,
-       so building and inspection need an explicit way through walls) */
-    x_now = glfwGetKey(w, GLFW_KEY_X) == GLFW_PRESS;
-    if (x_now && !st->x_was_down) {
-        st->ghost = !st->ghost;
-        printf("ghost %s\n", st->ghost ? "ON — collision off"
-                                       : "off — the world pushes back");
-    }
-    st->x_was_down = x_now;
-
-    /* M toggles the shadow-map inspector (item 9b, edge) */
-    m_now = glfwGetKey(w, GLFW_KEY_M) == GLFW_PRESS;
-    if (m_now && !st->m_was_down)
-        st->show_shadow_map = !st->show_shadow_map;
-    st->m_was_down = m_now;
-
-    /* ` (backtick) flips day <-> night: swaps the sky/IBL + the sun (P8 item 9) */
-    {
-        sol_bool bt_now = glfwGetKey(w, GLFW_KEY_GRAVE_ACCENT) == GLFW_PRESS;
-        if (bt_now && !st->bt_was_down) {
-            st->night = !st->night;
-            apply_time_of_day(st);
-        }
-        st->bt_was_down = bt_now;
-    }
-
-    /* 9 cycles the color grade preset (P9 item 1): neutral(off) -> warm -> cool -> dramatic */
-    {
-        sol_bool g9_now = glfwGetKey(w, GLFW_KEY_9) == GLFW_PRESS;
-        if (g9_now && !st->grade_was_down) {
-            st->grade_mode = (st->grade_mode + 1) % GRADE_PRESET_COUNT;
-            printf("grade: %s\n", GRADE_PRESET_NAMES[st->grade_mode]);
-        }
-        st->grade_was_down = g9_now;
-    }
-
-    /* I toggles the skybox source: env cubemap vs irradiance map (B2, edge) */
-    i_now = glfwGetKey(w, GLFW_KEY_I) == GLFW_PRESS;
-    if (i_now && !st->i_was_down && st->irradiance_cubemap.id)
-        st->show_irradiance = !st->show_irradiance;
-    st->i_was_down = i_now;
-
-    /* P cycles the prefilter inspector: off -> roughness 0 -> .. -> 1 -> off (C1) */
-    p_now = glfwGetKey(w, GLFW_KEY_P) == GLFW_PRESS;
-    if (p_now && !st->p_was_down && st->prefilter_cubemap.id) {
-        if (!st->show_prefilter) { st->show_prefilter = SOL_TRUE; st->prefilter_mip = 0; }
-        else {
-            st->prefilter_mip++;
-            if (st->prefilter_mip >= PREFILTER_MIPS) st->show_prefilter = SOL_FALSE;
-        }
-    }
-    st->p_was_down = p_now;
-
-    /* T cycles the text inspectors (P3 item 3): off -> SDF atlas -> specimen */
-    {
-        sol_bool t_now = glfwGetKey(w, GLFW_KEY_T) == GLFW_PRESS;
-        if (t_now && !st->t_was_down && st->ui_font)
-            st->text_inspect = (st->text_inspect + 1) % 3;
-        st->t_was_down = t_now;
-    }
-
-    /* R reconciles every mirror to its disk (item 6c, edge): new files tray
-       up unplaced, vanished files tombstone (your notes survive), returned
-       files resurrect in place. Membership changes are real -> saved. */
-    {
-        sol_bool r_now = glfwGetKey(w, GLFW_KEY_R) == GLFW_PRESS;
-        if (r_now && !st->r_was_down) {
-            int total = rescan_mirrors(st);
-            if (total > 0) scene_save(&st->scene, "scene.stml");
-            printf("rescan: %d change(s)\n", total);
-        }
-        st->r_was_down = r_now;
     }
 
     /* G gathers the selected FILE/FOLDER card into the first workspace as an
@@ -6464,18 +6465,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                    (int)p[4], pos.y > 0.05f ? " (floating)" : "");
         }
         st->h_was_down = h_now;
-    }
-
-    /* J toggles the FLOOR-PLAN OVERLAY (P6 item 3): every island shows
-       its destined church — params straight from the terrain ref, so the
-       drawing is as permanent as the hills it sits on */
-    {
-        sol_bool j_now = glfwGetKey(w, GLFW_KEY_J) == GLFW_PRESS;
-        if (j_now && !st->j_was_down) {
-            st->plan_on = !st->plan_on;
-            if (!st->plan_on) plan_overlay_drop(st);
-        }
-        st->j_was_down = j_now;
     }
 
     /* U mints THE CHURCH on the island underfoot (P6 item 9): the
@@ -7244,19 +7233,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }
         st->bs_was_down = bs_now;
     }
-
-    /* L reverts to the palace on disk mid-session (since 6e the startup
-       loads it automatically; L remains the manual "reload my save" key).
-       Since P4 item 4 the swap is leak-free: registry meshes release,
-       uniquely-owned ones die — press L all day, the counts hold still. */
-    l_now = glfwGetKey(w, GLFW_KEY_L) == GLFW_PRESS;
-    if (l_now && !st->l_was_down) {
-        if (load_palace(st))
-            printf("reloaded scene.stml: %u objects\n", (unsigned)st->scene.count);
-        else
-            fprintf(stderr, "scene.stml did not load — keeping the live scene\n");
-    }
-    st->l_was_down = l_now;
 
     /* exposure scrub: '[' down, ']' up (held; dt-scaled). The readout lives
        in the debug panel now (3c) — the window-title hack is retired. */
@@ -8437,7 +8413,6 @@ static int init_scene(AppState *state) {
        with a slight downward tilt (2.5 was above the 2.2 doorway lintels) */
     camera_init(&state->camera, vec3_make(0.0f, CAMERA_EYE_HEIGHT, 5.0f),
                 sol_radians(-90.0f), sol_radians(-10.0f));
-    state->f_was_down = SOL_FALSE;
     state->exposure   = 1.0f;
     state->ambient_scale = 1.0f;   /* zero-init would fade up from black */
 
