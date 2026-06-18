@@ -3998,6 +3998,12 @@ static sol_bool object_is_arrow(Scene *s, sol_u32 h) {
                ? SOL_TRUE : SOL_FALSE;
 }
 
+static sol_bool object_is_walkway(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    return (o && o->mesh_ref && strcmp(o->mesh_ref, "walkway") == 0)
+               ? SOL_TRUE : SOL_FALSE;
+}
+
 /* Param t (along a segment leaving a rect's CENTER) where it crosses the
    rect boundary — the 2D slab test, nearer axis wins. Used to clip the
    shaft to the cards' rectangles so the head lands on an edge. */
@@ -4056,6 +4062,76 @@ static void arrows_rebuild(AppState *st) {
         mb_init(&mb);
         make_arrow(&mb, ax + dx * t0, ay + dy * t0,
                         ax + dx * t1, ay + dy * t1, ARROW_INK_W);
+        if (mb.index_count > 0) o->mesh = mesh_from_builder(&mb);
+        mb_free(&mb);
+    }
+}
+
+/* a room's half-extent (max of its shell's w/d, halved) — for edge points */
+static float room_half_extent(Scene *s, sol_u32 anchor) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        if (o->parent == anchor && o->mesh_ref &&
+            strcmp(o->mesh_ref, "room") == 0) {
+            float w = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "w");
+            float d = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "d");
+            return (w > d ? w : d) * 0.5f;
+        }
+    }
+    return 4.0f;   /* fallback */
+}
+
+/* Derive each walkway's transform + params from the two rooms it connects
+   (models arrows_rebuild). Anchored at the LOWER room's edge, climbing dy to
+   the higher; rebuilt geometry so render + collision (via params) agree. */
+static void walkways_rebuild(AppState *st) {
+    Scene  *s = &st->scene;
+    sol_u32 i, j;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        sol_u32      ha = 0, hb = 0, lo, hi;
+        vec3         pa, pb, plo, phi, dir, mid;
+        float        ea, eb, dx, dz, lenxz, dy, yaw, wp[4];
+        MeshBuilder  mb;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
+        for (j = 0; j < o->rel_count; j++) {
+            if (strcmp(o->relations[j].type, "connects") != 0) continue;
+            if (ha == 0)      ha = o->relations[j].target;
+            else if (hb == 0) hb = o->relations[j].target;
+        }
+        if (ha == 0 || hb == 0 || !scene_get(s, ha) || !scene_get(s, hb)) {
+            mesh_destroy(&o->mesh);
+            continue;
+        }
+        pa = object_world_pos(s, ha);
+        pb = object_world_pos(s, hb);
+        lo = (pa.y <= pb.y) ? ha : hb;
+        hi = (lo == ha) ? hb : ha;
+        plo = object_world_pos(s, lo);
+        phi = object_world_pos(s, hi);
+        ea = room_half_extent(s, lo);
+        eb = room_half_extent(s, hi);
+        dx = phi.x - plo.x; dz = phi.z - plo.z;
+        lenxz = (float)sqrt((double)(dx * dx + dz * dz));
+        if (lenxz < 0.001f) { mesh_destroy(&o->mesh); continue; }
+        dir = vec3_make(dx / lenxz, 0.0f, dz / lenxz);
+        plo = vec3_add(plo, vec3_scale(dir, ea));
+        phi = vec3_sub(phi, vec3_scale(dir, eb));
+        dx = phi.x - plo.x; dz = phi.z - plo.z;
+        lenxz = (float)sqrt((double)(dx * dx + dz * dz));
+        dy = phi.y - plo.y;
+        if (lenxz < 0.05f) { mesh_destroy(&o->mesh); continue; }
+        yaw = (float)atan2((double)(-dz), (double)dx);
+        mid = vec3_make((plo.x + phi.x) * 0.5f, plo.y, (plo.z + phi.z) * 0.5f);
+        /* origin at the LOWER edge (mid.y = plo.y); dy in params carries the rise */
+        o->pos = mid;
+        o->rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw);
+        wp[0] = lenxz; wp[1] = 1.6f; wp[2] = 0.15f; wp[3] = dy;
+        scene_mesh_params_set(s, o->handle, wp, 4);
+        mesh_destroy(&o->mesh);
+        mb_init(&mb);
+        make_walkway(&mb, wp[0], wp[1], wp[2], wp[3]);
         if (mb.index_count > 0) o->mesh = mesh_from_builder(&mb);
         mb_free(&mb);
     }
@@ -4136,6 +4212,7 @@ static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
         if (object_is_arrow(&st->scene, hit)) return;   /* derived geometry: an
                                                            arrow follows its cards,
                                                            it is never dragged */
+        if (object_is_walkway(&st->scene, hit)) return;   /* derived geometry */
         target = group_root(&st->scene, hit);    /* props move as their group */
         if (target == st->floor_handle) return;  /* the floor is the room, not a card */
         if (scene_meta_get(&st->scene, target, "room_type")) return;   /* architecture */
@@ -6341,6 +6418,7 @@ static sol_u32 carry_target(AppState *st, sol_u32 hit) {
     if (!ho) return 0;
     if (ho->kind != KIND_PLAIN) return hit;   /* cards carry individually, even if parented (matches drag_begin) */
     if (object_is_arrow(&st->scene, hit)) return 0;
+    if (object_is_walkway(&st->scene, hit)) return 0;
     {
         sol_u32      target = group_root(&st->scene, hit);
         SceneObject *o;
@@ -6466,10 +6544,17 @@ static void create_root_from_path(AppState *st, const char *path) {
 
     changed = room_mirror_scan(&st->scene, root, path);   /* files -> cards */
 
-    if (home != 0) scene_rel_add(&st->scene, home, "connects", root); /* Phase 3 reads this */
+    if (home != 0) {
+        sol_u32 wk = scene_add(&st->scene, 0, empty, vec3_make(0.0f, 0.0f, 0.0f),
+                               quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_mesh_ref_set(&st->scene, wk, "walkway");
+        scene_rel_add(&st->scene, wk, "connects", home);
+        scene_rel_add(&st->scene, wk, "connects", root);
+    }
 
     scene_resolve_meshes(&st->scene);
     apply_kind_materials(&st->scene);
+    walkways_rebuild(st);
     collide_rebuild(&st->colliders, &st->scene);
     scene_save(&st->scene, "scene.stml");
 
@@ -7803,6 +7888,7 @@ static sol_bool load_palace(AppState *st) {
     scene_release_meshes(&old);                   /* RELEASE (the old) */
     scene_free(&old);
     arrows_rebuild(st);              /* edges re-derive from the loaded cards */
+    walkways_rebuild(st);            /* and the room-to-room connectors */
     collide_rebuild(&st->colliders, &st->scene);  /* and so do the walls */
     meadow_rebuild(st);                           /* and the grass */
     forest_rebuild(st);                           /* and the woods */
