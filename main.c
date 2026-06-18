@@ -6414,6 +6414,76 @@ static void carry_update(AppState *st) {
     o->pos  = scene_world_to_local(&st->scene, o->parent, hold);
 }
 
+#define HOME_FLOOR_Y 12.0f   /* the home room floats this high in the sky */
+
+/* The palette-prompt callback for "New root...": build a floating mirror room
+   for `path`, east of home, and fill it with that directory's file/folder cards.
+   Reaching it is by fly (F) for now; Phase 3 generates the walkway. */
+static void create_root_from_path(AppState *st, const char *path) {
+    Mesh       empty = {0};
+    sol_u32    home = 0, root, shell, i;
+    int        mirror_count = 0, changed;
+    float      room_p[8];
+    vec3       home_pos, pos;
+    Material   stone = material_default();
+    const char *slash, *name;
+
+    if (path == NULL || path[0] == '\0') return;
+
+    /* find the home room + count existing mirror rooms (placement spreads east) */
+    for (i = 0; i < st->scene.count; i++) {
+        sol_u32     h  = st->scene.objects[i].handle;
+        const char *rt = scene_meta_get(&st->scene, h, "room_type");
+        if (!rt) continue;
+        if      (strcmp(rt, "home")   == 0) home = h;
+        else if (strcmp(rt, "mirror") == 0) mirror_count++;
+    }
+    home_pos = (home != 0) ? object_world_pos(&st->scene, home)
+                           : vec3_make(0.0f, HOME_FLOOR_Y, 0.0f);
+    pos = vec3_add(home_pos,
+                   vec3_make(14.0f + 14.0f * (float)mirror_count, 0.0f, 0.0f));
+
+    slash = strrchr(path, '/');
+    name  = (slash && slash[1]) ? slash + 1 : path;
+
+    /* the root: a floating mirror room (open-topped 10x10) */
+    root = scene_add(&st->scene, 0, empty, pos, quat_identity(),
+                     vec3_make(1.0f, 1.0f, 1.0f));
+    scene_meta_set(&st->scene, root, "room_type",   "mirror");
+    scene_meta_set(&st->scene, root, "source_path", path);
+    scene_meta_set(&st->scene, root, "name",        name);
+
+    shell = scene_add(&st->scene, root, empty, vec3_make(0.0f, 0.0f, 0.0f),
+                      quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+    scene_mesh_ref_set(&st->scene, shell, "room");
+    room_p[0] = 10.0f; room_p[1] = 10.0f; room_p[2] = 3.0f;
+    room_p[3] = 1.0f;  room_p[4] = 1.0f;  room_p[5] = 1.0f;  room_p[6] = 1.0f;
+    room_p[7] = 0.0f;
+    scene_mesh_params_set(&st->scene, shell, room_p, 8);
+    stone.base_color = vec3_make(0.55f, 0.53f, 0.50f);
+    stone.roughness  = 0.92f;
+    scene_material_set(&st->scene, shell, stone);
+
+    changed = room_mirror_scan(&st->scene, root, path);   /* files -> cards */
+
+    if (home != 0) scene_rel_add(&st->scene, home, "connects", root); /* Phase 3 reads this */
+
+    scene_resolve_meshes(&st->scene);
+    apply_kind_materials(&st->scene);
+    collide_rebuild(&st->colliders, &st->scene);
+    scene_save(&st->scene, "scene.stml");
+
+    if (changed < 0)
+        printf("new root: couldn't open '%s' (empty room created)\n", path);
+    else
+        printf("new root '%s': %d item(s)\n", name, changed);
+}
+
+/* Palette command: prompt for a directory path, then build a root room for it. */
+static void cmd_new_root(AppState *st) {
+    palette_prompt(&st->palette, "root path", create_root_from_path);
+}
+
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
@@ -6438,7 +6508,8 @@ static Command g_commands[] = {
     { "Mint pond",                   "Q", GLFW_KEY_Q, cmd_mint_pond,         NULL,                  SOL_FALSE },
     { "Mint dust emitter",           NULL, 0,          cmd_mint_dust,         NULL,                  SOL_FALSE },
     { "Carry / place selected",      "E", GLFW_KEY_E, cmd_carry_toggle,      can_carry_toggle,      SOL_FALSE },
-    { "Mint fox",                    "Y", GLFW_KEY_Y, cmd_mint_fox,          NULL,                  SOL_FALSE }
+    { "Mint fox",                    "Y", GLFW_KEY_Y, cmd_mint_fox,          NULL,                  SOL_FALSE },
+    { "New root...",                 NULL, 0,          cmd_new_root,          NULL,                  SOL_FALSE }
 };
 
 #define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
@@ -7749,8 +7820,6 @@ static sol_bool load_palace(AppState *st) {
     }
     return SOL_TRUE;
 }
-
-#define HOME_FLOOR_Y 12.0f   /* the home room floats this high in the sky */
 
 /* Build a FRESH scene: one floating "home" room you spawn into — the hub the
    filesystem-tree roots will hang off (later phases). Replaces the old P3 demo
