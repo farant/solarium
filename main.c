@@ -19,6 +19,7 @@
 #include "image.h"
 #include "glb.h"
 #include "command.h"             /* the shared command registry (palette) */
+#include "palette.h"             /* the command palette overlay (Task 3) */
 #include "ui.h"                  /* the 2D overlay (P3 item 2) */
 #include "mirror.h"              /* mirror rooms reflect real folders (P3 item 6) */
 #include "font.h"                /* the SDF glyph atlas (P3 item 3) */
@@ -2684,6 +2685,7 @@ typedef struct AppState {
     sol_u32     edit_handle;       /* note being edited; 0 = none */
     char        edit_buf[EDIT_BUF_CAP];
     int         edit_len;
+    Palette     palette;           /* command palette state (palette.h) */
     sol_bool    v_was_down;        /* edge-detect mint-codex (V, item 9) */
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
@@ -5742,7 +5744,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        below goes quiet, so 'w' writes a letter instead of walking. A click
        blurs (saving) without also picking — the standard text-field deal:
        the first click leaves the field, the next one acts. */
-    if (st->edit_handle != 0) {
+    if (st->edit_handle != 0 || st->palette.open) {
         in->forward = in->back = in->left = in->right = SOL_FALSE;
         in->up = in->down = SOL_FALSE;
         in->look_dx = 0.0f;
@@ -5750,7 +5752,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         in->zoom    = 0.0f;
         st->scroll_accum = 0.0;
         glfwGetCursorPos(w, &mx, &my);
-        {
+        if (st->edit_handle != 0) {     /* note blur is edit-only */
             sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
             if (lmb && !st->lmb_was_down) note_edit_end(st);
             st->lmb_was_down = lmb;
@@ -10155,6 +10157,8 @@ static void render(AppState *state) {
                         ty + 14.5f * us, ts2, 1.0f, 1.0f, 1.0f, 0.95f);
         }
     }
+    palette_draw(&state->palette, state, state->mono_font,
+                 g_commands, G_COMMAND_COUNT, state->fb_width, state->fb_height);
     ui_end();
     yardstick_ms(&state->t_post, glfwGetTime() - rt2);
 }
@@ -10219,7 +10223,9 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     AppState *st = (AppState *)glfwGetWindowUserPointer(w);
     char      enc[4];
     int       n;
-    if (!st || st->edit_handle == 0) return;
+    if (!st) return;
+    if (st->palette.open) { palette_input_char(&st->palette, cp); return; }
+    if (st->edit_handle == 0) return;
     n = utf8_encode(cp, enc);
     if (n <= 0 || st->edit_len + n >= EDIT_BUF_CAP) return;
     memcpy(st->edit_buf + st->edit_len, enc, (size_t)n);
@@ -10234,7 +10240,31 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
 static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods) {
     AppState *st = (AppState *)glfwGetWindowUserPointer(window);
     (void)scancode;
-    (void)mods;
+
+    if (!st) return;
+
+    /* Command palette owns the keyboard while open. */
+    if (st->palette.open) {
+        if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+            PaletteKey pk = PALETTE_KEY_NONE;
+            if      (key == GLFW_KEY_ESCAPE)    pk = PALETTE_KEY_CANCEL;
+            else if (key == GLFW_KEY_UP)        pk = PALETTE_KEY_UP;
+            else if (key == GLFW_KEY_DOWN)      pk = PALETTE_KEY_DOWN;
+            else if (key == GLFW_KEY_ENTER ||
+                     key == GLFW_KEY_KP_ENTER)  pk = PALETTE_KEY_ENTER;
+            else if (key == GLFW_KEY_BACKSPACE) pk = PALETTE_KEY_BACKSPACE;
+            if (pk != PALETTE_KEY_NONE)
+                palette_input_key(&st->palette, pk, st, g_commands, G_COMMAND_COUNT);
+        }
+        return;
+    }
+
+    /* ':' (Shift+;) opens the palette when nothing else owns the keyboard. */
+    if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && (mods & GLFW_MOD_SHIFT)
+        && st->edit_handle == 0 && st->reader_state == READER_IDLE) {
+        palette_open_now(&st->palette);
+        return;
+    }
 
     if (st && st->edit_handle != 0) {
         if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
