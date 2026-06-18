@@ -29,7 +29,6 @@ typedef enum {
 } PaletteKey;
 
 void     palette_open_now(Palette *p);
-sol_bool palette_is_open(const Palette *p);
 void     palette_input_char(Palette *p, unsigned int cp);
 /* Returns SOL_TRUE if the palette consumed the key (always true while open). */
 sol_bool palette_input_key(Palette *p, PaletteKey k, struct AppState *st,

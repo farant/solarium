@@ -19,10 +19,6 @@ void palette_open_now(Palette *p) {
     p->eat_char = SOL_TRUE;   /* the ':' that opened us arrives next as a char */
 }
 
-sol_bool palette_is_open(const Palette *p) {
-    return p->open;
-}
-
 void palette_input_char(Palette *p, unsigned int cp) {
     if (!p->open) return;
     if (p->eat_char) { p->eat_char = SOL_FALSE; return; }
@@ -42,6 +38,8 @@ static int palette_rank(const Palette *p, const Command *cmds, int ncmds,
     int score[PALETTE_MAX_COMMANDS];
     int n = 0, i, j;
 
+    /* Registry must stay <= PALETTE_MAX_COMMANDS; commands beyond it are
+       silently dropped from the palette. Bump the cap if g_commands grows. */
     if (ncmds > PALETTE_MAX_COMMANDS) ncmds = PALETTE_MAX_COMMANDS;
     for (i = 0; i < ncmds; i++) {
         int sc;

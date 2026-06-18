@@ -6361,6 +6361,9 @@ static void cmd_mint_fox(AppState *st) {
     printf("a fox arrives — it has somewhere to be\n");
 }
 
+/* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
+   N's body needs the GLFW window (pick_ray for cursor placement); Z is a
+   fixed-parameter scene compositor, not a generic mint. */
 static Command g_commands[] = {
     { "Toggle bloom",                "K", GLFW_KEY_K, cmd_toggle_bloom,      NULL,                  SOL_FALSE },
     { "Toggle walk/fly",             "F", GLFW_KEY_F, cmd_toggle_fly,        can_toggle_fly,        SOL_FALSE },
@@ -10212,7 +10215,7 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         return;
     }
 
-    if (st && st->edit_handle != 0) {
+    if (st->edit_handle != 0) {
         if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             note_edit_end(st);
