@@ -6494,6 +6494,30 @@ static void carry_update(AppState *st) {
 
 #define HOME_FLOOR_Y 12.0f   /* the home room floats this high in the sky */
 
+#define ROOT_RING_SLOTS 8    /* evenly-spaced placement slots per ring around home */
+
+/* Does a 2*half x 2*half footprint centered at `c` overlap an existing room
+   that is close in Y? (XZ AABB overlap AND within one room-height in Y is a
+   real collision; far apart in Y is fine — the walkway just becomes stairs.) */
+static sol_bool root_spot_occupied(AppState *st, vec3 c, float half) {
+    sol_u32 i;
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o  = &st->scene.objects[i];
+        const char  *rt = scene_meta_get(&st->scene, o->handle, "room_type");
+        float        e;
+        vec3         p;
+        if (!rt) continue;
+        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        e = room_half_extent(&st->scene, o->handle);
+        p = object_world_pos(&st->scene, o->handle);
+        if ((c.y > p.y ? c.y - p.y : p.y - c.y) >= 3.5f) continue;   /* clear in Y (room height 3.0 + 0.5 gap) */
+        if (c.x + half < p.x - e || c.x - half > p.x + e) continue;  /* clear in X */
+        if (c.z + half < p.z - e || c.z - half > p.z + e) continue;  /* clear in Z */
+        return SOL_TRUE;                                             /* overlaps */
+    }
+    return SOL_FALSE;
+}
+
 /* The palette-prompt callback for "New root...": build a floating mirror room
    for `path`, east of home, and fill it with that directory's file/folder cards.
    Reaching it is by fly (F) for now; Phase 3 generates the walkway. */
@@ -6518,8 +6542,20 @@ static void create_root_from_path(AppState *st, const char *path) {
     }
     home_pos = (home != 0) ? object_world_pos(&st->scene, home)
                            : vec3_make(0.0f, HOME_FLOOR_Y, 0.0f);
-    pos = vec3_add(home_pos,
-                   vec3_make(14.0f + 14.0f * (float)mirror_count, 0.0f, 0.0f));
+    {
+        int   slot  = mirror_count % ROOT_RING_SLOTS;   /* slot within the ring */
+        int   turn  = mirror_count / ROOT_RING_SLOTS;   /* outer rings as it fills */
+        float ang   = (float)slot * (6.2831853f / (float)ROOT_RING_SLOTS);
+        float r     = 16.0f + (float)turn * 12.0f;
+        int   guard = 0;
+        pos = vec3_make(home_pos.x + r * (float)cos((double)ang),
+                        home_pos.y,
+                        home_pos.z + r * (float)sin((double)ang));
+        while (root_spot_occupied(st, pos, 5.0f) && guard < 20) {
+            pos.y += 5.0f;                          /* go vertical to clear */
+            guard++;
+        }
+    }
 
     slash = strrchr(path, '/');
     name  = (slash && slash[1]) ? slash + 1 : path;
