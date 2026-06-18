@@ -18,6 +18,7 @@
 #include "camera.h"
 #include "image.h"
 #include "glb.h"
+#include "command.h"             /* the shared command registry (palette) */
 #include "ui.h"                  /* the 2D overlay (P3 item 2) */
 #include "mirror.h"              /* mirror rooms reflect real folders (P3 item 6) */
 #include "font.h"                /* the SDF glyph atlas (P3 item 3) */
@@ -2476,7 +2477,7 @@ static RhiTexture build_decal_atlas(void) {
     return rhi_create_texture(px, DECAL_ATLAS_W, DECAL_ATLAS_H, RHI_TEX_RGBA8);
 }
 
-typedef struct {
+typedef struct AppState {
     int         fb_width, fb_height;
     RhiPipeline pipeline;
     RhiPipeline post_pipeline;  /* fullscreen tonemap/encode pass (item 7b) */
@@ -2572,7 +2573,6 @@ typedef struct {
     int             bloom_w[BLOOM_LEVELS], bloom_h[BLOOM_LEVELS];
     RhiPipeline     bloom_extract_pipeline, bloom_down_pipeline, bloom_up_pipeline;
     sol_bool        bloom_on;      /* 'K' toggles, for honest A/B */
-    sol_bool        k_was_down;
     /* god-rays (P8 item 3): a half-res raymarch of the spot-light shadow
        volume, composited additively in post like a bloom level */
     RhiRenderTarget godray_rt;
@@ -5715,6 +5715,21 @@ static void reader_draw_page_bent(AppState *st, mat4 vp, mat4 hinge_m,
     st->reader_text[b2] = saved;
 }
 
+/* ---- Command registry (palette spec) ----------------------------------------
+   One row per discrete, edge-triggered command. read_input() polls each row's
+   key and the palette dispatches the same run() — one author, two consumers. */
+
+static void cmd_toggle_bloom(AppState *st) {
+    st->bloom_on = !st->bloom_on;
+    printf("bloom %s\n", st->bloom_on ? "on" : "off");
+}
+
+static Command g_commands[] = {
+    { "Toggle bloom", "K", GLFW_KEY_K, cmd_toggle_bloom, NULL, SOL_FALSE }
+};
+
+#define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
+
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
     sol_bool f_now, tab_now, m_now, i_now, p_now, l_now, x_now, dragging, fp;
@@ -6011,6 +6026,21 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->lmb_was_down = lmb;
     }
 
+    /* Registered discrete commands: poll each hotkey, edge-trigger, honour the
+       precondition. The palette dispatches these same run()s. */
+    {
+        int ci;
+        for (ci = 0; ci < G_COMMAND_COUNT; ci++) {
+            Command *cmd = &g_commands[ci];
+            sol_bool now;
+            if (cmd->key == 0) continue;
+            now = glfwGetKey(w, cmd->key) == GLFW_PRESS;
+            if (now && !cmd->was_down && (cmd->can_run == NULL || cmd->can_run(st)))
+                cmd->run(st);
+            cmd->was_down = now;
+        }
+    }
+
     /* F toggles walk/fly in first person (edge) */
     f_now = glfwGetKey(w, GLFW_KEY_F) == GLFW_PRESS;
     if (f_now && !st->f_was_down && st->camera.mode != CAMERA_ORBIT)
@@ -6026,16 +6056,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                        : "off — the world pushes back");
     }
     st->x_was_down = x_now;
-
-    /* K toggles bloom (P4 item 5) — the honest A/B for the glow */
-    {
-        sol_bool k_now = glfwGetKey(w, GLFW_KEY_K) == GLFW_PRESS;
-        if (k_now && !st->k_was_down) {
-            st->bloom_on = !st->bloom_on;
-            printf("bloom %s\n", st->bloom_on ? "on" : "off");
-        }
-        st->k_was_down = k_now;
-    }
 
     /* M toggles the shadow-map inspector (item 9b, edge) */
     m_now = glfwGetKey(w, GLFW_KEY_M) == GLFW_PRESS;
