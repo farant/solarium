@@ -17,6 +17,19 @@ void palette_open_now(Palette *p) {
     p->len      = 0;
     p->sel      = 0;
     p->eat_char = SOL_TRUE;   /* the ':' that opened us arrives next as a char */
+    p->prompt   = SOL_FALSE;
+}
+
+void palette_prompt(Palette *p, const char *label,
+                    void (*cb)(struct AppState *, const char *)) {
+    p->open         = SOL_TRUE;
+    p->query[0]     = '\0';
+    p->len          = 0;
+    p->sel          = 0;
+    p->eat_char     = SOL_FALSE;   /* no ':' to swallow — a command opened us */
+    p->prompt       = SOL_TRUE;
+    p->prompt_label = label;
+    p->prompt_cb    = cb;
 }
 
 void palette_input_char(Palette *p, unsigned int cp) {
@@ -67,7 +80,23 @@ sol_bool palette_input_key(Palette *p, PaletteKey k, struct AppState *st,
 
     if (!p->open) return SOL_FALSE;
 
-    if (k == PALETTE_KEY_CANCEL) { p->open = SOL_FALSE; return SOL_TRUE; }
+    if (k == PALETTE_KEY_CANCEL) {
+        p->open = SOL_FALSE; p->prompt = SOL_FALSE;
+        p->prompt_cb = NULL; p->prompt_label = NULL;
+        return SOL_TRUE;
+    }
+
+    if (p->prompt) {                                 /* text-prompt mode */
+        if (k == PALETTE_KEY_BACKSPACE) {
+            if (p->len > 0) { p->len--; p->query[p->len] = '\0'; }
+        } else if (k == PALETTE_KEY_ENTER) {
+            void (*cb)(struct AppState *, const char *) = p->prompt_cb;
+            p->open = SOL_FALSE; p->prompt = SOL_FALSE;
+            p->prompt_cb = NULL; p->prompt_label = NULL;
+            if (cb) cb(st, p->query);
+        }
+        return SOL_TRUE;                             /* ignore UP/DOWN in a prompt */
+    }
 
     n = palette_rank(p, cmds, ncmds, order, PALETTE_MAX_COMMANDS);
 
@@ -102,8 +131,12 @@ void palette_draw(const Palette *p, struct AppState *st, Font *font,
     row_h = 26.0f * us;
     ts    = 0.45f * us;
 
-    n     = palette_rank(p, cmds, ncmds, order, PALETTE_MAX_COMMANDS);
-    shown = (n < PALETTE_MAX_ROWS) ? n : PALETTE_MAX_ROWS;
+    if (p->prompt) {
+        n = 0; shown = 0;
+    } else {
+        n     = palette_rank(p, cmds, ncmds, order, PALETTE_MAX_COMMANDS);
+        shown = (n < PALETTE_MAX_ROWS) ? n : PALETTE_MAX_ROWS;
+    }
 
     box_w = (float)fb_w * 0.55f;
     box_h = pad * 2.0f + row_h * (float)(shown + 1);
@@ -113,14 +146,22 @@ void palette_draw(const Palette *p, struct AppState *st, Font *font,
     ui_quad(box_x, box_y, box_w, box_h, 0.05f, 0.07f, 0.10f, 0.92f);
     ui_quad_outline(box_x, box_y, box_w, box_h, 1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
 
-    {   /* query row: ":<typed>_" */
-        char  line[PALETTE_QUERY_CAP + 4];
+    {   /* query row: command mode ":<typed>_", prompt mode "<label>: <typed>_" */
+        char  line[PALETTE_QUERY_CAP + 40];
         float qy = box_y + pad + font_ascent(font) * ts;
-        int   ql = p->len;
-        line[0] = ':';
-        memcpy(line + 1, p->query, (size_t)ql);
-        line[1 + ql] = '_';
-        line[2 + ql] = '\0';
+        int   ll = 0, q;
+        if (p->prompt) {
+            const char *lbl = p->prompt_label ? p->prompt_label : "input";
+            while (*lbl && ll < (int)sizeof line - 4) line[ll++] = *lbl++;
+            line[ll++] = ':';
+            line[ll++] = ' ';
+        } else {
+            line[ll++] = ':';
+        }
+        for (q = 0; q < p->len && ll < (int)sizeof line - 2; q++)
+            line[ll++] = p->query[q];
+        line[ll++] = '_';
+        line[ll]   = '\0';
         ui_text(font, line, box_x + pad, qy, ts, 0.95f, 0.92f, 0.80f, 1.0f);
     }
 

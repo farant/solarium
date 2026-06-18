@@ -17,6 +17,9 @@ typedef struct {
     int      len;
     int      sel;       /* highlighted result row */
     sol_bool eat_char;  /* swallow the leading ':' that opened the palette */
+    sol_bool prompt;    /* prompt mode: collect a typed line, fire prompt_cb on Enter */
+    const char *prompt_label;                         /* shown before the typed text */
+    void      (*prompt_cb)(struct AppState *, const char *);
 } Palette;
 
 typedef enum {
@@ -29,6 +32,12 @@ typedef enum {
 } PaletteKey;
 
 void     palette_open_now(Palette *p);
+/* Open the palette as a text PROMPT: collect one typed line shown after `label`,
+   and call cb(st, line) on Enter (Esc cancels). Reuses the palette text field.
+   The caller retains ownership of `label`: pass a string literal or a pointer that
+   outlives the prompt session (the palette stores it, it does not copy it). */
+void     palette_prompt(Palette *p, const char *label,
+                        void (*cb)(struct AppState *, const char *));
 void     palette_input_char(Palette *p, unsigned int cp);
 /* Returns SOL_TRUE if the palette consumed the key (always true while open). */
 sol_bool palette_input_key(Palette *p, PaletteKey k, struct AppState *st,
