@@ -329,6 +329,11 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
                 emit_local_box(cs, m, o->handle,  hw + ht, 0.0f, ht, hd + t, 0.0f, h);
             if (ref_p(o, "ceil") > 0.5f)
                 emit_local_box(cs, m, o->handle, 0.0f, 0.0f, hw, hd, h, h + t);
+            /* the floor: a thin slab whose TOP face is the floor plane (y=0), so
+               a room is walkable on its own floor even when it floats free with
+               no terrain beneath it (fs-tree). Harmless for grounded rooms — its
+               top coincides with the ground they already sit on. */
+            emit_local_box(cs, m, o->handle, 0.0f, 0.0f, hw, hd, -t, 0.0f);
 
         } else if (strcmp(o->mesh_ref, "wall") == 0) {
             /* the around-the-gap pieces at their REAL thickness — mirror

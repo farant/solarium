@@ -2773,42 +2773,6 @@ static void glb_attach_parts(AppState *state, sol_u32 anchor, const GlbModel *mo
     }
 }
 
-/* Load a glTF .glb, auto-fit it (longest side ~1.2 units), and stand it on the
-   floor centered at (x,z). Node transforms are already baked by the loader.
-   Returns the group anchor's handle (0 on failure) so the caller can re-pose it. */
-static sol_u32 add_glb_to_scene(AppState *state, const char *path, float x, float z) {
-    GlbModel model;
-    Aabb     b;
-    vec3     center, ext;
-    float    maxdim, scale;
-    sol_u32  anchor;
-    Mesh     empty = {0};
-
-    if (!glb_acquire_model(path, &model)) { fprintf(stderr, "glb load failed: %s\n", path); return 0; }
-
-    b      = union_bounds(&model);
-    center = vec3_scale(vec3_add(b.min, b.max), 0.5f);
-    ext    = vec3_sub(b.max, b.min);
-    maxdim = ext.x;
-    if (ext.y > maxdim) maxdim = ext.y;
-    if (ext.z > maxdim) maxdim = ext.z;
-    scale  = (maxdim > 0.0001f) ? (1.2f / maxdim) : 1.0f;
-
-    printf("glb: %s -> %u part(s), autoscale %.4f\n", path, (unsigned)model.count, scale);
-
-    /* group the parts under one empty anchor placed at the model's CENTER (so the
-       anchor's rotation pivots the model in place); the anchor's y lifts the model
-       so it sits on the floor at (x,z). The anchor carries the glb ref (6e):
-       it is the durable identity; the parts are derived data. */
-    anchor = scene_add(&state->scene, 0, empty,
-                       vec3_make(x, scale * (center.y - b.min.y), z),
-                       quat_identity(), vec3_make(scale, scale, scale));
-    glb_attach_parts(state, anchor, &model, path);
-    scene_meta_set(&state->scene, anchor, "name", path);   /* the pin's tag (item 6) */
-    scene_meta_set(&state->scene, anchor, "glb", path);    /* geometry by reference (6e) */
-    glb_free(&model);
-    return anchor;
-}
 
 /* Re-import every glb anchor's parts after a load (6e): anchors persist —
    position, name, relations, the identity — while parts regenerate from
@@ -7786,217 +7750,62 @@ static sol_bool load_palace(AppState *st) {
     return SOL_TRUE;
 }
 
-/* First-run population: the default demo palace. Runs only when there is
-   no scene.stml to load (6e) — after that, the file IS the world. */
-static void populate_default_scene(AppState *state) {
-    Mesh    empty = {0};            /* zero mesh -> an empty (transform-only) */
-    sol_u32 anchor, floor, page;
+#define HOME_FLOOR_Y 12.0f   /* the home room floats this high in the sky */
 
-    /* scene: floor (root), an empty anchor (root), and the box as the
-       anchor's child — so spinning the anchor makes the box orbit it.
-       Geometry is BY REFERENCE even at build time (P3 item 1): objects are
-       added empty carrying a mesh ref, and one resolver pass realizes them —
-       the exact path a scene loaded from disk takes, so the built world and
-       the reloaded world cannot drift apart. */
+/* Build a FRESH scene: one floating "home" room you spawn into — the hub the
+   filesystem-tree roots will hang off (later phases). Replaces the old P3 demo
+   palace, which is preserved in git history. */
+static void populate_home_scene(AppState *state) {
+    Mesh     empty = {0};
+    sol_u32  home, shell;
+    float    home_p[8];
+    Material stone = material_default();
+
     scene_init(&state->scene);
-    /* the grid sits a hair above the item-5 room's floor: two coplanar quads
-       at y=0 would z-fight (equal depth -> per-pixel flicker). It reads as a
-       rug now that the room provides the actual floor. */
-    floor = scene_add(&state->scene, 0, empty,
-              vec3_make(0.0f, 0.02f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-    anchor = scene_add(&state->scene, 0, empty,
-              vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-    state->anchor_handle = anchor;
-    state->box_handle = scene_add(&state->scene, anchor, empty,
-              vec3_make(1.5f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
 
-    /* the parchment reading surface: an upright page quad facing +Z (~3:4,
-       matching paper-picture.png; the emitter lives in mesh.c now) */
-    page = scene_add(&state->scene, 0, empty,
-              vec3_make(-2.0f, 1.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-    state->page_handle = page;
+    /* the home scene has no demo box/page/anchor — null the handles so the
+       guarded references elsewhere all no-op */
+    state->box_handle           = 0;
+    state->page_handle          = 0;
+    state->anchor_handle        = 0;
+    state->floor_handle         = 0;
+    state->sword_handle         = 0;
+    state->sword_precess_handle = 0;
 
-    scene_mesh_ref_set(&state->scene, floor, "grid");
-    scene_mesh_ref_set(&state->scene, state->box_handle, "box");
-    scene_mesh_ref_set(&state->scene, page, "page");
+    /* an open-topped 8x8 parametric room (floor + 4 walls, no ceiling) anchored
+       high up, so it reads as a platform floating in the sky */
+    home_p[0] = 8.0f;  home_p[1] = 8.0f;  home_p[2] = 3.0f;
+    home_p[3] = 1.0f;  home_p[4] = 1.0f;  home_p[5] = 1.0f;  home_p[6] = 1.0f;
+    home_p[7] = 0.0f;
 
-    /* The palace's first ROOMS (items 5+7): three §1.10 anchors and the two
-       edge EMBODIMENTS that connect them — a shared thick doorway wall (the
-       hall's open east side into a sealed cell) and a path across the void
-       (the hall's open north side out to a bare folly platform). The graph
-       lives in the existing relation slots: each connector carries
-       `connects` edges to both rooms. Geometry children parent to their
-       anchor (drag-excluded via room_type); connectors parent to the hall. */
-    {
-        Material stone = material_default();
-        Material wood  = material_default();
-        sol_u32  hall, cell, folly, sh, sc, sf, doorwall, path;
-        float    hall_p[8], cell_p[8], folly_p[8], wall_p[6], path_p[3];
-        quat     yaw90 = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
-                                              sol_radians(90.0f));
+    home = scene_add(&state->scene, 0, empty,
+              vec3_make(0.0f, HOME_FLOOR_Y, 0.0f), quat_identity(),
+              vec3_make(1.0f, 1.0f, 1.0f));
+    scene_meta_set(&state->scene, home, "room_type", "home");
+    scene_meta_set(&state->scene, home, "name", "home");
 
-        hall_p[0] = 12.0f; hall_p[1] = 10.0f; hall_p[2] = 3.5f;
-        hall_p[3] = 0.0f;  /* north open: the path leaves here */
-        hall_p[4] = 0.0f;  /* east open: the doorway wall closes it */
-        hall_p[5] = 1.0f;  hall_p[6] = 1.0f;  hall_p[7] = 1.0f;
+    shell = scene_add(&state->scene, home, empty,
+              vec3_make(0.0f, 0.0f, 0.0f), quat_identity(),
+              vec3_make(1.0f, 1.0f, 1.0f));
+    scene_mesh_ref_set(&state->scene, shell, "room");
+    scene_mesh_params_set(&state->scene, shell, home_p, 8);
 
-        cell_p[0] = 6.0f;  cell_p[1] = 6.0f;  cell_p[2] = 2.5f;
-        cell_p[3] = 1.0f;  cell_p[4] = 1.0f;  cell_p[5] = 1.0f;
-        cell_p[6] = 0.0f;  /* west open: the shared doorway wall is there */
-        cell_p[7] = 1.0f;
-
-        folly_p[0] = 5.0f; folly_p[1] = 5.0f; folly_p[2] = 3.0f;   /* h = its volume only */
-        folly_p[3] = 0.0f; folly_p[4] = 0.0f; folly_p[5] = 0.0f;   /* a bare platform */
-        folly_p[6] = 0.0f; folly_p[7] = 0.0f;
-
-        wall_p[0] = 10.0f; wall_p[1] = 3.5f;                  /* spans the hall's east side */
-        wall_p[2] = 4.5f;  wall_p[3] = 1.0f; wall_p[4] = 2.2f;
-        wall_p[5] = 0.15f;
-
-        path_p[0] = 4.5f;  path_p[1] = 1.5f; path_p[2] = 0.15f;
-
-        hall = scene_add(&state->scene, 0, empty,
-                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_meta_set(&state->scene, hall, "room_type", "room");
-        scene_meta_set(&state->scene, hall, "name", "the hall");
-        scene_meta_set(&state->scene, hall, "source_path", "");   /* item 6 fills this */
-        sh = scene_add(&state->scene, hall, empty,
-                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_mesh_ref_set(&state->scene, sh, "room");
-        scene_mesh_params_set(&state->scene, sh, hall_p, 8);
-
-        /* the cell: interior x in [6.15, 12.15] — past the wall's thickness.
-           It is the palace's first MIRROR (item 6): it reflects the solarium
-           repo itself. Membership follows disk; arrangement follows you. */
-        cell = scene_add(&state->scene, 0, empty,
-                  vec3_make(9.15f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_meta_set(&state->scene, cell, "room_type", "mirror");
-        scene_meta_set(&state->scene, cell, "name", "the archive");
-        scene_meta_set(&state->scene, cell, "source_path", ".");
-        scene_meta_set(&state->scene, cell, "ambient", "0.45");   /* doorway-sealed: its own
-                  shell has an open side (the shared wall closes it), so the
-                  flags-derived answer would be "open" — the builder knows better */
-        sc = scene_add(&state->scene, cell, empty,
-                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_mesh_ref_set(&state->scene, sc, "room");
-        scene_mesh_params_set(&state->scene, sc, cell_p, 8);
-
-        /* the folly: a platform floating north, past the path */
-        folly = scene_add(&state->scene, 0, empty,
-                  vec3_make(0.0f, 0.0f, -12.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_meta_set(&state->scene, folly, "room_type", "workspace");
-        scene_meta_set(&state->scene, folly, "name", "the folly");   /* the first workspace (6d) */
-        sf = scene_add(&state->scene, folly, empty,
-                  vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        scene_mesh_ref_set(&state->scene, sf, "room");
-        scene_mesh_params_set(&state->scene, sf, folly_p, 8);
-
-        /* edge 1: the shared doorway wall (rotated into the YZ plane at the
-           hall/cell boundary). ONE wall — two abutting walls would be the
-           z-fight lesson at architecture scale. */
-        doorwall = scene_add(&state->scene, hall, empty,
-                  vec3_make(6.075f, 0.0f, 0.0f), yaw90, vec3_make(1.0f, 1.0f, 1.0f));
-        scene_mesh_ref_set(&state->scene, doorwall, "wall");
-        scene_mesh_params_set(&state->scene, doorwall, wall_p, 6);
-        scene_rel_add(&state->scene, doorwall, "connects", hall);
-        scene_rel_add(&state->scene, doorwall, "connects", cell);
-
-        /* edge 2: the path across the void (length runs local X; rotated to
-           span world Z from the hall's north opening to the folly) */
-        path = scene_add(&state->scene, hall, empty,
-                  vec3_make(0.0f, 0.0f, -7.25f), yaw90, vec3_make(1.0f, 1.0f, 1.0f));
-        scene_mesh_ref_set(&state->scene, path, "path");
-        scene_mesh_params_set(&state->scene, path, path_p, 3);
-        scene_rel_add(&state->scene, path, "connects", hall);
-        scene_rel_add(&state->scene, path, "connects", folly);
-
-        stone.base_color = vec3_make(0.58f, 0.55f, 0.50f);   /* warm gray stone */
-        stone.roughness  = 0.92f;
-        scene_material_set(&state->scene, sh, stone);
-        scene_material_set(&state->scene, sc, stone);
-        scene_material_set(&state->scene, sf, stone);
-        stone.base_color = vec3_make(0.62f, 0.58f, 0.52f);   /* the wall a shade lighter */
-        scene_material_set(&state->scene, doorwall, stone);
-        wood.base_color = vec3_make(0.46f, 0.36f, 0.27f);    /* the path: timber */
-        wood.roughness  = 0.85f;
-        scene_material_set(&state->scene, path, wood);
-
-        /* the mirror reflects THIS repo: one card per disk entry, waiting in
-           the tray. The room's crowding IS the folder's size, felt (item 6). */
-        {
-            int n = room_mirror_scan(&state->scene, cell, ".");
-            if (n >= 0) printf("mirror 'the archive' <- '.': %d cards\n", n);
-            else        fprintf(stderr, "mirror: could not scan '.'\n");
-        }
-    }
+    stone.base_color = vec3_make(0.58f, 0.55f, 0.50f);
+    stone.roughness  = 0.92f;
+    scene_material_set(&state->scene, shell, stone);
 
     scene_resolve_meshes(&state->scene);
-    apply_kind_materials(&state->scene);
-    state->floor_handle = floor;             /* room structure: drag excludes it */
 
-    /* PBR materials for the procedural objects (item 8a) */
-    {
-        Material m = material_default();
-        m.base_color = vec3_make(0.85f, 0.45f, 0.35f);   /* the box keeps its warm orange */
-        m.roughness  = 0.5f;
-        scene_material_set(&state->scene, state->box_handle, m);
-    }
-    {
-        Material m = material_default();
-        m.base_color = vec3_make(0.5f, 0.5f, 0.5f);      /* a neutral, fairly rough floor */
-        m.roughness  = 0.85f;
-        scene_material_set(&state->scene, floor, m);
-    }
-    {
-        Material m = material_default();
-        m.albedo_tex = state->albedo_tex;                /* the parchment image; matte */
-        m.roughness  = 0.8f;
-        scene_material_set(&state->scene, page, m);
-    }
-
-    /* item 6: real glTF models standing in the room */
-    add_glb_to_scene(state, "book.glb",   2.0f,  0.0f);
-    add_glb_to_scene(state, "candle.glb", 2.0f,  2.0f);   /* corner, clear of the centred sword */
-
-    /* the showcase sword (item 8b/8d): it orbits an invisible point at a tight
-       radius, leaning 15deg out, while spinning on its own long axis — so the
-       metal sweeps the directional light. An outer 'precession' anchor does the
-       orbit; the sword group hangs off it at a small radial offset (update() sets
-       the precession spin + the sword's standup/lean/axial-spin). */
-    {
-        Mesh        empty   = {0};
-        sol_u32     precess = scene_add(&state->scene, 0, empty,
-                                        vec3_make(0.0f, 1.3f, 0.0f),   /* the invisible point */
-                                        quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-        SceneObject *sw;
-        state->sword_precess_handle = precess;
-        state->sword_handle = add_glb_to_scene(state, "sword.glb", 0.0f, 0.0f);
-        sw = scene_get(&state->scene, state->sword_handle);
-        if (sw) {
-            sw->parent = precess;                       /* orbit the precession anchor */
-            sw->pos    = vec3_make(0.3f, 0.0f, 0.0f);   /* tight radius (the cube's is 1.5) */
-        }
-    }
-
-    /* names: the pin's tag (item 6) reads these */
-    scene_meta_set(&state->scene, state->box_handle, "name", "the box");
-    scene_meta_set(&state->scene, page, "name", "the page");
-
-    /* overbuilt slots demo (mostly empty this phase) */
-    scene_meta_set(&state->scene, state->box_handle, "title",  "Test Box");
-    scene_meta_set(&state->scene, state->box_handle, "author", "Solarium");
-    scene_rel_add(&state->scene, state->box_handle, "orbits", state->anchor_handle);
-    scene_content_set(&state->scene, state->box_handle, "notes/box.txt");
-
-    /* Persist the fresh default — unless a scene.stml EXISTS but failed to
-       load (corrupt?): never overwrite what might be the user's palace. */
+    /* Persist the fresh home scene — unless a scene.stml EXISTS but failed to
+       load (corrupt?): never overwrite what might be the user's palace. The
+       persistence self-check below loads this back, so it must exist on disk. */
     {
         FILE *probe = fopen("scene.stml", "rb");
         if (probe) {
             fclose(probe);
             printf("scene.stml exists but did not load — NOT overwriting it\n");
         } else if (scene_save(&state->scene, "scene.stml")) {
-            printf("saved scene -> scene.stml\n");
+            printf("saved home scene -> scene.stml\n");
         }
     }
 }
@@ -8459,24 +8268,37 @@ static int init_scene(AppState *state) {
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
-       loaded and brought fully to life. The default demo palace builds only
-       on first run (or after deleting the file to re-mint); L remains the
-       manual mid-session revert. */
+       loaded and brought fully to life. The home scene builds only on first
+       run (or after deleting/renaming scene.stml); L remains the manual
+       mid-session revert. */
     if (load_palace(state)) {
         printf("palace loaded from scene.stml (%u objects)\n",
                (unsigned)state->scene.count);
     } else {
-        populate_default_scene(state);
+        populate_home_scene(state);
         collide_rebuild(&state->colliders, &state->scene);
         meadow_rebuild(state);
         forest_rebuild(state);
-        adopt_legacy_motion(state);   /* the default scene's movers, as data */
+        adopt_legacy_motion(state);   /* no-op for the home scene; movers exist only in loaded scenes */
     }
 
     /* spawn standing at the south edge of the scene, facing -Z at eye height
        with a slight downward tilt (2.5 was above the 2.2 doorway lintels) */
-    camera_init(&state->camera, vec3_make(0.0f, CAMERA_EYE_HEIGHT, 5.0f),
-                sol_radians(-90.0f), sol_radians(-10.0f));
+    {
+        vec3 spawn = vec3_make(0.0f, CAMERA_EYE_HEIGHT, 5.0f);   /* fallback */
+        int  i;
+        for (i = 0; i < (int)state->scene.count; i++) {
+            const char *rt = scene_meta_get(&state->scene,
+                                 state->scene.objects[i].handle, "room_type");
+            if (rt && strcmp(rt, "home") == 0) {
+                vec3 c = object_world_pos(&state->scene,
+                             state->scene.objects[i].handle);
+                spawn = vec3_make(c.x, c.y + CAMERA_EYE_HEIGHT, c.z + 2.0f);
+                break;
+            }
+        }
+        camera_init(&state->camera, spawn, sol_radians(-90.0f), sol_radians(-10.0f));
+    }
     state->exposure   = 1.0f;
     state->ambient_scale = 1.0f;   /* zero-init would fade up from black */
 
@@ -8519,10 +8341,12 @@ static int init_scene(AppState *state) {
     }
 
     printf("scene: %u objects (1 empty anchor)\n", (unsigned)state->scene.count);
-    printf("box meta: title=\"%s\", author=\"%s\"; %u relations\n",
-           scene_meta_get(&state->scene, state->box_handle, "title"),
-           scene_meta_get(&state->scene, state->box_handle, "author"),
-           (unsigned)scene_get(&state->scene, state->box_handle)->rel_count);
+    if (state->box_handle) {
+        printf("box meta: title=\"%s\", author=\"%s\"; %u relations\n",
+               scene_meta_get(&state->scene, state->box_handle, "title"),
+               scene_meta_get(&state->scene, state->box_handle, "author"),
+               (unsigned)scene_get(&state->scene, state->box_handle)->rel_count);
+    }
     return 1;
 }
 
