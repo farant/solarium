@@ -316,6 +316,29 @@ void make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t) {
     face_x(b,  hl, -t, 0.0f, -hw, hw,  1);
 }
 
+void make_walkway(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t, sol_f32 dy) {
+    sol_f32 hl = len * 0.5f, hw = w * 0.5f;
+    sol_f32 ady = (dy < 0.0f) ? -dy : dy;
+    sol_f32 tread, rise;
+    int     n, i;
+    n = (ady < 0.02f) ? 1 : (int)(ady / WALKWAY_STEP_RISE) + 1;
+    if (n < 1)   n = 1;
+    if (n > 128) n = 128;
+    tread = len / (sol_f32)n;
+    rise  = dy  / (sol_f32)n;
+    for (i = 0; i < n; i++) {                       /* each step is a full box */
+        sol_f32 x0 = -hl + (sol_f32)i * tread;
+        sol_f32 x1 = x0 + tread;
+        sol_f32 yd = (sol_f32)(i + 1) * rise;       /* this step's deck height */
+        face_y(b, x0, x1, yd,  -hw, hw,  1);        /* deck (top) */
+        face_y(b, x0, x1, -t,  -hw, hw, -1);        /* underside */
+        face_z(b, x0, x1, -t, yd,  hw,  1);         /* +z side */
+        face_z(b, x0, x1, -t, yd, -hw, -1);         /* -z side */
+        face_x(b, x1, -t, yd, -hw, hw,  1);         /* +x riser/end */
+        face_x(b, x0, -t, yd, -hw, hw, -1);         /* -x riser/end */
+    }
+}
+
 /* ------------------------------------------------------------ the registry */
 /* THE single source of truth for what each ref name means (P3 item 1) — the
    scene built at startup and the scene loaded from disk both come through
@@ -340,6 +363,9 @@ static void emit_room(MeshBuilder *b, const float *p) {
 }
 static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
 static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1], p[2]); }
+static void emit_walkway(MeshBuilder *b, const float *p) {
+    make_walkway(b, p[0], p[1], p[2], p[3]);
+}
 /* ---- terrain (item 10): the floating plot ----
    A heightfield top over a skirt and base slab — an ISLAND, not a world:
    heights come from seeded fBm value noise, masked to a ZERO RIM at the
@@ -839,6 +865,7 @@ static const MeshRefEntry REGISTRY[] = {
     { "wall", 6, { "w", "h", "ox", "ow", "oh", "t" },
                  { 4.0f, 3.0f, 1.5f, 1.0f, 2.2f, 0.15f }, emit_wall },
     { "path", 3, { "len", "w", "t" }, { 6.0f, 1.5f, 0.15f }, emit_path },
+    { "walkway", 4, { "len", "w", "t", "dy" }, { 4.0f, 1.6f, 0.15f, 0.0f }, emit_walkway },
     { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
     /* board: a card grown to furniture scale (item 8) — same slab geometry,
        bottom-origin, front face toward local +Z. Its OWN ref name is its

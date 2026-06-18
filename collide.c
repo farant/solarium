@@ -570,6 +570,26 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
             emit_local_box(cs, m, o->handle, 0.0f, 0.0f,
                            len * 0.5f, w * 0.5f, -t, 0.0f);
 
+        } else if (strcmp(o->mesh_ref, "walkway") == 0) {
+            /* mirror make_walkway: one box per step, deck top at (i+1)*rise.
+               The step-up treaty makes each rise climbable. */
+            float len = ref_p(o, "len"), w = ref_p(o, "w");
+            float t   = ref_p(o, "t"),   dy = ref_p(o, "dy");
+            float hl  = len * 0.5f, hw = w * 0.5f;
+            float ady = (dy < 0.0f) ? -dy : dy, tread, rise;
+            int   n, i;
+            mat4  m = scene_world_matrix(s, o);
+            n     = (ady < 0.02f) ? 1 : (int)(ady / WALKWAY_STEP_RISE) + 1;
+            if (n < 1)   n = 1;
+            if (n > 128) n = 128;
+            tread = len / (float)n;
+            rise  = dy  / (float)n;
+            for (i = 0; i < n; i++) {
+                float cx = -hl + ((float)i + 0.5f) * tread;
+                emit_local_box(cs, m, o->handle, cx, 0.0f,
+                               tread * 0.5f, hw, -t, (float)(i + 1) * rise);
+            }
+
         /* ---- the follies (P6 item 10): each reads the SAME truncation
            the emitter performs — gothic_column_top / arch_frag_dims are
            the shared formulas (one author, two readers) ---- */

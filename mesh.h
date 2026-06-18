@@ -47,6 +47,13 @@ void    make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h,
    width along Z, deck at y=0 (places flush with room floors). */
 void    make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t);
 
+/* A connector that climbs: a ribbon of N step-boxes from y=0 up to y=dy over
+   `len` along X (width `w` along Z, slabs `t` thick). dy~0 => one flat box (a
+   walkway); larger dy => stairs (each step's rise stays climbable). The
+   per-step rise lives here so the collider mirrors the emitter exactly. */
+#define WALKWAY_STEP_RISE 0.18f
+void    make_walkway(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t, sol_f32 dy);
+
 /* An index card (P3 item 6): a FILE/ALIAS/NOTE's body — an upright slab
    standing on its bottom edge, facing +/-Z. */
 void    make_card(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t);
