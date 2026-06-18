@@ -2622,8 +2622,6 @@ typedef struct AppState {
     /* the one wind (P7 item 9): evaluated once per frame at the camera,
        read by the meadow + canopy shaders, particle drift, and audio */
     float        wind_dx, wind_dz, wind_gust;
-    sol_bool     e_was_down;    /* 'E' mints a dust emitter */
-    sol_bool     y_was_down;    /* 'Y' mints a fox (item 9) */
     /* collision (P4 item 1): derived data like the arrows — rebuilt on load
        and on drag release (walls and paths are draggable props) */
     ColliderSet colliders;
@@ -2664,7 +2662,6 @@ typedef struct AppState {
     sol_u32     drag_board;        /* board hosting the carry; 0 = ground mode */
     float       drag_board_ox;     /* grab offset in board-local XY            */
     float       drag_board_oy;
-    sol_bool    b_was_down;        /* edge-detect spawn-board (B) */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -2676,7 +2673,6 @@ typedef struct AppState {
     char        edit_buf[EDIT_BUF_CAP];
     int         edit_len;
     Palette     palette;           /* command palette state (palette.h) */
-    sol_bool    v_was_down;        /* edge-detect mint-codex (V, item 9) */
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
        persists. The source object hides while its book is aloft. */
@@ -2717,10 +2713,6 @@ typedef struct AppState {
     sol_bool    terrain_blend;
     float       terrain_y0, terrain_amp;
     sol_u32     current_terrain;   /* plot underfoot; 0 = none (HUD naming) */
-    sol_bool    h_was_down;        /* edge-detect mint-island (H) */
-    sol_bool    o_was_down;        /* edge-detect mint-lantern (O, P4 item 5) */
-    sol_bool    q_was_down;        /* edge-detect mint-pond (Q, P7 item 8) */
-    sol_bool    u_was_down;        /* edge-detect mint-church (U, P6 item 9) */
     sol_bool    z_was_down;        /* edge-detect mint-abbey (Z, P6 item 10) */
     sol_bool    plan_on;
     sol_u32     plan_plot;         /* island the overlay was built for */
@@ -5796,6 +5788,579 @@ static void cmd_reload_scene(AppState *st) {
         fprintf(stderr, "scene.stml did not load — keeping the live scene\n");
 }
 
+/* B spawns a whiteboard facing you (item 8): plain furniture that
+   persists like everything else; drag ALIAS/NOTE cards onto its face. */
+static void cmd_mint_whiteboard(AppState *st) {
+    Mesh    empty;
+    vec3    f = camera_forward(&st->camera);
+    vec3    pos, one;
+    float   yaw;
+    sol_u32 h;
+    f.y = 0.0f;
+    if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+    f   = vec3_normalize(f);
+    pos = vec3_add(st->camera.pos, vec3_scale(f, 2.2f));
+    pos.y = mint_ground(st, pos) + 0.9f;  /* bottom-origin: face
+                                      center ~1.5 above YOUR ground —
+                                      islands lift the board too */
+    yaw = atan2f(-f.x, -f.z);      /* board +Z looks back at you */
+    one = vec3_make(1.0f, 1.0f, 1.0f);
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, 0, empty, pos,
+                  quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw), one);
+    scene_mesh_ref_set(&st->scene, h, "board");
+    scene_meta_set(&st->scene, h, "name", "board");
+    scene_resolve_meshes(&st->scene);
+    st->selected_handle = h;
+    scene_save(&st->scene, "scene.stml");
+    printf("board #%u spawned — drag cards onto it\n", (unsigned)h);
+}
+
+/* V mints a CODEX in front of you (item 9): a procedural bound book —
+   cover + page block as a small GROUP, each part wearing its own
+   material. Proportions draw from real binding ranges and PERSIST
+   (they live in the parts' mesh attrs); press it a few times for a
+   shelf of individuals. */
+static void cmd_mint_codex(AppState *st) {
+    Mesh    empty;
+    vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+    float   p[8];
+    vec3    f, pos;
+    float   yaw;
+    sol_u32 anchor, part;
+    int     leather;
+    if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
+    /* 2x real codex sizes — true-scale books read tiny in the world
+       (Fran's call after the first shelf) */
+    p[1] = mint_range(0.36f, 0.68f);             /* h: octavo..folio   */
+    p[0] = p[1] / mint_range(1.35f, 1.60f);      /* w from real ratios */
+    p[2] = mint_range(0.05f, 0.15f);             /* t (leaf count)     */
+    p[3] = mint_range(0.010f, 0.018f);           /* board thickness    */
+    p[4] = mint_range(0.006f, 0.012f);           /* squares            */
+    p[5] = mint_range(0.40f, 1.00f);             /* spine roundness    */
+    p[6] = (float)(int)mint_range(3.0f, 5.99f);  /* raised bands       */
+    p[7] = (mint_range(0.0f, 1.0f) < 0.30f) ? 1.0f : 0.0f;   /* clasp */
+    leather = (int)mint_range(0.0f, 2.99f);
+    f = camera_forward(&st->camera);
+    f.y = 0.0f;
+    if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+    f   = vec3_normalize(f);
+    pos = vec3_add(st->camera.pos, vec3_scale(f, 1.6f));
+    pos.y = mint_ground(st, pos)
+          + p[1] * 0.5f;                  /* standing: height spans +-h/2 */
+    yaw = atan2f(-f.z, f.x);              /* the spine (-x) faces you */
+    memset(&empty, 0, sizeof empty);
+    anchor = scene_add(&st->scene, 0, empty, pos,
+                       quat_mul(quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw),
+                                quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f),
+                                                     sol_radians(-90.0f))),
+                       one);
+    scene_meta_set(&st->scene, anchor, "name", "codex");
+    part = scene_add(&st->scene, anchor, empty,
+                     vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+    scene_mesh_ref_set(&st->scene, part, "book_cover");
+    scene_mesh_params_set(&st->scene, part, p, 8);
+    {
+        SceneObject *po = scene_get(&st->scene, part);
+        if (po) {
+            Material m = material_default();
+            m.base_color = (leather == 0) ? vec3_make(0.36f, 0.22f, 0.13f)
+                         : (leather == 1) ? vec3_make(0.34f, 0.12f, 0.10f)
+                                          : vec3_make(0.14f, 0.22f, 0.15f);
+            m.roughness = 0.65f;
+            po->material = m;
+        }
+    }
+    part = scene_add(&st->scene, anchor, empty,
+                     vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+    scene_mesh_ref_set(&st->scene, part, "book_block");
+    scene_mesh_params_set(&st->scene, part, p, 5);
+    {
+        SceneObject *po = scene_get(&st->scene, part);
+        if (po) {
+            Material m = material_default();
+            m.base_color = vec3_make(0.88f, 0.84f, 0.72f);   /* cream leaves */
+            m.roughness  = 0.92f;
+            po->material = m;
+        }
+    }
+    scene_resolve_meshes(&st->scene);
+    st->selected_handle = anchor;
+    scene_save(&st->scene, "scene.stml");
+    printf("codex minted: %.0fx%.0fmm, %d bands, %s spine%s\n",
+           (double)(p[0] * 1000.0f), (double)(p[1] * 1000.0f), (int)p[6],
+           p[5] > 0.7f ? "round" : "shallow",
+           p[7] > 0.5f ? ", clasped" : "");
+}
+
+/* H mints a terrain ISLAND ahead of you, at your floor level (item 10):
+   press it while flying and the island FLOATS there — vertical
+   placement for free. room_type meta makes it LAND (architecture is
+   never draggable); the seed makes it THIS island forever. */
+static void cmd_mint_island(AppState *st) {
+    static const char *isle[] = { "the heath", "the tor", "the fell",
+                                  "the moor", "the downs", "the crag" };
+    Mesh    empty;
+    vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+    float   p[5];
+    vec3    f, pos;
+    sol_u32 h;
+    int     ni;
+    if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
+    p[0] = mint_range(24.0f, 44.0f);             /* w */
+    p[1] = mint_range(24.0f, 44.0f);             /* d */
+    p[2] = 56.0f;                                /* sub */
+    p[3] = mint_range(1.5f, 3.5f);               /* relief */
+    p[4] = (float)(int)mint_range(1.0f, 9999.0f);/* the identity */
+    ni   = (int)mint_range(0.0f, 5.99f);
+    f = camera_forward(&st->camera);
+    f.y = 0.0f;
+    if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+    f   = vec3_normalize(f);
+    pos = vec3_add(st->camera.pos, vec3_scale(f, p[0] * 0.5f + 6.0f));
+    pos.y = st->camera.pos.y - CAMERA_EYE_HEIGHT;  /* your floor level */
+    if (pos.y < 0.05f) pos.y = 0.0f;               /* grounded: exactly */
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, 0, empty, pos, quat_identity(), one);
+    scene_mesh_ref_set(&st->scene, h, "terrain");
+    scene_mesh_params_set(&st->scene, h, p, 5);
+    scene_meta_set(&st->scene, h, "name", isle[ni]);
+    scene_meta_set(&st->scene, h, "room_type", "terrain");
+    {
+        SceneObject *to = scene_get(&st->scene, h);
+        if (to) {
+            Material m = material_default();
+            m.base_color = vec3_make(0.35f, 0.40f, 0.28f);  /* the shader
+                                               palette overrides this */
+            m.roughness  = 0.95f;
+            to->material = m;
+        }
+    }
+    /* the WILD ISLAND dressing (P7 item 10): a hero tree, a couple
+       of erratics, and a pond IF the island has a real hollow —
+       so a minted island feels inhabited without a church (the
+       forest, flowers, scree and wind grow themselves). Children
+       of the island, in its LOCAL frame. */
+    {
+        float lowest = 1e30f, lowx = 0.0f, lowz = 0.0f, rim = -1e30f;
+        int   gx, gz;
+#define WILD_PLANT(ref, lx, lz, prm, np, texkind, nm)                     \
+        do {                                                       \
+            float wy_ = terrain_height(p, 5, (lx), (lz));          \
+            sol_u32 w_ = scene_add(&st->scene, h, empty,           \
+                          vec3_make((lx), wy_, (lz)),              \
+                          quat_identity(), one);                   \
+            scene_mesh_ref_set(&st->scene, w_, (ref));             \
+            if ((np) > 0)                                          \
+                scene_mesh_params_set(&st->scene, w_, (prm), (np));\
+            scene_meta_set(&st->scene, w_, "name", (nm));          \
+            {   SceneObject *wo_ = scene_get(&st->scene, w_);      \
+                if (wo_) { Material wm_ = material_default();      \
+                    wm_.base_color = vec3_make(1.0f, 1.0f, 1.0f);  \
+                    wm_.roughness = 1.0f; wm_.metallic = 1.0f;     \
+                    wo_->material = wm_; } }                       \
+            scene_tex_ref_set(&st->scene, w_, (texkind));          \
+        } while (0)
+        /* scan for the lowest spot (the hollow) and the rim */
+        for (gz = -3; gz <= 3; gz++)
+            for (gx = -3; gx <= 3; gx++) {
+                float sx = (float)gx / 3.0f * 0.4f * p[0];
+                float sz = (float)gz / 3.0f * 0.4f * p[1];
+                float gh = terrain_height(p, 5, sx, sz);
+                if (gh < lowest) { lowest = gh; lowx = sx; lowz = sz; }
+                if (gh > rim) rim = gh;
+            }
+        {   /* a lone tree off-center, species by seed */
+            static const char *sp4[4] = { "oak", "pine", "birch", "cypress" };
+            float tp[3];
+            tp[0] = p[4] + 17.0f; tp[1] = 1.1f; tp[2] = 7.0f;
+            WILD_PLANT(sp4[(int)p[4] & 3], -0.18f * p[0], 0.16f * p[1],
+                       tp, 3, "bark", "the lone tree");
+        }
+        {   /* two erratics */
+            float bp[3];
+            bp[0] = 0.9f; bp[1] = p[4] + 3.0f; bp[2] = 0.0f;
+            WILD_PLANT("boulder", 0.22f * p[0], -0.20f * p[1], bp, 3,
+                       "stone", "erratic");
+            bp[0] = 0.6f; bp[1] = p[4] + 9.0f; bp[2] = 0.6f;
+            WILD_PLANT("boulder", 0.30f * p[0], -0.10f * p[1], bp, 3,
+                       "stone", "erratic");
+        }
+        if (rim - lowest > 1.2f) {   /* a real dip → a pond */
+            float pp[3];
+            sol_u32 pondh = scene_add(&st->scene, h, empty,
+                          vec3_make(lowx, lowest + 0.2f, lowz),
+                          quat_identity(), one);
+            scene_mesh_ref_set(&st->scene, pondh, "pond");
+            pp[0] = 3.5f; pp[1] = 1.5f; pp[2] = p[4];
+            scene_mesh_params_set(&st->scene, pondh, pp, 3);
+            scene_meta_set(&st->scene, pondh, "name", "tarn");
+        }
+#undef WILD_PLANT
+    }
+
+    scene_resolve_meshes(&st->scene);
+    meadow_rebuild(st);                  /* a new island, new grass */
+    forest_rebuild(st);                  /* and its forest */
+    st->selected_handle = h;
+    scene_save(&st->scene, "scene.stml");
+    printf("%s rises: %.0fx%.0fm, relief %.1fm, seed %d%s\n",
+           isle[ni], (double)p[0], (double)p[1], (double)p[3],
+           (int)p[4], pos.y > 0.05f ? " (floating)" : "");
+}
+
+/* U mints THE CHURCH on the island underfoot (P6 item 9): the
+   J-overlay's commission, built. The datum is the MAX of the pier
+   samples (ruled: the building must nowhere float); the group is
+   one anchor + four members sharing the island's identity, yawed
+   a quarter-turn when the plot is deeper than wide. room_type
+   makes it architecture — never draggable. */
+static sol_bool can_mint_church(AppState *st) {
+    return st->current_terrain != 0;
+}
+static void cmd_mint_church(AppState *st) {
+    SceneObject *isl = scene_get(&st->scene, st->current_terrain);
+    sol_u32 had = 0;
+    if (isl && isl->nid) {     /* a church here already? then U
+                                  is the RUIN DIAL: walk the
+                                  ladder 0 -> .3 -> .6 -> .9 -> 0 */
+        sol_u32 ai;
+        for (ai = 0; ai < st->scene.count && !had; ai++) {
+            SceneObject *a = &st->scene.objects[ai];
+            const char *rt = scene_meta_get(&st->scene, a->handle,
+                                            "room_type");
+            const char *pl = scene_meta_get(&st->scene, a->handle,
+                                            "plot");
+            if (rt && strcmp(rt, "church") == 0 &&
+                pl && strcmp(pl, isl->nid) == 0)
+                had = a->handle;
+        }
+    }
+    if (had) {
+        float r = 0.0f, nr;
+        sol_u32 ci;
+        for (ci = 0; ci < st->scene.count; ci++) {
+            SceneObject *c = &st->scene.objects[ci];
+            if (c->parent != had || !c->mesh_ref) continue;
+            if (c->mesh_param_count >= 5) r = c->mesh_params[4];
+            break;
+        }
+        nr = r < 0.15f ? 0.3f : r < 0.45f ? 0.6f :
+             r < 0.75f ? 0.9f : 0.0f;
+        for (ci = 0; ci < st->scene.count; ci++) {
+            SceneObject *c = &st->scene.objects[ci];
+            float np[5];
+            char  okey[160];
+            if (c->parent != had || !c->mesh_ref) continue;
+            if (strncmp(c->mesh_ref, "church_", 7) != 0) continue;
+            /* params are the mesh's IDENTITY (P4 item 4): give
+               the old shape back to the registry BEFORE the
+               params change, or resolve will see a mesh already
+               present and keep the old stones standing */
+            if (c->mesh.index_count != 0 &&
+                mesh_asset_key(c, okey)) {
+                asset_release(&g_mesh_assets, okey);
+                memset(&c->mesh, 0, sizeof c->mesh);
+            }
+            np[0] = c->mesh_params[0];
+            np[1] = c->mesh_params[1];
+            np[2] = c->mesh_params[2];
+            np[3] = -1.0f;            /* style: still derived  */
+            np[4] = nr;
+            scene_mesh_params_set(&st->scene, c->handle, np, 5);
+        }
+        scene_resolve_meshes(&st->scene);
+        collide_rebuild(&st->colliders, &st->scene);
+        scene_save(&st->scene, "scene.stml");
+        printf(nr > 0.0f
+                   ? "the church decays: ruin %.1f\n"
+                   : "the church stands whole again\n", nr);
+    } else if (isl && isl->mesh_ref &&
+        strcmp(isl->mesh_ref, "terrain") == 0) {
+        float cw = mesh_ref_param("terrain", isl->mesh_params,
+                                  isl->mesh_param_count, "w");
+        float cd = mesh_ref_param("terrain", isl->mesh_params,
+                                  isl->mesh_param_count, "d");
+        float cseed = mesh_ref_param("terrain", isl->mesh_params,
+                                     isl->mesh_param_count, "seed");
+        float params[3];
+        ChurchPlan cp;
+        float datum = 0.0f, x, z;
+        int   i2, j2;
+        Mesh  empty;
+        vec3  one = vec3_make(1.0f, 1.0f, 1.0f);
+        quat  rot;
+        sol_u32 anchor;
+        params[0] = cw; params[1] = cd; params[2] = cseed;
+        church_plan(&cp, params, 3);
+        for (i2 = 0; i2 <= cp.nbays; i2++)        /* the datum */
+            for (j2 = 0; j2 <= PIER_ROW_N_WALL; j2++) {
+                float lx, lz, hgt;
+                if (!plan_pier(&cp, i2, j2, &x, &z)) continue;
+                plan_to_local(&cp, x, z, &lx, &lz);
+                hgt = terrain_height(isl->mesh_params,
+                                     isl->mesh_param_count, lx, lz);
+                if (hgt > datum) datum = hgt;
+            }
+        for (i2 = 0; i2 < 6; i2++) {
+            float lx, lz, hgt;
+            if (!plan_apse_pier(&cp, i2, &x, &z)) continue;
+            plan_to_local(&cp, x, z, &lx, &lz);
+            hgt = terrain_height(isl->mesh_params,
+                                 isl->mesh_param_count, lx, lz);
+            if (hgt > datum) datum = hgt;
+        }
+        rot = cp.swapped
+            ? quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                   -0.5f * (float)SOL_PI)
+            : quat_identity();
+        memset(&empty, 0, sizeof empty);
+        anchor = scene_add(&st->scene, 0, empty,
+                           vec3_add(isl->pos,
+                                    vec3_make(0.0f, datum, 0.0f)),
+                           rot, one);
+        scene_meta_set(&st->scene, anchor, "room_type", "church");
+        if (isl->nid)            /* the dial finds it next press */
+            scene_meta_set(&st->scene, anchor, "plot", isl->nid);
+        {
+            const char *nm = scene_meta_get(&st->scene, isl->handle,
+                                            "name");
+            char title[96];
+            snprintf(title, sizeof title, "the church of %s",
+                     nm ? nm : "the island");
+            scene_meta_set(&st->scene, anchor, "name", title);
+        }
+        {
+            static const char *refs[5] = {
+                "church_stone", "church_glass",
+                "church_roof",  "church_floor",
+                "church_decals"
+            };
+            int r2;
+            for (r2 = 0; r2 < 5; r2++) {
+                sol_u32 ch = scene_add(&st->scene, anchor, empty,
+                                       vec3_make(0, 0, 0),
+                                       quat_identity(), one);
+                scene_mesh_ref_set(&st->scene, ch, refs[r2]);
+                scene_mesh_params_set(&st->scene, ch, params, 3);
+                {
+                    SceneObject *co = scene_get(&st->scene, ch);
+                    if (co) {
+                        Material mm = material_default();
+                        if (r2 == 0) {
+                            /* synthesized stone (texture side-quest):
+                               the maps carry tone, the factors step
+                               aside (the shader multiplies them in) */
+                            mm.base_color = vec3_make(1.0f, 1.0f, 1.0f);
+                            mm.roughness  = 1.0f;
+                            mm.metallic   = 1.0f;
+                        } else if (r2 == 1) {
+                            mm.base_color = vec3_make(0.02f, 0.025f, 0.045f);
+                            mm.roughness  = 0.08f;
+                            /* past 1.0 on purpose: that's what bloom
+                               bites on — windows radiate, not paint */
+                            mm.emissive   = vec3_make(1.8f, 1.12f, 0.5f);
+                        } else if (r2 == 2) {
+                            mm.base_color = vec3_make(0.30f, 0.32f, 0.36f);
+                            mm.roughness  = 0.55f;
+                        } else {
+                            mm.base_color = vec3_make(1.0f, 1.0f, 1.0f);
+                            mm.roughness  = 1.0f;
+                            mm.metallic   = 1.0f;
+                        }
+                        co->material = mm;
+                    }
+                    if (r2 == 0) {
+                        scene_tex_ref_set(&st->scene, ch, "stone");
+                    } else if (r2 == 3) {
+                        /* the floor wears flagstones: its own seed,
+                           paver-scale courses (knobs 0..3) */
+                        float fp[4];
+                        fp[0] = cseed + 7.0f;
+                        fp[1] = 2.4f; fp[2] = 0.8f; fp[3] = 0.8f;
+                        scene_tex_ref_set(&st->scene, ch, "stone");
+                        scene_tex_params_set(&st->scene, ch, fp, 4);
+                    }
+                }
+            }
+        }
+        scene_resolve_meshes(&st->scene);
+        collide_rebuild(&st->colliders, &st->scene);
+        scene_save(&st->scene, "scene.stml");
+        printf("a church rises on the island (datum %.2f%s)\n",
+               datum, cp.swapped ? ", turned to the long axis" : "");
+    }
+}
+
+/* O mints a LANTERN (P4 item 5): an ordinary draggable prop whose light
+   is META — the light rides the object's transform, so carrying the
+   lantern carries its pool of warmth. The body is the shared unit box
+   (one more borrower of "m|box"); piece 2 gives it an emissive heart. */
+static void cmd_mint_lantern(AppState *st) {
+    Mesh    empty;
+    vec3    f, pos;
+    sol_u32 h;
+    f = camera_forward(&st->camera);
+    f.y = 0.0f;
+    if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+    f   = vec3_normalize(f);
+    pos = vec3_add(st->camera.pos, vec3_scale(f, 1.5f));
+    pos.y = st->camera.pos.y - 0.45f;     /* held at hand height */
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
+                  vec3_make(0.16f, 0.16f, 0.16f));
+    scene_mesh_ref_set(&st->scene, h, "box");
+    scene_meta_set(&st->scene, h, "name", "lantern");
+    scene_meta_set(&st->scene, h, "light", "point");
+    scene_meta_set(&st->scene, h, "light_color", "1.0 0.72 0.42");
+    scene_meta_set(&st->scene, h, "light_intensity", "14");
+    scene_meta_set(&st->scene, h, "light_radius", "9");
+    scene_component_add(&st->scene, h, "flicker", (const float *)0, 0);
+    {
+        /* sparks (item 7): the lantern's other voice — a few embers
+           a second, rising off the flame and REDDENING as they die.
+           Birth rgb > 1 on purpose: each ember is bloom's customer,
+           exactly like the emissive heart below. */
+        static const float SPARKS[24] = {
+            7.0f, 1.4f,                   /* rate, life */
+            0.0f, 0.6f, 0.0f,             /* velocity: rising */
+            0.12f, 0.15f, 0.12f,          /* spread: a loose plume */
+            0.05f, 0.05f, 0.05f,          /* born AT the flame */
+            0.012f, 0.004f,               /* shrinking as they cool */
+            2.2f, 1.10f, 0.35f, 0.9f,     /* white-gold birth (HDR) */
+            1.2f, 0.25f, 0.08f, 0.0f,     /* ember-red death */
+            0.0f, -0.25f, 0.0f            /* gravity wins in the end */
+        };
+        scene_component_add(&st->scene, h, "emit", SPARKS, 24);
+    }
+    {
+        SceneObject *lo = scene_get(&st->scene, h);
+        if (lo) {
+            Material m = material_default();
+            m.base_color = vec3_make(0.95f, 0.78f, 0.50f);
+            m.emissive   = vec3_make(1.60f, 0.95f, 0.45f);  /* the heart
+                                               (P4 i5 p2): > 1.0 on
+                                               purpose — bloom's first
+                                               customer in piece 3 */
+            m.roughness  = 0.40f;
+            lo->material = m;
+        }
+    }
+    scene_resolve_meshes(&st->scene);
+    st->selected_handle = h;
+    scene_save(&st->scene, "scene.stml");
+    printf("a lantern is lit — drag it; the light goes along\n");
+}
+
+/* Q mints a POND (P7 item 8): a disc of water dropped ahead, its
+   surface settled to the HOLLOW the ground makes there — the spec's
+   "the mint samples terrain_height minima." Flat ground gives a
+   shallow puddle; a dip gives a real pond. */
+static void cmd_mint_pond(AppState *st) {
+    Mesh    empty;
+    vec3    f, ctr;
+    float   r = 5.0f, lowest, params[3];
+    int     a;
+    sol_u32 h;
+    f = camera_forward(&st->camera);
+    f.y = 0.0f;
+    if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+    f   = vec3_normalize(f);
+    ctr = vec3_add(st->camera.pos, vec3_scale(f, r + 2.0f));
+    /* find the hollow: sample the ground at the center + a ring,
+       the surface settles a little above the lowest point */
+    lowest = mint_ground(st, ctr);
+    for (a = 0; a < 8; a++) {
+        float ang = (float)a / 8.0f * 6.2831853f;
+        vec3  s = ctr;
+        float g;
+        s.x += cosf(ang) * r * 0.7f;
+        s.z += sinf(ang) * r * 0.7f;
+        g = mint_ground(st, s);
+        if (g < lowest) lowest = g;
+    }
+    ctr.y = lowest + 0.25f;          /* the water surface */
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, 0, empty, ctr, quat_identity(),
+                  vec3_make(1.0f, 1.0f, 1.0f));
+    scene_mesh_ref_set(&st->scene, h, "pond");
+    params[0] = r; params[1] = 2.0f; params[2] = 7.0f;
+    scene_mesh_params_set(&st->scene, h, params, 3);
+    scene_meta_set(&st->scene, h, "name", "pond");
+    scene_resolve_meshes(&st->scene);
+    st->selected_handle = h;
+    scene_save(&st->scene, "scene.stml");
+    printf("a pond fills the hollow (surface %.2f)\n", ctr.y);
+}
+
+/* E mints a DUST EMITTER (P4 item 7): a small dim marker block whose
+   emit component fills the air around it with drifting motes. The
+   component is attached BARE — the schema defaults ARE dust, so the
+   file gets a single <component type="emit"/> line. The marker is an
+   ordinary prop: pick it, drag it, the shaft of dust moves along. */
+static void cmd_mint_dust(AppState *st) {
+    Mesh    empty;
+    vec3    f, pos;
+    sol_u32 h;
+    f = camera_forward(&st->camera);
+    f.y = 0.0f;
+    if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+    f   = vec3_normalize(f);
+    pos = vec3_add(st->camera.pos, vec3_scale(f, 2.0f));
+    pos.y = st->camera.pos.y - 0.25f;     /* the shaft's heart, chest-high */
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
+                  vec3_make(0.05f, 0.05f, 0.05f));
+    scene_mesh_ref_set(&st->scene, h, "box");
+    scene_meta_set(&st->scene, h, "name", "dust");
+    scene_component_add(&st->scene, h, "emit", (const float *)0, 0);
+    {
+        SceneObject *eo = scene_get(&st->scene, h);
+        if (eo) {
+            Material m = material_default();
+            m.base_color = vec3_make(0.35f, 0.33f, 0.30f);
+            m.roughness  = 0.9f;
+            eo->material = m;
+        }
+    }
+    scene_resolve_meshes(&st->scene);
+    st->selected_handle = h;
+    scene_save(&st->scene, "scene.stml");
+    printf("dust hangs in the air — drag the little block to move the shaft\n");
+}
+
+/* Y mints a FOX (P4 item 9 + the wander sidequest): a rigged glb on an
+   empty anchor — meta skin_glb names the file, the skeleton poses it
+   fresh every frame, and the wander brain gives it somewhere to be.
+   Scale 0.007 because the fox is authored in centimeters (~155 long).
+   Not pickable in v1 (an empty has no AABB). */
+static void cmd_mint_fox(AppState *st) {
+    Mesh    empty;
+    vec3    f, pos;
+    sol_u32 h;
+    f = camera_forward(&st->camera);
+    f.y = 0.0f;
+    if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+    f   = vec3_normalize(f);
+    pos = vec3_add(st->camera.pos, vec3_scale(f, 2.5f));
+    pos.y = st->camera.pos.y - CAMERA_EYE_HEIGHT;     /* on the floor */
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
+                  vec3_make(0.007f, 0.007f, 0.007f));
+    scene_meta_set(&st->scene, h, "name", "fox");
+    scene_meta_set(&st->scene, h, "skin_glb", "Fox.glb");
+    scene_component_add(&st->scene, h, "animate", (const float *)0, 0);
+                               /* the persisted rule: clip 0 if it
+                                  ever stops wandering */
+    scene_component_add(&st->scene, h, "wander", (const float *)0, 0);
+                               /* bare = a gentle meanderer; delete
+                                  the line + L and it stands its
+                                  ground */
+    st->selected_handle = h;
+    scene_save(&st->scene, "scene.stml");
+    printf("a fox arrives — it has somewhere to be\n");
+}
+
 static Command g_commands[] = {
     { "Toggle bloom",                "K", GLFW_KEY_K, cmd_toggle_bloom,      NULL,                  SOL_FALSE },
     { "Toggle walk/fly",             "F", GLFW_KEY_F, cmd_toggle_fly,        can_toggle_fly,        SOL_FALSE },
@@ -5808,7 +6373,15 @@ static Command g_commands[] = {
     { "Cycle text inspector",        "T", GLFW_KEY_T, cmd_cycle_textinspect, can_cycle_textinspect, SOL_FALSE },
     { "Toggle floor-plan overlay",   "J", GLFW_KEY_J, cmd_toggle_floorplan,  NULL,                  SOL_FALSE },
     { "Rescan mirrors",              "R", GLFW_KEY_R, cmd_rescan_mirrors,    NULL,                  SOL_FALSE },
-    { "Reload scene",                "L", GLFW_KEY_L, cmd_reload_scene,      NULL,                  SOL_FALSE }
+    { "Reload scene",                "L", GLFW_KEY_L, cmd_reload_scene,      NULL,                  SOL_FALSE },
+    { "Spawn whiteboard",            "B", GLFW_KEY_B, cmd_mint_whiteboard,   NULL,                  SOL_FALSE },
+    { "Mint codex (book)",           "V", GLFW_KEY_V, cmd_mint_codex,        NULL,                  SOL_FALSE },
+    { "Mint island",                 "H", GLFW_KEY_H, cmd_mint_island,       NULL,                  SOL_FALSE },
+    { "Mint church",                 "U", GLFW_KEY_U, cmd_mint_church,       can_mint_church,       SOL_FALSE },
+    { "Mint lantern",                "O", GLFW_KEY_O, cmd_mint_lantern,      NULL,                  SOL_FALSE },
+    { "Mint pond",                   "Q", GLFW_KEY_Q, cmd_mint_pond,         NULL,                  SOL_FALSE },
+    { "Mint dust emitter",           "E", GLFW_KEY_E, cmd_mint_dust,         NULL,                  SOL_FALSE },
+    { "Mint fox",                    "Y", GLFW_KEY_Y, cmd_mint_fox,          NULL,                  SOL_FALSE }
 };
 
 #define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
@@ -6159,38 +6732,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->g_was_down = g_now;
     }
 
-    /* B spawns a whiteboard facing you (item 8): plain furniture that
-       persists like everything else; drag ALIAS/NOTE cards onto its face. */
-    {
-        sol_bool b_now = glfwGetKey(w, GLFW_KEY_B) == GLFW_PRESS;
-        if (b_now && !st->b_was_down) {
-            Mesh    empty;
-            vec3    f = camera_forward(&st->camera);
-            vec3    pos, one;
-            float   yaw;
-            sol_u32 h;
-            f.y = 0.0f;
-            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
-            f   = vec3_normalize(f);
-            pos = vec3_add(st->camera.pos, vec3_scale(f, 2.2f));
-            pos.y = mint_ground(st, pos) + 0.9f;  /* bottom-origin: face
-                                              center ~1.5 above YOUR ground —
-                                              islands lift the board too */
-            yaw = atan2f(-f.x, -f.z);      /* board +Z looks back at you */
-            one = vec3_make(1.0f, 1.0f, 1.0f);
-            memset(&empty, 0, sizeof empty);
-            h = scene_add(&st->scene, 0, empty, pos,
-                          quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw), one);
-            scene_mesh_ref_set(&st->scene, h, "board");
-            scene_meta_set(&st->scene, h, "name", "board");
-            scene_resolve_meshes(&st->scene);
-            st->selected_handle = h;
-            scene_save(&st->scene, "scene.stml");
-            printf("board #%u spawned — drag cards onto it\n", (unsigned)h);
-        }
-        st->b_was_down = b_now;
-    }
-
     /* C arms a connection from the selected board card (item 8): the next
        press on a second card of the same board births an ARROW object —
        two `connects` rels made visible. C again disarms. */
@@ -6264,391 +6805,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                    board ? " on the board" : "");
         }
         st->n_was_down = n_now;
-    }
-
-    /* V mints a CODEX in front of you (item 9): a procedural bound book —
-       cover + page block as a small GROUP, each part wearing its own
-       material. Proportions draw from real binding ranges and PERSIST
-       (they live in the parts' mesh attrs); press it a few times for a
-       shelf of individuals. */
-    {
-        sol_bool v_now = glfwGetKey(w, GLFW_KEY_V) == GLFW_PRESS;
-        if (v_now && !st->v_was_down) {
-            Mesh    empty;
-            vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
-            float   p[8];
-            vec3    f, pos;
-            float   yaw;
-            sol_u32 anchor, part;
-            int     leather;
-            if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
-            /* 2x real codex sizes — true-scale books read tiny in the world
-               (Fran's call after the first shelf) */
-            p[1] = mint_range(0.36f, 0.68f);             /* h: octavo..folio   */
-            p[0] = p[1] / mint_range(1.35f, 1.60f);      /* w from real ratios */
-            p[2] = mint_range(0.05f, 0.15f);             /* t (leaf count)     */
-            p[3] = mint_range(0.010f, 0.018f);           /* board thickness    */
-            p[4] = mint_range(0.006f, 0.012f);           /* squares            */
-            p[5] = mint_range(0.40f, 1.00f);             /* spine roundness    */
-            p[6] = (float)(int)mint_range(3.0f, 5.99f);  /* raised bands       */
-            p[7] = (mint_range(0.0f, 1.0f) < 0.30f) ? 1.0f : 0.0f;   /* clasp */
-            leather = (int)mint_range(0.0f, 2.99f);
-            f = camera_forward(&st->camera);
-            f.y = 0.0f;
-            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
-            f   = vec3_normalize(f);
-            pos = vec3_add(st->camera.pos, vec3_scale(f, 1.6f));
-            pos.y = mint_ground(st, pos)
-                  + p[1] * 0.5f;                  /* standing: height spans +-h/2 */
-            yaw = atan2f(-f.z, f.x);              /* the spine (-x) faces you */
-            memset(&empty, 0, sizeof empty);
-            anchor = scene_add(&st->scene, 0, empty, pos,
-                               quat_mul(quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw),
-                                        quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f),
-                                                             sol_radians(-90.0f))),
-                               one);
-            scene_meta_set(&st->scene, anchor, "name", "codex");
-            part = scene_add(&st->scene, anchor, empty,
-                             vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
-            scene_mesh_ref_set(&st->scene, part, "book_cover");
-            scene_mesh_params_set(&st->scene, part, p, 8);
-            {
-                SceneObject *po = scene_get(&st->scene, part);
-                if (po) {
-                    Material m = material_default();
-                    m.base_color = (leather == 0) ? vec3_make(0.36f, 0.22f, 0.13f)
-                                 : (leather == 1) ? vec3_make(0.34f, 0.12f, 0.10f)
-                                                  : vec3_make(0.14f, 0.22f, 0.15f);
-                    m.roughness = 0.65f;
-                    po->material = m;
-                }
-            }
-            part = scene_add(&st->scene, anchor, empty,
-                             vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
-            scene_mesh_ref_set(&st->scene, part, "book_block");
-            scene_mesh_params_set(&st->scene, part, p, 5);
-            {
-                SceneObject *po = scene_get(&st->scene, part);
-                if (po) {
-                    Material m = material_default();
-                    m.base_color = vec3_make(0.88f, 0.84f, 0.72f);   /* cream leaves */
-                    m.roughness  = 0.92f;
-                    po->material = m;
-                }
-            }
-            scene_resolve_meshes(&st->scene);
-            st->selected_handle = anchor;
-            scene_save(&st->scene, "scene.stml");
-            printf("codex minted: %.0fx%.0fmm, %d bands, %s spine%s\n",
-                   (double)(p[0] * 1000.0f), (double)(p[1] * 1000.0f), (int)p[6],
-                   p[5] > 0.7f ? "round" : "shallow",
-                   p[7] > 0.5f ? ", clasped" : "");
-        }
-        st->v_was_down = v_now;
-    }
-
-    /* H mints a terrain ISLAND ahead of you, at your floor level (item 10):
-       press it while flying and the island FLOATS there — vertical
-       placement for free. room_type meta makes it LAND (architecture is
-       never draggable); the seed makes it THIS island forever. */
-    {
-        sol_bool h_now = glfwGetKey(w, GLFW_KEY_H) == GLFW_PRESS;
-        if (h_now && !st->h_was_down) {
-            static const char *isle[] = { "the heath", "the tor", "the fell",
-                                          "the moor", "the downs", "the crag" };
-            Mesh    empty;
-            vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
-            float   p[5];
-            vec3    f, pos;
-            sol_u32 h;
-            int     ni;
-            if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
-            p[0] = mint_range(24.0f, 44.0f);             /* w */
-            p[1] = mint_range(24.0f, 44.0f);             /* d */
-            p[2] = 56.0f;                                /* sub */
-            p[3] = mint_range(1.5f, 3.5f);               /* relief */
-            p[4] = (float)(int)mint_range(1.0f, 9999.0f);/* the identity */
-            ni   = (int)mint_range(0.0f, 5.99f);
-            f = camera_forward(&st->camera);
-            f.y = 0.0f;
-            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
-            f   = vec3_normalize(f);
-            pos = vec3_add(st->camera.pos, vec3_scale(f, p[0] * 0.5f + 6.0f));
-            pos.y = st->camera.pos.y - CAMERA_EYE_HEIGHT;  /* your floor level */
-            if (pos.y < 0.05f) pos.y = 0.0f;               /* grounded: exactly */
-            memset(&empty, 0, sizeof empty);
-            h = scene_add(&st->scene, 0, empty, pos, quat_identity(), one);
-            scene_mesh_ref_set(&st->scene, h, "terrain");
-            scene_mesh_params_set(&st->scene, h, p, 5);
-            scene_meta_set(&st->scene, h, "name", isle[ni]);
-            scene_meta_set(&st->scene, h, "room_type", "terrain");
-            {
-                SceneObject *to = scene_get(&st->scene, h);
-                if (to) {
-                    Material m = material_default();
-                    m.base_color = vec3_make(0.35f, 0.40f, 0.28f);  /* the shader
-                                                       palette overrides this */
-                    m.roughness  = 0.95f;
-                    to->material = m;
-                }
-            }
-            /* the WILD ISLAND dressing (P7 item 10): a hero tree, a couple
-               of erratics, and a pond IF the island has a real hollow —
-               so a minted island feels inhabited without a church (the
-               forest, flowers, scree and wind grow themselves). Children
-               of the island, in its LOCAL frame. */
-            {
-                float lowest = 1e30f, lowx = 0.0f, lowz = 0.0f, rim = -1e30f;
-                int   gx, gz;
-#define WILD_PLANT(ref, lx, lz, prm, np, texkind, nm)                     \
-                do {                                                       \
-                    float wy_ = terrain_height(p, 5, (lx), (lz));          \
-                    sol_u32 w_ = scene_add(&st->scene, h, empty,           \
-                                  vec3_make((lx), wy_, (lz)),              \
-                                  quat_identity(), one);                   \
-                    scene_mesh_ref_set(&st->scene, w_, (ref));             \
-                    if ((np) > 0)                                          \
-                        scene_mesh_params_set(&st->scene, w_, (prm), (np));\
-                    scene_meta_set(&st->scene, w_, "name", (nm));          \
-                    {   SceneObject *wo_ = scene_get(&st->scene, w_);      \
-                        if (wo_) { Material wm_ = material_default();      \
-                            wm_.base_color = vec3_make(1.0f, 1.0f, 1.0f);  \
-                            wm_.roughness = 1.0f; wm_.metallic = 1.0f;     \
-                            wo_->material = wm_; } }                       \
-                    scene_tex_ref_set(&st->scene, w_, (texkind));          \
-                } while (0)
-                /* scan for the lowest spot (the hollow) and the rim */
-                for (gz = -3; gz <= 3; gz++)
-                    for (gx = -3; gx <= 3; gx++) {
-                        float sx = (float)gx / 3.0f * 0.4f * p[0];
-                        float sz = (float)gz / 3.0f * 0.4f * p[1];
-                        float gh = terrain_height(p, 5, sx, sz);
-                        if (gh < lowest) { lowest = gh; lowx = sx; lowz = sz; }
-                        if (gh > rim) rim = gh;
-                    }
-                {   /* a lone tree off-center, species by seed */
-                    static const char *sp4[4] = { "oak", "pine", "birch", "cypress" };
-                    float tp[3];
-                    tp[0] = p[4] + 17.0f; tp[1] = 1.1f; tp[2] = 7.0f;
-                    WILD_PLANT(sp4[(int)p[4] & 3], -0.18f * p[0], 0.16f * p[1],
-                               tp, 3, "bark", "the lone tree");
-                }
-                {   /* two erratics */
-                    float bp[3];
-                    bp[0] = 0.9f; bp[1] = p[4] + 3.0f; bp[2] = 0.0f;
-                    WILD_PLANT("boulder", 0.22f * p[0], -0.20f * p[1], bp, 3,
-                               "stone", "erratic");
-                    bp[0] = 0.6f; bp[1] = p[4] + 9.0f; bp[2] = 0.6f;
-                    WILD_PLANT("boulder", 0.30f * p[0], -0.10f * p[1], bp, 3,
-                               "stone", "erratic");
-                }
-                if (rim - lowest > 1.2f) {   /* a real dip → a pond */
-                    float pp[3];
-                    sol_u32 pondh = scene_add(&st->scene, h, empty,
-                                  vec3_make(lowx, lowest + 0.2f, lowz),
-                                  quat_identity(), one);
-                    scene_mesh_ref_set(&st->scene, pondh, "pond");
-                    pp[0] = 3.5f; pp[1] = 1.5f; pp[2] = p[4];
-                    scene_mesh_params_set(&st->scene, pondh, pp, 3);
-                    scene_meta_set(&st->scene, pondh, "name", "tarn");
-                }
-#undef WILD_PLANT
-            }
-
-            scene_resolve_meshes(&st->scene);
-            meadow_rebuild(st);                  /* a new island, new grass */
-            forest_rebuild(st);                  /* and its forest */
-            st->selected_handle = h;
-            scene_save(&st->scene, "scene.stml");
-            printf("%s rises: %.0fx%.0fm, relief %.1fm, seed %d%s\n",
-                   isle[ni], (double)p[0], (double)p[1], (double)p[3],
-                   (int)p[4], pos.y > 0.05f ? " (floating)" : "");
-        }
-        st->h_was_down = h_now;
-    }
-
-    /* U mints THE CHURCH on the island underfoot (P6 item 9): the
-       J-overlay's commission, built. The datum is the MAX of the pier
-       samples (ruled: the building must nowhere float); the group is
-       one anchor + four members sharing the island's identity, yawed
-       a quarter-turn when the plot is deeper than wide. room_type
-       makes it architecture — never draggable. */
-    {
-        sol_bool u_now = glfwGetKey(w, GLFW_KEY_U) == GLFW_PRESS;
-        if (u_now && !st->u_was_down && st->current_terrain != 0) {
-            SceneObject *isl = scene_get(&st->scene, st->current_terrain);
-            sol_u32 had = 0;
-            if (isl && isl->nid) {     /* a church here already? then U
-                                          is the RUIN DIAL: walk the
-                                          ladder 0 -> .3 -> .6 -> .9 -> 0 */
-                sol_u32 ai;
-                for (ai = 0; ai < st->scene.count && !had; ai++) {
-                    SceneObject *a = &st->scene.objects[ai];
-                    const char *rt = scene_meta_get(&st->scene, a->handle,
-                                                    "room_type");
-                    const char *pl = scene_meta_get(&st->scene, a->handle,
-                                                    "plot");
-                    if (rt && strcmp(rt, "church") == 0 &&
-                        pl && strcmp(pl, isl->nid) == 0)
-                        had = a->handle;
-                }
-            }
-            if (had) {
-                float r = 0.0f, nr;
-                sol_u32 ci;
-                for (ci = 0; ci < st->scene.count; ci++) {
-                    SceneObject *c = &st->scene.objects[ci];
-                    if (c->parent != had || !c->mesh_ref) continue;
-                    if (c->mesh_param_count >= 5) r = c->mesh_params[4];
-                    break;
-                }
-                nr = r < 0.15f ? 0.3f : r < 0.45f ? 0.6f :
-                     r < 0.75f ? 0.9f : 0.0f;
-                for (ci = 0; ci < st->scene.count; ci++) {
-                    SceneObject *c = &st->scene.objects[ci];
-                    float np[5];
-                    char  okey[160];
-                    if (c->parent != had || !c->mesh_ref) continue;
-                    if (strncmp(c->mesh_ref, "church_", 7) != 0) continue;
-                    /* params are the mesh's IDENTITY (P4 item 4): give
-                       the old shape back to the registry BEFORE the
-                       params change, or resolve will see a mesh already
-                       present and keep the old stones standing */
-                    if (c->mesh.index_count != 0 &&
-                        mesh_asset_key(c, okey)) {
-                        asset_release(&g_mesh_assets, okey);
-                        memset(&c->mesh, 0, sizeof c->mesh);
-                    }
-                    np[0] = c->mesh_params[0];
-                    np[1] = c->mesh_params[1];
-                    np[2] = c->mesh_params[2];
-                    np[3] = -1.0f;            /* style: still derived  */
-                    np[4] = nr;
-                    scene_mesh_params_set(&st->scene, c->handle, np, 5);
-                }
-                scene_resolve_meshes(&st->scene);
-                collide_rebuild(&st->colliders, &st->scene);
-                scene_save(&st->scene, "scene.stml");
-                printf(nr > 0.0f
-                           ? "the church decays: ruin %.1f\n"
-                           : "the church stands whole again\n", nr);
-            } else if (isl && isl->mesh_ref &&
-                strcmp(isl->mesh_ref, "terrain") == 0) {
-                float cw = mesh_ref_param("terrain", isl->mesh_params,
-                                          isl->mesh_param_count, "w");
-                float cd = mesh_ref_param("terrain", isl->mesh_params,
-                                          isl->mesh_param_count, "d");
-                float cseed = mesh_ref_param("terrain", isl->mesh_params,
-                                             isl->mesh_param_count, "seed");
-                float params[3];
-                ChurchPlan cp;
-                float datum = 0.0f, x, z;
-                int   i2, j2;
-                Mesh  empty;
-                vec3  one = vec3_make(1.0f, 1.0f, 1.0f);
-                quat  rot;
-                sol_u32 anchor;
-                params[0] = cw; params[1] = cd; params[2] = cseed;
-                church_plan(&cp, params, 3);
-                for (i2 = 0; i2 <= cp.nbays; i2++)        /* the datum */
-                    for (j2 = 0; j2 <= PIER_ROW_N_WALL; j2++) {
-                        float lx, lz, hgt;
-                        if (!plan_pier(&cp, i2, j2, &x, &z)) continue;
-                        plan_to_local(&cp, x, z, &lx, &lz);
-                        hgt = terrain_height(isl->mesh_params,
-                                             isl->mesh_param_count, lx, lz);
-                        if (hgt > datum) datum = hgt;
-                    }
-                for (i2 = 0; i2 < 6; i2++) {
-                    float lx, lz, hgt;
-                    if (!plan_apse_pier(&cp, i2, &x, &z)) continue;
-                    plan_to_local(&cp, x, z, &lx, &lz);
-                    hgt = terrain_height(isl->mesh_params,
-                                         isl->mesh_param_count, lx, lz);
-                    if (hgt > datum) datum = hgt;
-                }
-                rot = cp.swapped
-                    ? quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
-                                           -0.5f * (float)SOL_PI)
-                    : quat_identity();
-                memset(&empty, 0, sizeof empty);
-                anchor = scene_add(&st->scene, 0, empty,
-                                   vec3_add(isl->pos,
-                                            vec3_make(0.0f, datum, 0.0f)),
-                                   rot, one);
-                scene_meta_set(&st->scene, anchor, "room_type", "church");
-                if (isl->nid)            /* the dial finds it next press */
-                    scene_meta_set(&st->scene, anchor, "plot", isl->nid);
-                {
-                    const char *nm = scene_meta_get(&st->scene, isl->handle,
-                                                    "name");
-                    char title[96];
-                    snprintf(title, sizeof title, "the church of %s",
-                             nm ? nm : "the island");
-                    scene_meta_set(&st->scene, anchor, "name", title);
-                }
-                {
-                    static const char *refs[5] = {
-                        "church_stone", "church_glass",
-                        "church_roof",  "church_floor",
-                        "church_decals"
-                    };
-                    int r2;
-                    for (r2 = 0; r2 < 5; r2++) {
-                        sol_u32 ch = scene_add(&st->scene, anchor, empty,
-                                               vec3_make(0, 0, 0),
-                                               quat_identity(), one);
-                        scene_mesh_ref_set(&st->scene, ch, refs[r2]);
-                        scene_mesh_params_set(&st->scene, ch, params, 3);
-                        {
-                            SceneObject *co = scene_get(&st->scene, ch);
-                            if (co) {
-                                Material mm = material_default();
-                                if (r2 == 0) {
-                                    /* synthesized stone (texture side-quest):
-                                       the maps carry tone, the factors step
-                                       aside (the shader multiplies them in) */
-                                    mm.base_color = vec3_make(1.0f, 1.0f, 1.0f);
-                                    mm.roughness  = 1.0f;
-                                    mm.metallic   = 1.0f;
-                                } else if (r2 == 1) {
-                                    mm.base_color = vec3_make(0.02f, 0.025f, 0.045f);
-                                    mm.roughness  = 0.08f;
-                                    /* past 1.0 on purpose: that's what bloom
-                                       bites on — windows radiate, not paint */
-                                    mm.emissive   = vec3_make(1.8f, 1.12f, 0.5f);
-                                } else if (r2 == 2) {
-                                    mm.base_color = vec3_make(0.30f, 0.32f, 0.36f);
-                                    mm.roughness  = 0.55f;
-                                } else {
-                                    mm.base_color = vec3_make(1.0f, 1.0f, 1.0f);
-                                    mm.roughness  = 1.0f;
-                                    mm.metallic   = 1.0f;
-                                }
-                                co->material = mm;
-                            }
-                            if (r2 == 0) {
-                                scene_tex_ref_set(&st->scene, ch, "stone");
-                            } else if (r2 == 3) {
-                                /* the floor wears flagstones: its own seed,
-                                   paver-scale courses (knobs 0..3) */
-                                float fp[4];
-                                fp[0] = cseed + 7.0f;
-                                fp[1] = 2.4f; fp[2] = 0.8f; fp[3] = 0.8f;
-                                scene_tex_ref_set(&st->scene, ch, "stone");
-                                scene_tex_params_set(&st->scene, ch, fp, 4);
-                            }
-                        }
-                    }
-                }
-                scene_resolve_meshes(&st->scene);
-                collide_rebuild(&st->colliders, &st->scene);
-                scene_save(&st->scene, "scene.stml");
-                printf("a church rises on the island (datum %.2f%s)\n",
-                       datum, cp.swapped ? ", turned to the long axis" : "");
-            }
-        }
-        st->u_was_down = u_now;
     }
 
     /* Z composes THE ABBEY (P6 item 10, the phase's portfolio): one large
@@ -7018,191 +7174,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                    datum);
         }
         st->z_was_down = z_now;
-    }
-
-    /* O mints a LANTERN (P4 item 5): an ordinary draggable prop whose light
-       is META — the light rides the object's transform, so carrying the
-       lantern carries its pool of warmth. The body is the shared unit box
-       (one more borrower of "m|box"); piece 2 gives it an emissive heart. */
-    {
-        sol_bool o_now = glfwGetKey(w, GLFW_KEY_O) == GLFW_PRESS;
-        if (o_now && !st->o_was_down) {
-            Mesh    empty;
-            vec3    f, pos;
-            sol_u32 h;
-            f = camera_forward(&st->camera);
-            f.y = 0.0f;
-            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
-            f   = vec3_normalize(f);
-            pos = vec3_add(st->camera.pos, vec3_scale(f, 1.5f));
-            pos.y = st->camera.pos.y - 0.45f;     /* held at hand height */
-            memset(&empty, 0, sizeof empty);
-            h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
-                          vec3_make(0.16f, 0.16f, 0.16f));
-            scene_mesh_ref_set(&st->scene, h, "box");
-            scene_meta_set(&st->scene, h, "name", "lantern");
-            scene_meta_set(&st->scene, h, "light", "point");
-            scene_meta_set(&st->scene, h, "light_color", "1.0 0.72 0.42");
-            scene_meta_set(&st->scene, h, "light_intensity", "14");
-            scene_meta_set(&st->scene, h, "light_radius", "9");
-            scene_component_add(&st->scene, h, "flicker", (const float *)0, 0);
-            {
-                /* sparks (item 7): the lantern's other voice — a few embers
-                   a second, rising off the flame and REDDENING as they die.
-                   Birth rgb > 1 on purpose: each ember is bloom's customer,
-                   exactly like the emissive heart below. */
-                static const float SPARKS[24] = {
-                    7.0f, 1.4f,                   /* rate, life */
-                    0.0f, 0.6f, 0.0f,             /* velocity: rising */
-                    0.12f, 0.15f, 0.12f,          /* spread: a loose plume */
-                    0.05f, 0.05f, 0.05f,          /* born AT the flame */
-                    0.012f, 0.004f,               /* shrinking as they cool */
-                    2.2f, 1.10f, 0.35f, 0.9f,     /* white-gold birth (HDR) */
-                    1.2f, 0.25f, 0.08f, 0.0f,     /* ember-red death */
-                    0.0f, -0.25f, 0.0f            /* gravity wins in the end */
-                };
-                scene_component_add(&st->scene, h, "emit", SPARKS, 24);
-            }
-            {
-                SceneObject *lo = scene_get(&st->scene, h);
-                if (lo) {
-                    Material m = material_default();
-                    m.base_color = vec3_make(0.95f, 0.78f, 0.50f);
-                    m.emissive   = vec3_make(1.60f, 0.95f, 0.45f);  /* the heart
-                                                       (P4 i5 p2): > 1.0 on
-                                                       purpose — bloom's first
-                                                       customer in piece 3 */
-                    m.roughness  = 0.40f;
-                    lo->material = m;
-                }
-            }
-            scene_resolve_meshes(&st->scene);
-            st->selected_handle = h;
-            scene_save(&st->scene, "scene.stml");
-            printf("a lantern is lit — drag it; the light goes along\n");
-        }
-        st->o_was_down = o_now;
-    }
-
-    /* Q mints a POND (P7 item 8): a disc of water dropped ahead, its
-       surface settled to the HOLLOW the ground makes there — the spec's
-       "the mint samples terrain_height minima." Flat ground gives a
-       shallow puddle; a dip gives a real pond. */
-    {
-        sol_bool q_now = glfwGetKey(w, GLFW_KEY_Q) == GLFW_PRESS;
-        if (q_now && !st->q_was_down) {
-            Mesh    empty;
-            vec3    f, ctr;
-            float   r = 5.0f, lowest, params[3];
-            int     a;
-            sol_u32 h;
-            f = camera_forward(&st->camera);
-            f.y = 0.0f;
-            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
-            f   = vec3_normalize(f);
-            ctr = vec3_add(st->camera.pos, vec3_scale(f, r + 2.0f));
-            /* find the hollow: sample the ground at the center + a ring,
-               the surface settles a little above the lowest point */
-            lowest = mint_ground(st, ctr);
-            for (a = 0; a < 8; a++) {
-                float ang = (float)a / 8.0f * 6.2831853f;
-                vec3  s = ctr;
-                float g;
-                s.x += cosf(ang) * r * 0.7f;
-                s.z += sinf(ang) * r * 0.7f;
-                g = mint_ground(st, s);
-                if (g < lowest) lowest = g;
-            }
-            ctr.y = lowest + 0.25f;          /* the water surface */
-            memset(&empty, 0, sizeof empty);
-            h = scene_add(&st->scene, 0, empty, ctr, quat_identity(),
-                          vec3_make(1.0f, 1.0f, 1.0f));
-            scene_mesh_ref_set(&st->scene, h, "pond");
-            params[0] = r; params[1] = 2.0f; params[2] = 7.0f;
-            scene_mesh_params_set(&st->scene, h, params, 3);
-            scene_meta_set(&st->scene, h, "name", "pond");
-            scene_resolve_meshes(&st->scene);
-            st->selected_handle = h;
-            scene_save(&st->scene, "scene.stml");
-            printf("a pond fills the hollow (surface %.2f)\n", ctr.y);
-        }
-        st->q_was_down = q_now;
-    }
-
-    /* E mints a DUST EMITTER (P4 item 7): a small dim marker block whose
-       emit component fills the air around it with drifting motes. The
-       component is attached BARE — the schema defaults ARE dust, so the
-       file gets a single <component type="emit"/> line. The marker is an
-       ordinary prop: pick it, drag it, the shaft of dust moves along. */
-    {
-        sol_bool e_now = glfwGetKey(w, GLFW_KEY_E) == GLFW_PRESS;
-        if (e_now && !st->e_was_down) {
-            Mesh    empty;
-            vec3    f, pos;
-            sol_u32 h;
-            f = camera_forward(&st->camera);
-            f.y = 0.0f;
-            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
-            f   = vec3_normalize(f);
-            pos = vec3_add(st->camera.pos, vec3_scale(f, 2.0f));
-            pos.y = st->camera.pos.y - 0.25f;     /* the shaft's heart, chest-high */
-            memset(&empty, 0, sizeof empty);
-            h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
-                          vec3_make(0.05f, 0.05f, 0.05f));
-            scene_mesh_ref_set(&st->scene, h, "box");
-            scene_meta_set(&st->scene, h, "name", "dust");
-            scene_component_add(&st->scene, h, "emit", (const float *)0, 0);
-            {
-                SceneObject *eo = scene_get(&st->scene, h);
-                if (eo) {
-                    Material m = material_default();
-                    m.base_color = vec3_make(0.35f, 0.33f, 0.30f);
-                    m.roughness  = 0.9f;
-                    eo->material = m;
-                }
-            }
-            scene_resolve_meshes(&st->scene);
-            st->selected_handle = h;
-            scene_save(&st->scene, "scene.stml");
-            printf("dust hangs in the air — drag the little block to move the shaft\n");
-        }
-        st->e_was_down = e_now;
-    }
-
-    /* Y mints a FOX (P4 item 9 + the wander sidequest): a rigged glb on an
-       empty anchor — meta skin_glb names the file, the skeleton poses it
-       fresh every frame, and the wander brain gives it somewhere to be.
-       Scale 0.007 because the fox is authored in centimeters (~155 long).
-       Not pickable in v1 (an empty has no AABB). */
-    {
-        sol_bool y_now = glfwGetKey(w, GLFW_KEY_Y) == GLFW_PRESS;
-        if (y_now && !st->y_was_down) {
-            Mesh    empty;
-            vec3    f, pos;
-            sol_u32 h;
-            f = camera_forward(&st->camera);
-            f.y = 0.0f;
-            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
-            f   = vec3_normalize(f);
-            pos = vec3_add(st->camera.pos, vec3_scale(f, 2.5f));
-            pos.y = st->camera.pos.y - CAMERA_EYE_HEIGHT;     /* on the floor */
-            memset(&empty, 0, sizeof empty);
-            h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
-                          vec3_make(0.007f, 0.007f, 0.007f));
-            scene_meta_set(&st->scene, h, "name", "fox");
-            scene_meta_set(&st->scene, h, "skin_glb", "Fox.glb");
-            scene_component_add(&st->scene, h, "animate", (const float *)0, 0);
-                                       /* the persisted rule: clip 0 if it
-                                          ever stops wandering */
-            scene_component_add(&st->scene, h, "wander", (const float *)0, 0);
-                                       /* bare = a gentle meanderer; delete
-                                          the line + L and it stands its
-                                          ground */
-            st->selected_handle = h;
-            scene_save(&st->scene, "scene.stml");
-            printf("a fox arrives — it has somewhere to be\n");
-        }
-        st->y_was_down = y_now;
     }
 
     /* Backspace dismisses a selected TOMBSTONE — manual, deliberate (the 6c
