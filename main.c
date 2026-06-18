@@ -9517,6 +9517,18 @@ static void render(AppState *state) {
             wtext_block(uf, vp, face, nm,
                         -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
                         ink_r, ink_g, ink_b);
+            {   /* the same label on the BACK face, so the tablet names itself
+                   from both sides (rotate 180 about Y so it reads, not mirrors;
+                   the engine never culls back faces, so the back is visible) */
+                mat4 back = mat4_mul(
+                    mat4_mul(scene_world_matrix(&state->scene, o),
+                             quat_to_mat4(quat_from_axis_angle(
+                                 vec3_make(0.0f, 1.0f, 0.0f), sol_radians(180.0f)))),
+                    mat4_translate(vec3_make(0.0f, 0.0f, ct * 0.5f + 0.0008f)));
+                wtext_block(uf, vp, back, nm,
+                            -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
+                            ink_r, ink_g, ink_b);
+            }
             /* the note body: the inline text meta, wrapped to the card.
                While the note has focus, a caret tails the text — the meta
                mirrors every keystroke, so this renders the typing live. */
