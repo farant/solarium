@@ -119,7 +119,6 @@ typedef struct {
 #define PREFILTER_SIZE  128    /* specular prefilter base (mip 0 = sharpest reflection) */
 #define PREFILTER_MIPS  5      /* roughness levels 0..1 across mips 0..4 */
 #define BRDF_LUT_SIZE   512    /* BRDF integration LUT (NoV x roughness) */
-#define PROBE_SIZE      256    /* P9 item 4: reflection-probe capture face resolution */
 
 /* --- shaders: GLSL source handed to the backend (still app-authored) --- */
 /* Shader sources are DATA the app hands down through the unchanged
@@ -2539,12 +2538,6 @@ typedef struct {
     RhiPipeline prefilter_pipeline;    /* the GGX importance-sampling pass */
     sol_bool    show_prefilter;        /* 'P' cycles the prefilter-mip inspector */
     int         prefilter_mip;         /* which roughness level the inspector shows */
-    RhiTexture  probe_prefilter;       /* P9 item 4: the church reflection probe's prefilter */
-    RhiTexture  probe_irradiance;      /* P9 item 4: the probe's diffuse irradiance */
-    vec3        probe_center;          /* its capture point */
-    float       probe_radius;          /* objects within use the probe, not the global IBL */
-    sol_bool    probe_valid;
-    sol_bool    capturing_probe;       /* guard: church draws use the GLOBAL IBL while baking */
     sol_bool    p_was_down;
     RhiRenderTarget brdf_lut_rt;       /* BRDF integration LUT, 2D RG (C2) */
     RhiPipeline     brdf_lut_pipeline;
@@ -4271,7 +4264,6 @@ static void hdr_reload(AppState *st, const char *path);  /* the abbey key
                                           switches the sky (defined with
                                           the watcher below) */
 static void apply_time_of_day(AppState *st);   /* P8 item 9: `-toggle's sky + sun */
-static void rebake_probe(AppState *st, vec3 center, float radius);  /* P9 item 4 */
 static void apply_kind_materials(Scene *s);    /* likewise */
 static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
@@ -6640,14 +6632,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 }
                 scene_resolve_meshes(&st->scene);
                 collide_rebuild(&st->colliders, &st->scene);
-                {   /* P9 item 4: bake the church's reflection probe */
-                    SceneObject *ao = scene_get(&st->scene, anchor);
-                    if (ao) {
-                        mat4 am = scene_world_matrix(&st->scene, ao);
-                        rebake_probe(st, vec3_make(am.m[12], am.m[13] + 3.0f,
-                                                   am.m[14]), 22.0f);
-                    }
-                }
                 scene_save(&st->scene, "scene.stml");
                 printf("a church rises on the island (datum %.2f%s)\n",
                        datum, cp.swapped ? ", turned to the long axis" : "");
@@ -7013,14 +6997,6 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
             scene_resolve_meshes(&st->scene);
             collide_rebuild(&st->colliders, &st->scene);
-            {   /* P9 item 4: bake the abbey's reflection probe */
-                SceneObject *ao = scene_get(&st->scene, anchor);
-                if (ao) {
-                    mat4 am = scene_world_matrix(&st->scene, ao);
-                    rebake_probe(st, vec3_make(am.m[12], am.m[13] + 3.0f,
-                                               am.m[14]), 22.0f);
-                }
-            }
             forest_rebuild(st);                /* the hill grows its forest too */
             meadow_rebuild(st);                /* the hill grows its grass —
                                                   and through the roofless bays */
@@ -7338,18 +7314,18 @@ static void build_env_cubemap(AppState *state) {
 /* Convolve the env cubemap into a diffuse irradiance cubemap (B2): same per-face
    loop, but the shader integrates the cosine-weighted hemisphere around each
    output direction. Tiny target, no mips. */
-/* convolve any input cube into a diffuse-irradiance cube `out` — the global IBL
-   and the P9 item 4 probe share this. */
-static void irradiance_into(AppState *state, RhiTexture input, RhiTexture out) {
+static void build_irradiance_map(AppState *state) {
     int f;
+    state->irradiance_cubemap = rhi_create_cubemap(IRRADIANCE_SIZE, SOL_FALSE);
+
     rhi_set_pipeline(state->irradiance_pipeline);
-    rhi_bind_texture(input, 0);
+    rhi_bind_texture(state->env_cubemap, 0);          /* the B1 cubemap is the input */
     rhi_set_uniform_int  ("uEnvCube", 0);
     rhi_set_uniform_float("uTanHalfFovY", 1.0f);
     rhi_set_uniform_float("uAspect",      1.0f);
     for (f = 0; f < 6; f++) {
         vec3 r = vec3_cross(g_face_fwd[f], g_face_up[f]);
-        rhi_begin_cubemap_face(out, f, 0, IRRADIANCE_SIZE);
+        rhi_begin_cubemap_face(state->irradiance_cubemap, f, 0, IRRADIANCE_SIZE);
         rhi_set_uniform_vec3("uCamForward", g_face_fwd[f].x, g_face_fwd[f].y, g_face_fwd[f].z);
         rhi_set_uniform_vec3("uCamRight",   r.x, r.y, r.z);
         rhi_set_uniform_vec3("uCamUp",      g_face_up[f].x, g_face_up[f].y, g_face_up[f].z);
@@ -7358,20 +7334,15 @@ static void irradiance_into(AppState *state, RhiTexture input, RhiTexture out) {
     }
 }
 
-static void build_irradiance_map(AppState *state) {
-    state->irradiance_cubemap = rhi_create_cubemap(IRRADIANCE_SIZE, SOL_FALSE);
-    irradiance_into(state, state->env_cubemap, state->irradiance_cubemap);
-}
-
 /* Build the specular prefilter cubemap (C1): each mip is the env convolved with
    the GGX lobe for an increasing roughness. Same per-face loop, but now also per
    mip (a roughness level), rendering into that mip via rhi_begin_cubemap_face. */
-/* GGX-prefilter any input cube into `out` — the global IBL and the P9 item 4
-   reflection probe share this (same pipeline, different source). */
-static void prefilter_into(AppState *state, RhiTexture input, RhiTexture out) {
+static void build_prefilter_map(AppState *state) {
     int mip, f;
+    state->prefilter_cubemap = rhi_create_cubemap(PREFILTER_SIZE, SOL_TRUE);
+
     rhi_set_pipeline(state->prefilter_pipeline);
-    rhi_bind_texture(input, 0);
+    rhi_bind_texture(state->env_cubemap, 0);          /* sample the (mipmapped, finite) env cube */
     rhi_set_uniform_int  ("uEnvCube", 0);
     rhi_set_uniform_float("uTanHalfFovY", 1.0f);
     rhi_set_uniform_float("uAspect",      1.0f);
@@ -7381,7 +7352,7 @@ static void prefilter_into(AppState *state, RhiTexture input, RhiTexture out) {
         rhi_set_uniform_float("uRoughness", rough);
         for (f = 0; f < 6; f++) {
             vec3 r = vec3_cross(g_face_fwd[f], g_face_up[f]);
-            rhi_begin_cubemap_face(out, f, mip, sz);
+            rhi_begin_cubemap_face(state->prefilter_cubemap, f, mip, sz);
             rhi_set_uniform_vec3("uCamForward", g_face_fwd[f].x, g_face_fwd[f].y, g_face_fwd[f].z);
             rhi_set_uniform_vec3("uCamRight",   r.x, r.y, r.z);
             rhi_set_uniform_vec3("uCamUp",      g_face_up[f].x, g_face_up[f].y, g_face_up[f].z);
@@ -7389,11 +7360,6 @@ static void prefilter_into(AppState *state, RhiTexture input, RhiTexture out) {
             rhi_end_pass();
         }
     }
-}
-
-static void build_prefilter_map(AppState *state) {
-    state->prefilter_cubemap = rhi_create_cubemap(PREFILTER_SIZE, SOL_TRUE);
-    prefilter_into(state, state->env_cubemap, state->prefilter_cubemap);
 }
 
 /* Bake the BRDF integration LUT (C2): a single 2D fullscreen pass into a render
@@ -7469,8 +7435,6 @@ static void hdr_reload(AppState *st, const char *path) {
     build_env_cubemap(st);
     build_irradiance_map(st);
     build_prefilter_map(st);
-    if (st->probe_valid)               /* P9 item 4: re-capture under the new sky */
-        rebake_probe(st, st->probe_center, st->probe_radius);
     printf("environment hot-reloaded: %s\n", path);
 }
 
@@ -8789,28 +8753,10 @@ static void bind_scene_uniforms(const AppState *state, RhiPipeline pipeline,
         rhi_set_uniform_float("uUseIBL", state->irradiance_cubemap.id ? 1.0f : 0.0f);
         rhi_set_uniform_float("uAmbientScale", state->ambient_scale);   /* item 7: room feel */
         if (state->irradiance_cubemap.id) {
-            {   /* P9 item 4: inside the church BOTH the diffuse irradiance and
-                   the specular prefilter come from the room PROBE, not the sky.
-                   The capture uses the global IBL (capturing_probe), so the probe
-                   never reflects its own previous self. */
-                RhiTexture irr = state->irradiance_cubemap;
-                RhiTexture pf  = state->prefilter_cubemap;
-                if (!state->capturing_probe && state->probe_valid &&
-                    state->probe_prefilter.id) {
-                    float dx = model.m[12] - state->probe_center.x;
-                    float dy = model.m[13] - state->probe_center.y;
-                    float dz = model.m[14] - state->probe_center.z;
-                    if (dx * dx + dy * dy + dz * dz <
-                        state->probe_radius * state->probe_radius) {
-                        if (state->probe_irradiance.id) irr = state->probe_irradiance;
-                        pf = state->probe_prefilter;
-                    }
-                }
-                rhi_bind_texture(irr, 5);
-                rhi_set_uniform_int("uIrradianceMap", 5);
-                rhi_bind_texture(pf, 6);
-                rhi_set_uniform_int("uPrefilterMap", 6);
-            }
+            rhi_bind_texture(state->irradiance_cubemap, 5);
+            rhi_set_uniform_int("uIrradianceMap", 5);
+            rhi_bind_texture(state->prefilter_cubemap, 6);
+            rhi_set_uniform_int("uPrefilterMap", 6);
             rhi_bind_texture(rhi_render_target_texture(state->brdf_lut_rt), 7);
             rhi_set_uniform_int("uBrdfLUT", 7);
         }
@@ -8866,53 +8812,6 @@ static void draw_glass(const AppState *state, Mesh mesh, mat4 model, mat4 view,
     rhi_bind_vertex_buffer(mesh.vbuffer);
     rhi_bind_index_buffer(mesh.ibuffer);
     rhi_draw_indexed(0, mesh.index_count);
-}
-
-/* P9 item 4: capture the church interior into a cubemap from `center`, prefilter
-   it, and store it as the room's reflection probe. A re-callable op (the
-   placement-rebake future just adds triggers). The cube FBO has no depth, so
-   church meshes draw in submission order — the heavy prefilter blur forgives the
-   overlap (escalate to cube-face depth if it shows). */
-static void rebake_probe(AppState *st, vec3 center, float radius) {
-    RhiTexture cube;
-    mat4       proj;
-    int        f;
-    sol_u32    i;
-    cube = rhi_create_cubemap(PROBE_SIZE, SOL_TRUE);
-    if (!cube.id) return;
-    proj = mat4_perspective(sol_radians(90.0f), 1.0f, 0.1f, 400.0f);
-    st->capturing_probe = SOL_TRUE;          /* church draws use the global IBL */
-    for (f = 0; f < 6; f++) {
-        mat4 view = mat4_look_at(center, vec3_add(center, g_face_fwd[f]),
-                                 g_face_up[f]);
-        rhi_begin_cubemap_face(cube, f, 0, PROBE_SIZE);
-        for (i = 0; i < st->scene.count; i++) {
-            const SceneObject *o  = &st->scene.objects[i];
-            const char        *mr = o->mesh_ref;
-            mat4               model;
-            if (o->mesh.index_count == 0 || !mr) continue;
-            if (strcmp(mr, "church_stone") != 0 && strcmp(mr, "church_glass") != 0 &&
-                strcmp(mr, "church_roof")  != 0 && strcmp(mr, "church_floor") != 0)
-                continue;
-            model = scene_world_matrix(&st->scene, o);
-            draw_mesh(st, o->mesh, model, view, proj, center, 0.0f, o->material);
-        }
-        rhi_end_pass();
-    }
-    st->capturing_probe = SOL_FALSE;
-    rhi_cubemap_generate_mips(cube);
-    if (st->probe_prefilter.id) rhi_destroy_texture(st->probe_prefilter);
-    st->probe_prefilter = rhi_create_cubemap(PREFILTER_SIZE, SOL_TRUE);
-    prefilter_into(st, cube, st->probe_prefilter);
-    if (st->probe_irradiance.id) rhi_destroy_texture(st->probe_irradiance);
-    st->probe_irradiance = rhi_create_cubemap(IRRADIANCE_SIZE, SOL_FALSE);
-    irradiance_into(st, cube, st->probe_irradiance);
-    rhi_destroy_texture(cube);
-    st->probe_center = center;
-    st->probe_radius = radius;
-    st->probe_valid  = SOL_TRUE;
-    printf("reflection probe baked at (%.1f %.1f %.1f) r=%.1f\n",
-           (double)center.x, (double)center.y, (double)center.z, (double)radius);
 }
 
 /* item 9: the skinned draw — the same uniform vocabulary on the skinned
