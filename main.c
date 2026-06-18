@@ -2640,6 +2640,7 @@ typedef struct AppState {
     double      scroll_accum;      /* scroll events accumulate here, drained per frame */
     /* picking / selection (item 4) */
     sol_u32     selected_handle;   /* 0 = none */
+    sol_u32     carried;          /* object being carried; 0 = none */
     sol_bool    lmb_was_down;
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
     /* drag-to-place (P3 item 4) */
@@ -6361,6 +6362,94 @@ static void cmd_mint_fox(AppState *st) {
     printf("a fox arrives — it has somewhere to be\n");
 }
 
+/* ---- Carry: pick up / place the selected object (palette spec) -------------- */
+
+#define CARRY_HOLD_DIST  1.6f    /* how far in front the held object floats */
+#define CARRY_HOLD_DROP  0.35f   /* and a little below the crosshair */
+#define CARRY_MAX_REACH  6.0f    /* aim-ray ground hit beyond this -> fixed drop */
+#define CARRY_DROP_DIST  2.0f    /* fixed horizontal drop distance fallback */
+
+/* What carry actually grabs for `hit`, mirroring drag_begin's gate (main.c:4158):
+   non-PLAIN cards move individually; KIND_PLAIN props move as their free-standing
+   group root (not an arrow, not the floor, not architecture). 0 = not movable. */
+static sol_u32 carry_target(AppState *st, sol_u32 hit) {
+    SceneObject *ho = scene_get(&st->scene, hit);
+    if (!ho) return 0;
+    if (ho->kind != KIND_PLAIN) return hit;   /* cards carry individually, even if parented (matches drag_begin) */
+    if (object_is_arrow(&st->scene, hit)) return 0;
+    {
+        sol_u32      target = group_root(&st->scene, hit);
+        SceneObject *o;
+        if (target == st->floor_handle) return 0;
+        if (scene_meta_get(&st->scene, target, "room_type")) return 0;
+        o = scene_get(&st->scene, target);
+        if (!o || o->parent != 0) return 0;
+        return target;
+    }
+}
+
+static sol_bool can_carry_toggle(AppState *st) {
+    if (st->carried != 0) return SOL_TRUE;                 /* always can put down */
+    return carry_target(st, st->selected_handle) != 0;     /* else need a movable pick */
+}
+
+/* World point a placed object lands at: where the camera-forward ray meets the
+   ground under the crosshair, clamped to CARRY_MAX_REACH; falls back to a fixed
+   reach straight ahead when you aim up or past the clamp. (At an exact straight
+   up/down look the horizontal forward would be zero; the camera's +-89 deg pitch
+   clamp keeps it non-zero, so the object still lands a reach ahead rather than at
+   your feet.) Y snapped to the exact ground/collider height via mint_ground. */
+static vec3 carry_place_point(AppState *st) {
+    Ray   r;
+    vec3  fwd = camera_forward(&st->camera);
+    vec3  place, horiz;
+    float t;
+    r.origin = st->camera.pos;
+    r.dir    = fwd;
+    if (ray_vs_plane(r, vec3_make(0.0f, st->camera.ground_y, 0.0f),
+                     vec3_make(0.0f, 1.0f, 0.0f), &t)
+        && t > 0.1f && t < CARRY_MAX_REACH) {
+        place = vec3_add(r.origin, vec3_scale(fwd, t));
+    } else {
+        horiz   = fwd;
+        horiz.y = 0.0f;
+        horiz   = vec3_normalize(horiz);
+        place   = vec3_add(r.origin, vec3_scale(horiz, CARRY_DROP_DIST));
+    }
+    place.y = mint_ground(st, place);
+    return place;
+}
+
+/* E: put down what you're carrying, else pick up the selected movable object. */
+static void cmd_carry_toggle(AppState *st) {
+    if (st->carried != 0) {
+        SceneObject *o = scene_get(&st->scene, st->carried);
+        if (o) {
+            vec3 w = carry_place_point(st);
+            o->pos = scene_world_to_local(&st->scene, o->parent, w);
+            scene_save(&st->scene, "scene.stml");
+        }
+        st->carried = 0;
+    } else {
+        sol_u32 t = carry_target(st, st->selected_handle);
+        if (t != 0) st->carried = t;
+    }
+}
+
+/* Per-frame: float the carried object in front of the camera. Called right after
+   update() (so it runs before components_update reads poses). */
+static void carry_update(AppState *st) {
+    SceneObject *o;
+    vec3         fwd, hold;
+    if (st->carried == 0) return;
+    o = scene_get(&st->scene, st->carried);
+    if (!o) { st->carried = 0; return; }                   /* it vanished */
+    fwd     = camera_forward(&st->camera);
+    hold    = vec3_add(st->camera.pos, vec3_scale(fwd, CARRY_HOLD_DIST));
+    hold.y -= CARRY_HOLD_DROP;
+    o->pos  = scene_world_to_local(&st->scene, o->parent, hold);
+}
+
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
@@ -6383,7 +6472,8 @@ static Command g_commands[] = {
     { "Mint church",                 "U", GLFW_KEY_U, cmd_mint_church,       can_mint_church,       SOL_FALSE },
     { "Mint lantern",                "O", GLFW_KEY_O, cmd_mint_lantern,      NULL,                  SOL_FALSE },
     { "Mint pond",                   "Q", GLFW_KEY_Q, cmd_mint_pond,         NULL,                  SOL_FALSE },
-    { "Mint dust emitter",           "E", GLFW_KEY_E, cmd_mint_dust,         NULL,                  SOL_FALSE },
+    { "Mint dust emitter",           NULL, 0,          cmd_mint_dust,         NULL,                  SOL_FALSE },
+    { "Carry / place selected",      "E", GLFW_KEY_E, cmd_carry_toggle,      can_carry_toggle,      SOL_FALSE },
     { "Mint fox",                    "Y", GLFW_KEY_Y, cmd_mint_fox,          NULL,                  SOL_FALSE }
 };
 
@@ -10481,6 +10571,7 @@ int main(void) {
         wind_at((float)now, state.camera.pos.x, state.camera.pos.z,
                 &state.wind_dx, &state.wind_dz, &state.wind_gust);
         update(&state, dt);                           /* animate the scene */
+        carry_update(&state);
         components_update(&state.scene, (float)now, (float)dt);  /* overlays
                                                          rewrite BEFORE the tree
                                                          and render read poses */
