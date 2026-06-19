@@ -72,6 +72,13 @@ void make_room_doored(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h, sol_f32 t
                       int wn, int we, int ws, int ww, int ceil,
                       const RoomOpening *ops, int n_ops);
 
+/* An L-shaped (or straight) walkway in LOCAL space: the lower door is the
+   origin (0,0,0); the path bends at (cx,cz,cy) and ends at (ex,ez,ey). Each
+   leg is axis-aligned and stepped to climb to its end height; a flat landing
+   caps the corner (skipped when a leg is zero-length, i.e. a straight path). */
+void make_walkway_L(MeshBuilder *b, sol_f32 cx, sol_f32 cz, sol_f32 cy,
+                    sol_f32 ex, sol_f32 ez, sol_f32 ey, sol_f32 w, sol_f32 t);
+
 /* An index card (P3 item 6): a FILE/ALIAS/NOTE's body — an upright slab
    standing on its bottom edge, facing +/-Z. */
 void    make_card(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t);

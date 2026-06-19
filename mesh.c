@@ -376,6 +376,49 @@ void make_walkway(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t, sol_f32 dy)
     }
 }
 
+/* one axis-aligned stepped ribbon from (x0,z0,y0) to (x1,z1,y1). The run is
+   along whichever of x/z changes; the other holds. Steps climb to the end y
+   in WALKWAY_STEP_RISE increments (one box per step). The caller must ensure
+   only one of |dx|,|dz| is significant per leg (axis-aligned); a diagonal leg
+   would produce a wrong box. */
+static void walkway_leg(MeshBuilder *b, sol_f32 x0, sol_f32 z0, sol_f32 y0,
+                        sol_f32 x1, sol_f32 z1, sol_f32 y1, sol_f32 w, sol_f32 t) {
+    sol_f32 dx = x1 - x0, dz = z1 - z0, dy = y1 - y0;
+    sol_f32 hw = w * 0.5f, ady = (dy < 0.0f) ? -dy : dy;
+    int     n, i, run_x;
+    if (dx * dx + dz * dz < 1e-8f) return;
+    run_x = ((dx < 0.0f ? -dx : dx) >= (dz < 0.0f ? -dz : dz));
+    n = (ady < 0.02f) ? 1 : (int)(ady / WALKWAY_STEP_RISE) + 1;
+    if (n < 1) n = 1;
+    if (n > 128) n = 128;
+    for (i = 0; i < n; i++) {
+        sol_f32 a0 = (sol_f32)i / (sol_f32)n, a1 = (sol_f32)(i + 1) / (sol_f32)n;
+        sol_f32 sx = x0 + dx * a0, sz = z0 + dz * a0;
+        sol_f32 tx = x0 + dx * a1, tz = z0 + dz * a1;
+        sol_f32 yd = y0 + dy * a1;            /* this step's deck top */
+        sol_f32 bx0, bx1, bz0, bz1;
+        if (run_x) {
+            bx0 = (sx < tx) ? sx : tx; bx1 = (sx < tx) ? tx : sx;
+            bz0 = sz - hw; bz1 = sz + hw;
+        } else {
+            bz0 = (sz < tz) ? sz : tz; bz1 = (sz < tz) ? tz : sz;
+            bx0 = sx - hw; bx1 = sx + hw;
+        }
+        aabb_box(b, bx0, bx1, y0 - t, yd, bz0, bz1);
+    }
+}
+
+void make_walkway_L(MeshBuilder *b, sol_f32 cx, sol_f32 cz, sol_f32 cy,
+                    sol_f32 ex, sol_f32 ez, sol_f32 ey, sol_f32 w, sol_f32 t) {
+    sol_f32 hw = w * 0.5f;
+    sol_f32 l1sq = cx * cx + cz * cz;
+    sol_f32 l2sq = (ex - cx) * (ex - cx) + (ez - cz) * (ez - cz);
+    walkway_leg(b, 0.0f, 0.0f, 0.0f, cx, cz, cy, w, t);
+    if (l1sq > 1e-6f && l2sq > 1e-6f)         /* landing only at a real bend */
+        aabb_box(b, cx - hw, cx + hw, cy - t, cy, cz - hw, cz + hw);
+    walkway_leg(b, cx, cz, cy, ex, ez, ey, w, t);
+}
+
 /* ------------------------------------------------------------ the registry */
 /* THE single source of truth for what each ref name means (P3 item 1) — the
    scene built at startup and the scene loaded from disk both come through
