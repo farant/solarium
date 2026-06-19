@@ -4103,6 +4103,7 @@ static void connections_rebuild(AppState *st) {
         mesh_destroy(&o->mesh);
         if (!r->valid) continue;
         o->pos = r->door_lo;
+        o->pos.y -= ROUTE_DECK_DROP;   /* sit just under the floors: no threshold z-fight */
         o->rot = quat_identity();
         mb_init(&mb);
         make_walkway_L(&mb,

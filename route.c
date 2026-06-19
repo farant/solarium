@@ -24,6 +24,31 @@ static void room_half(Scene *s, sol_u32 room, float *hw, float *hd) {
     }
 }
 
+/* Does the axis-aligned leg from (ax,az) to (bx,bz), swept to the deck
+   half-width `hwd`, pass through any home/mirror room other than `ea`/`eb`?
+   Used to pick the L variant that doesn't cut through a bystander room. */
+static int leg_clips(Scene *s, float ax, float az, float bx, float bz,
+                     float hwd, sol_u32 ea, sol_u32 eb) {
+    sol_u32 i;
+    float   lx0 = (ax < bx ? ax : bx) - hwd, lx1 = (ax > bx ? ax : bx) + hwd;
+    float   lz0 = (az < bz ? az : bz) - hwd, lz1 = (az > bz ? az : bz) + hwd;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o  = &s->objects[i];
+        const char  *rt = scene_meta_get(s, o->handle, "room_type");
+        float        hw, hd;
+        vec3         p;
+        if (!rt) continue;
+        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        if (o->handle == ea || o->handle == eb) continue;
+        room_half(s, o->handle, &hw, &hd);
+        p = obj_pos(s, o->handle);
+        if (lx1 < p.x - hw || lx0 > p.x + hw) continue;   /* no X overlap */
+        if (lz1 < p.z - hd || lz0 > p.z + hd) continue;   /* no Z overlap */
+        return 1;
+    }
+    return 0;
+}
+
 /* the two rooms a walkway connects (its first two `connects` targets) */
 static void walkway_rooms(SceneObject *o, sol_u32 *a, sol_u32 *b) {
     sol_u32 j;
@@ -68,13 +93,27 @@ static int routes_pass1(Scene *s, Route *out, int max) {
             r->wall_lo = (dz > 0.0f) ? ROOM_WALL_S : ROOM_WALL_N;
             r->wall_hi = (dz > 0.0f) ? ROOM_WALL_N : ROOM_WALL_S;
             r->straight = 1;
-        } else if (adx >= adz) {
-            r->wall_lo = (dx > 0.0f) ? ROOM_WALL_E : ROOM_WALL_W;
-            r->wall_hi = (dz > 0.0f) ? ROOM_WALL_N : ROOM_WALL_S;
-            r->straight = 0;
         } else {
-            r->wall_lo = (dz > 0.0f) ? ROOM_WALL_S : ROOM_WALL_N;
-            r->wall_hi = (dx > 0.0f) ? ROOM_WALL_W : ROOM_WALL_E;
+            /* diagonal: pick the L variant (which axis the lo room exits) whose
+               legs avoid OTHER rooms. Variant A exits along x (corner hi.x,lo.z);
+               variant B exits along z (corner lo.x,hi.z). Default to the
+               dominant axis; switch only when it clips and the alternate is
+               clear (the two endpoint rooms are excluded from the test). */
+            float hwd    = ROUTE_DECK_W * 0.5f + 0.1f;
+            int   a_clip = leg_clips(s, plo.x, plo.z, phi.x, plo.z, hwd, lo, hi) ||
+                           leg_clips(s, phi.x, plo.z, phi.x, phi.z, hwd, lo, hi);
+            int   b_clip = leg_clips(s, plo.x, plo.z, plo.x, phi.z, hwd, lo, hi) ||
+                           leg_clips(s, plo.x, phi.z, phi.x, phi.z, hwd, lo, hi);
+            int   use_b  = (adz > adx) ? 1 : 0;
+            if (use_b && b_clip && !a_clip)  use_b = 0;
+            if (!use_b && a_clip && !b_clip) use_b = 1;
+            if (!use_b) {
+                r->wall_lo = (dx > 0.0f) ? ROOM_WALL_E : ROOM_WALL_W;
+                r->wall_hi = (dz > 0.0f) ? ROOM_WALL_N : ROOM_WALL_S;
+            } else {
+                r->wall_lo = (dz > 0.0f) ? ROOM_WALL_S : ROOM_WALL_N;
+                r->wall_hi = (dx > 0.0f) ? ROOM_WALL_W : ROOM_WALL_E;
+            }
             r->straight = 0;
         }
         r->valid = 1;
@@ -134,6 +173,15 @@ int route_all(Scene *s, Route *out, int max) {
         chi = spread_center(s, out, n, i, 1);
         dlo = door_world(s, r->room_lo, r->wall_lo, clo);
         dhi = door_world(s, r->room_hi, r->wall_hi, chi);
+        if (r->straight) {
+            /* couple the doors: snap the far door onto the near door's run-axis
+               line so the path is dead straight and the door lands exactly at
+               the path's end, even when the near door was spread off-center. */
+            if (r->wall_lo == ROOM_WALL_E || r->wall_lo == ROOM_WALL_W)
+                dhi.z = dlo.z;
+            else
+                dhi.x = dlo.x;
+        }
         /* always build the L corner: leg1 runs along wall_lo's exit axis, leg2
            along wall_hi's. An aligned pair yields a zero-length leg2 (dropped by
            make_walkway_L), so a "straight" path is just the degenerate L.

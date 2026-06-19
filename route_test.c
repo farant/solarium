@@ -88,6 +88,23 @@ int main(void) {
         }
         scene_free(&s);
     }
+    /* obstacle-aware: a NE root must not route its L corner THROUGH the room
+       sitting due-east of home (it should exit on the other axis instead) */
+    {
+        Scene s; Route r; sol_u32 home, east, ne, wk_ne;
+        scene_init(&s);
+        home = add_room(&s, 0.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        east = add_room(&s, 16.0f, 12.0f, 0.0f, 10.0f, 10.0f);   /* due east */
+        ne   = add_room(&s, 12.0f, 12.0f, 12.0f, 10.0f, 10.0f);  /* up-and-right */
+        add_walkway(&s, home, east);
+        wk_ne = add_walkway(&s, home, ne);
+        CHECK(route_for_walkway(&s, wk_ne, &r));
+        CHECK(r.valid);
+        /* the corner must NOT land inside the east room (center 16,0, half 5) */
+        CHECK(!(r.corner.x > 11.0f && r.corner.x < 21.0f &&
+                r.corner.z > -5.0f && r.corner.z < 5.0f));
+        scene_free(&s);
+    }
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;
 }
