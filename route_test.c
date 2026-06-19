@@ -66,26 +66,27 @@ int main(void) {
         CHECK(fabs((double)(r.corner.x - r.door_hi.x)) < 1e-3);
         scene_free(&s);
     }
-    /* two roots both east of home => two doors spread on home's E wall */
+    /* two roots both north of home (different x): home gets two non-overlapping,
+       spread doors on its north wall — the door-search slides them apart */
     {
-        Scene s; RoomOpening op[16]; sol_u32 home, e1, e2; int n, i, eN = 0;
+        Scene s; RoomOpening op[16]; sol_u32 home, n1, n2;
+        int   n, i, nN = 0;
+        float c0 = 1e30f, c1 = -1e30f;
         scene_init(&s);
         home = add_room(&s, 0.0f, 12.0f, 0.0f, 8.0f, 8.0f);
-        e1   = add_room(&s, 20.0f, 12.0f, 6.0f, 10.0f, 10.0f);
-        e2   = add_room(&s, 20.0f, 12.0f, -6.0f, 10.0f, 10.0f);
-        add_walkway(&s, home, e1);
-        add_walkway(&s, home, e2);
+        n1   = add_room(&s, -12.0f, 12.0f, -20.0f, 10.0f, 10.0f);
+        n2   = add_room(&s,  12.0f, 12.0f, -20.0f, 10.0f, 10.0f);
+        add_walkway(&s, home, n1);
+        add_walkway(&s, home, n2);
         n = route_room_openings(&s, home, op, 16);
-        for (i = 0; i < n; i++) if (op[i].wall == ROOM_WALL_E) eN++;
-        CHECK(eN == 2);
-        if (eN == 2) {
-            float c0 = 1e30f, c1 = -1e30f;
-            for (i = 0; i < n; i++) if (op[i].wall == ROOM_WALL_E) {
-                if (op[i].center < c0) c0 = op[i].center;
-                if (op[i].center > c1) c1 = op[i].center;
-            }
-            CHECK(c1 - c0 > 0.5f);
+        CHECK(n == 2);
+        for (i = 0; i < n; i++) if (op[i].wall == ROOM_WALL_N) {
+            nN++;
+            if (op[i].center < c0) c0 = op[i].center;
+            if (op[i].center > c1) c1 = op[i].center;
         }
+        CHECK(nN == 2);
+        CHECK(c1 - c0 >= ROUTE_DOOR_W);   /* separated, not on top of each other */
         scene_free(&s);
     }
     /* obstacle-aware: a NE root must not route its L corner THROUGH the room

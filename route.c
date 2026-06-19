@@ -69,7 +69,7 @@ static int routes_pass1(Scene *s, Route *out, int max) {
         SceneObject *o = &s->objects[i];
         sol_u32 ra, rb, lo, hi;
         vec3    pa, pb, plo, phi;
-        float   dx, dz, adx, adz, hwl, hdl, hwh, hdh, mh;
+        float   dx, dz;
         Route  *r;
         if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
         walkway_rooms(o, &ra, &rb);
@@ -83,132 +83,184 @@ static int routes_pass1(Scene *s, Route *out, int max) {
         r->room_lo = lo; r->room_hi = hi;
         plo = obj_pos(s, lo); phi = obj_pos(s, hi);
         dx = phi.x - plo.x; dz = phi.z - plo.z;
-        adx = dx < 0.0f ? -dx : dx; adz = dz < 0.0f ? -dz : dz;
-        if (adx < 1e-3f && adz < 1e-3f) { n++; continue; }
-        room_half(s, lo, &hwl, &hdl);
-        room_half(s, hi, &hwh, &hdh);
-        mh = ROUTE_DOOR_W * 0.5f + 0.5f;     /* keep an off-center door clear of the corner */
-        /* STRAIGHT (off-center coupled doors) when the perpendicular offset
-           still fits within BOTH facing walls — no L corner needed, the door
-           just slides along the wall. Otherwise an L. This is what lets doors
-           sit off-center: a modestly-offset room gets a clean straight path. */
-        if (adx >= adz && adz <= hdh - mh && adz <= hdl - mh) {
-            r->wall_lo = (dx > 0.0f) ? ROOM_WALL_E : ROOM_WALL_W;
-            r->wall_hi = (dx > 0.0f) ? ROOM_WALL_W : ROOM_WALL_E;
-            r->straight = 1;
-        } else if (adz > adx && adx <= hwh - mh && adx <= hwl - mh) {
-            r->wall_lo = (dz > 0.0f) ? ROOM_WALL_S : ROOM_WALL_N;
-            r->wall_hi = (dz > 0.0f) ? ROOM_WALL_N : ROOM_WALL_S;
-            r->straight = 1;
-        } else {
-            /* diagonal L: variant A exits along x (corner hi.x,lo.z); variant B
-               exits along z (corner lo.x,hi.z). A variant is "bad" if a leg cuts
-               through another room OR its corner lands inside an endpoint room.
-               Default to the dominant axis; switch only to escape a bad variant. */
-            float hwd    = ROUTE_DECK_W * 0.5f + 0.1f;
-            int   a_clip = leg_clips(s, plo.x, plo.z, phi.x, plo.z, hwd, lo, hi) ||
-                           leg_clips(s, phi.x, plo.z, phi.x, phi.z, hwd, lo, hi);
-            int   b_clip = leg_clips(s, plo.x, plo.z, plo.x, phi.z, hwd, lo, hi) ||
-                           leg_clips(s, plo.x, phi.z, phi.x, phi.z, hwd, lo, hi);
-            int   a_bad  = a_clip || (adz < hdh) || (adx < hwl);  /* A corner in hi/lo */
-            int   b_bad  = b_clip || (adx < hwh) || (adz < hdl);  /* B corner in hi/lo */
-            int   use_b  = (adz > adx) ? 1 : 0;
-            if (use_b && b_bad && !a_bad)  use_b = 0;
-            if (!use_b && a_bad && !b_bad) use_b = 1;
-            if (!use_b) {
-                r->wall_lo = (dx > 0.0f) ? ROOM_WALL_E : ROOM_WALL_W;
-                r->wall_hi = (dz > 0.0f) ? ROOM_WALL_N : ROOM_WALL_S;
-            } else {
-                r->wall_lo = (dz > 0.0f) ? ROOM_WALL_S : ROOM_WALL_N;
-                r->wall_hi = (dx > 0.0f) ? ROOM_WALL_W : ROOM_WALL_E;
-            }
-            r->straight = 0;
-        }
-        r->valid = 1;
+        if ((dx < 0.0f ? -dx : dx) < 1e-3f &&
+            (dz < 0.0f ? -dz : dz) < 1e-3f) { n++; continue; }   /* overlapping */
+        r->valid = 1;     /* walls + door offsets are chosen by solve_path */
         n++;
     }
     return n;
 }
 
-/* the door center (signed offset along the wall's run axis from room center)
-   for route index `idx`. side==0 => the lo room, side==1 => the hi room. */
-static float spread_center(Scene *s, Route *out, int n, int idx, int side) {
-    sol_u32 room = side ? out[idx].room_hi : out[idx].room_lo;
-    int     wall = side ? out[idx].wall_hi : out[idx].wall_lo;
-    float   hw, hd, span, margin, lo, hiend;
-    int     i, count = 0, rank = 0;
-    /* count members of this (room,wall) group + this route's 1-based rank
-       (stable by array order). A route touches `room` as its lo XOR hi side. */
-    for (i = 0; i < n; i++) {
-        int hit_lo, hit_hi;
-        if (!out[i].valid) continue;
-        hit_lo = (out[i].room_lo == room && out[i].wall_lo == wall);
-        hit_hi = (out[i].room_hi == room && out[i].wall_hi == wall);
-        if (hit_lo) { if (i < idx || (i == idx && side == 0)) rank++; count++; }
-        if (hit_hi) { if (i < idx || (i == idx && side == 1)) rank++; count++; }
-    }
-    if (count < 1) count = 1;
-    if (rank < 1) rank = 1;
-    room_half(s, room, &hw, &hd);
-    margin = ROUTE_DOOR_W;
-    span   = (wall == ROOM_WALL_N || wall == ROOM_WALL_S) ? (2.0f * hw) : (2.0f * hd);
-    lo     = -0.5f * span + margin;
-    hiend  =  0.5f * span - margin;
-    if (hiend < lo) { lo = 0.0f; hiend = 0.0f; }
-    return lo + (hiend - lo) * ((float)rank / (float)(count + 1));
+/* a placed door, so a later connection on the same (room,wall) doesn't land
+   its door on top of an already-placed one */
+typedef struct { sol_u32 room; int wall; float off; } PlacedDoor;
+
+/* world door position on a room (center c, half-extents hw/hd) at run-axis
+   offset `off` along `wall` */
+static vec3 door_at(vec3 c, float hw, float hd, int wall, float off) {
+    if (wall == ROOM_WALL_N) return vec3_make(c.x + off, c.y, c.z - hd);
+    if (wall == ROOM_WALL_S) return vec3_make(c.x + off, c.y, c.z + hd);
+    if (wall == ROOM_WALL_E) return vec3_make(c.x + hw, c.y, c.z + off);
+    return vec3_make(c.x - hw, c.y, c.z + off);   /* W */
 }
 
-/* world door-center on `room`'s `wall` at run-axis offset `center` */
-static vec3 door_world(Scene *s, sol_u32 room, int wall, float center) {
-    vec3  p = obj_pos(s, room);
-    float hw, hd;
-    room_half(s, room, &hw, &hd);
-    if      (wall == ROOM_WALL_N) return vec3_make(p.x + center, p.y, p.z - hd);
-    else if (wall == ROOM_WALL_S) return vec3_make(p.x + center, p.y, p.z + hd);
-    else if (wall == ROOM_WALL_E) return vec3_make(p.x + hw, p.y, p.z + center);
-    else                          return vec3_make(p.x - hw, p.y, p.z + center);
+/* is a door at (room,wall,off) within a door-width of an already-placed one? */
+static int door_taken(PlacedDoor *pl, int np, sol_u32 room, int wall, float off) {
+    int   i;
+    float d;
+    for (i = 0; i < np; i++) {
+        if (pl[i].room != room || pl[i].wall != wall) continue;
+        d = pl[i].off - off;
+        if (d < 0.0f) d = -d;
+        if (d < ROUTE_DOOR_W) return 1;
+    }
+    return 0;
+}
+
+/* is point p inside room (center c, half hw/hd)? */
+static int pt_in_room(vec3 p, vec3 c, float hw, float hd) {
+    return (p.x > c.x - hw && p.x < c.x + hw && p.z > c.z - hd && p.z < c.z + hd);
+}
+
+/* Choose the single-bend (or straight) path for connection lo->hi: search WHICH
+   wall each door sits on AND WHERE along the wall it slides, picking the lowest-
+   cost placement whose legs clear other rooms and whose corner stays outside
+   both endpoint rooms. This is door freedom: the door lands wherever its leg
+   meets the wall, not at the wall center. Fills walls + door_lo/corner/door_hi
+   and records the two placed doors. Falls back to a best-effort dominant-axis L
+   (which may clip) only if no clean placement exists. */
+static void solve_path(Scene *s, Route *r, vec3 plo, vec3 phi,
+                       float hwl, float hdl, float hwh, float hdh,
+                       PlacedDoor *pl, int *np) {
+    float dx = phi.x - plo.x, dz = phi.z - plo.z;
+    float adx = dx < 0.0f ? -dx : dx, adz = dz < 0.0f ? -dz : dz;
+    int   hwx = (dx > 0.0f) ? ROOM_WALL_E : ROOM_WALL_W;   /* H wall facing R on x */
+    int   hwz = (dz > 0.0f) ? ROOM_WALL_S : ROOM_WALL_N;   /* H wall facing R on z */
+    int   rwx = (dx > 0.0f) ? ROOM_WALL_W : ROOM_WALL_E;   /* R wall facing H on x */
+    int   rwz = (dz > 0.0f) ? ROOM_WALL_N : ROOM_WALL_S;   /* R wall facing H on z */
+    float m   = ROUTE_DOOR_W * 0.5f + 0.4f;                /* keep door off corners */
+    float hwd = ROUTE_DECK_W * 0.5f + 0.1f;                /* deck half-width */
+    sol_u32 lo = r->room_lo, hi = r->room_hi;
+    int   cwh[4], cwr[4], ckind[4];   /* per-combo: H wall, R wall, kind */
+    float csh[4], csr[4];             /* per-combo: H/R run-axis half-extent */
+    static const float frac[7] = { 0.0f, 0.35f, -0.35f, 0.65f, -0.65f, 0.9f, -0.9f };
+    float best = 1e30f;
+    int   found = 0, ci, gi, gj, gjn;
+    int   bWlo = hwx, bWhi = rwz;
+    float bOlo = 0.0f, bOhi = 0.0f;
+    vec3  bDlo = plo, bCor = plo, bDhi = phi;
+
+    cwh[0] = hwx; cwr[0] = rwx; ckind[0] = 0; csh[0] = hdl; csr[0] = hdh; /* facing x: straight */
+    cwh[1] = hwx; cwr[1] = rwz; ckind[1] = 1; csh[1] = hdl; csr[1] = hwh; /* H exits x, R enters z */
+    cwh[2] = hwz; cwr[2] = rwx; ckind[2] = 2; csh[2] = hwl; csr[2] = hdh; /* H exits z, R enters x */
+    cwh[3] = hwz; cwr[3] = rwz; ckind[3] = 3; csh[3] = hwl; csr[3] = hwh; /* facing z: straight */
+
+    for (ci = 0; ci < 4; ci++) {
+        if (csh[ci] - m <= 0.0f || csr[ci] - m <= 0.0f) continue;
+        gjn = (ckind[ci] == 0 || ckind[ci] == 3) ? 1 : 7;   /* straight derives dR */
+        for (gi = 0; gi < 7; gi++) {
+            float dH = frac[gi] * (csh[ci] - m);
+            for (gj = 0; gj < gjn; gj++) {
+                float dR, cost, al;
+                vec3  dlo, dhi, cor;
+                int   ok = 1;
+                dlo = door_at(plo, hwl, hdl, cwh[ci], dH);
+                if (ckind[ci] == 0) {              /* straight along x: match world z */
+                    dR  = dlo.z - phi.z;
+                    dhi = door_at(phi, hwh, hdh, cwr[ci], dR);
+                    cor = dhi;
+                } else if (ckind[ci] == 3) {       /* straight along z: match world x */
+                    dR  = dlo.x - phi.x;
+                    dhi = door_at(phi, hwh, hdh, cwr[ci], dR);
+                    cor = dhi;
+                } else if (ckind[ci] == 1) {       /* H exits x, R enters z */
+                    dR  = frac[gj] * (csr[ci] - m);
+                    dhi = door_at(phi, hwh, hdh, cwr[ci], dR);
+                    cor = vec3_make(dhi.x, plo.y, dlo.z);
+                } else {                           /* H exits z, R enters x */
+                    dR  = frac[gj] * (csr[ci] - m);
+                    dhi = door_at(phi, hwh, hdh, cwr[ci], dR);
+                    cor = vec3_make(dlo.x, plo.y, dhi.z);
+                }
+                if (dR > csr[ci] - m || dR < -(csr[ci] - m)) ok = 0;   /* door off the wall */
+                if (ok && door_taken(pl, *np, lo, cwh[ci], dH)) ok = 0;
+                if (ok && door_taken(pl, *np, hi, cwr[ci], dR)) ok = 0;
+                if (ok && (ckind[ci] == 1 || ckind[ci] == 2)) {        /* corner clear of rooms */
+                    if (pt_in_room(cor, plo, hwl, hdl)) ok = 0;
+                    if (pt_in_room(cor, phi, hwh, hdh)) ok = 0;
+                }
+                if (ok) {
+                    if (ckind[ci] == 0 || ckind[ci] == 3) {
+                        if (leg_clips(s, dlo.x, dlo.z, dhi.x, dhi.z, hwd, lo, hi)) ok = 0;
+                    } else {
+                        if (leg_clips(s, dlo.x, dlo.z, cor.x, cor.z, hwd, lo, hi)) ok = 0;
+                        if (leg_clips(s, cor.x, cor.z, dhi.x, dhi.z, hwd, lo, hi)) ok = 0;
+                    }
+                }
+                if (!ok) continue;
+                al   = (dH < 0.0f ? -dH : dH) + (dR < 0.0f ? -dR : dR);
+                cost = al;
+                if (ckind[ci] == 1 || ckind[ci] == 2) cost += 2.0f;            /* a bend costs */
+                /* strongly prefer exiting toward the room's dominant direction,
+                   so e.g. two mostly-east rooms both use the east wall (spread)
+                   rather than one scattering onto a side wall */
+                if ((ckind[ci] == 0 || ckind[ci] == 1) && adx < adz) cost += 2.5f;  /* exits x, z dominant */
+                if ((ckind[ci] == 2 || ckind[ci] == 3) && adz < adx) cost += 2.5f;  /* exits z, x dominant */
+                if (cost < best) {
+                    best = cost; found = 1;
+                    bWlo = cwh[ci]; bWhi = cwr[ci]; bOlo = dH; bOhi = dR;
+                    bDlo = dlo; bCor = cor; bDhi = dhi;
+                }
+            }
+        }
+    }
+    if (!found) {            /* best-effort: dominant-axis L, centered (may clip) */
+        if (adx >= adz) {
+            bWlo = hwx; bWhi = rwz;
+            bDlo = door_at(plo, hwl, hdl, hwx, 0.0f);
+            bDhi = door_at(phi, hwh, hdh, rwz, 0.0f);
+            bCor = vec3_make(bDhi.x, plo.y, bDlo.z);
+        } else {
+            bWlo = hwz; bWhi = rwx;
+            bDlo = door_at(plo, hwl, hdl, hwz, 0.0f);
+            bDhi = door_at(phi, hwh, hdh, rwx, 0.0f);
+            bCor = vec3_make(bDlo.x, plo.y, bDhi.z);
+        }
+        bOlo = 0.0f; bOhi = 0.0f;
+    }
+    r->wall_lo = bWlo; r->wall_hi = bWhi;
+    r->straight = (bWlo == ROOM_WALL_E || bWlo == ROOM_WALL_W)
+                    ? (bWhi == ROOM_WALL_E || bWhi == ROOM_WALL_W)
+                    : (bWhi == ROOM_WALL_N || bWhi == ROOM_WALL_S);
+    r->door_lo = bDlo; r->corner = bCor; r->door_hi = bDhi;
+    if (*np + 2 <= ROUTE_MAX * 2) {
+        pl[*np].room = lo; pl[*np].wall = bWlo; pl[*np].off = bOlo; (*np)++;
+        pl[*np].room = hi; pl[*np].wall = bWhi; pl[*np].off = bOhi; (*np)++;
+    }
 }
 
 int route_all(Scene *s, Route *out, int max) {
-    int n, i;
-    n = routes_pass1(s, out, max);
+    int       n = routes_pass1(s, out, max), i, np = 0;
+    PlacedDoor placed[ROUTE_MAX * 2];
     for (i = 0; i < n; i++) {
         Route *r = &out[i];
-        float  clo, chi;
-        vec3   dlo, dhi, cor;
+        vec3   plo, phi;
+        float  hwl, hdl, hwh, hdh, l1, l2, tot;
         if (!r->valid) continue;
-        clo = spread_center(s, out, n, i, 0);
-        chi = spread_center(s, out, n, i, 1);
-        dlo = door_world(s, r->room_lo, r->wall_lo, clo);
-        dhi = door_world(s, r->room_hi, r->wall_hi, chi);
-        if (r->straight) {
-            /* couple the doors: snap the far door onto the near door's run-axis
-               line so the path is dead straight and the door lands exactly at
-               the path's end, even when the near door was spread off-center. */
-            if (r->wall_lo == ROOM_WALL_E || r->wall_lo == ROOM_WALL_W)
-                dhi.z = dlo.z;
-            else
-                dhi.x = dlo.x;
-        }
-        /* always build the L corner: leg1 runs along wall_lo's exit axis, leg2
-           along wall_hi's. An aligned pair yields a zero-length leg2 (dropped by
-           make_walkway_L), so a "straight" path is just the degenerate L.
-           v1 limitation: this single-bend L assumes the exit-axis center
-           separation >= (hw_lo + hw_hi); closer rooms can place the corner
-           inside a room. Ring placement keeps rooms far enough apart for v1. */
-        if (r->wall_lo == ROOM_WALL_E || r->wall_lo == ROOM_WALL_W)
-            cor = vec3_make(dhi.x, 0.0f, dlo.z);
-        else
-            cor = vec3_make(dlo.x, 0.0f, dhi.z);
-        {
-            float l1 = (float)sqrt((double)((cor.x - dlo.x) * (cor.x - dlo.x) +
-                                            (cor.z - dlo.z) * (cor.z - dlo.z)));
-            float l2 = (float)sqrt((double)((dhi.x - cor.x) * (dhi.x - cor.x) +
-                                            (dhi.z - cor.z) * (dhi.z - cor.z)));
-            float tot = l1 + l2;
-            cor.y = (tot > 1e-4f) ? dlo.y + (dhi.y - dlo.y) * (l1 / tot) : dlo.y;
-        }
-        r->door_lo = dlo; r->corner = cor; r->door_hi = dhi;
+        plo = obj_pos(s, r->room_lo);
+        phi = obj_pos(s, r->room_hi);
+        room_half(s, r->room_lo, &hwl, &hdl);
+        room_half(s, r->room_hi, &hwh, &hdh);
+        solve_path(s, r, plo, phi, hwl, hdl, hwh, hdh, placed, &np);
+        /* rise: steady climb over the run, corner height interpolated by leg len */
+        l1 = (float)sqrt((double)((r->corner.x - r->door_lo.x) * (r->corner.x - r->door_lo.x) +
+                                  (r->corner.z - r->door_lo.z) * (r->corner.z - r->door_lo.z)));
+        l2 = (float)sqrt((double)((r->door_hi.x - r->corner.x) * (r->door_hi.x - r->corner.x) +
+                                  (r->door_hi.z - r->corner.z) * (r->door_hi.z - r->corner.z)));
+        tot = l1 + l2;
+        r->corner.y = (tot > 1e-4f)
+                        ? r->door_lo.y + (r->door_hi.y - r->door_lo.y) * (l1 / tot)
+                        : r->door_lo.y;
     }
     return n;
 }
