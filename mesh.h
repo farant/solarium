@@ -34,15 +34,6 @@ void    make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d);
 void    make_grid(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_u32 subdiv);
 void    make_page(MeshBuilder *b, sol_f32 w, sol_f32 h);   /* upright XY quad, +Z, upright UVs */
 
-/* A room shell (P3 items 5+7): floor + optional walls/ceiling, all faces
-   INTERIOR (inward normals, inward winding — the viewer is inside), origin at
-   the floor's center, y in [0,h]. World-scale UVs (1 unit per meter) so texel
-   density is uniform across differently-sized rooms. The presence flags are
-   the follies vocabulary: a sealed cell, a three-walled stage, or a bare
-   platform are all the same emitter. The floor is always present. */
-void    make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h,
-                  int wall_n, int wall_e, int wall_s, int wall_w, int ceil);
-
 /* A walkable slab (P3 item 7): a room-graph edge embodied — length along X,
    width along Z, deck at y=0 (places flush with room floors). */
 void    make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t);
@@ -53,6 +44,33 @@ void    make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t);
    per-step rise lives here so the collider mirrors the emitter exactly. */
 #define WALKWAY_STEP_RISE 0.18f
 void    make_walkway(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t, sol_f32 dy);
+
+/* wall ids for a doored room: N=-z, E=+x, S=+z, W=-x (matches make_room) */
+#define ROOM_WALL_N 0
+#define ROOM_WALL_E 1
+#define ROOM_WALL_S 2
+#define ROOM_WALL_W 3
+
+/* A gap in a room wall. `center` is the door-center offset along the wall's
+   run axis, in ROOM-LOCAL coords (x for N/S walls, z for E/W walls); width
+   and height are the opening size. Pure geometry -- no scene knowledge. */
+typedef struct {
+    int     wall;
+    sol_f32 center;
+    sol_f32 width;
+    sol_f32 height;
+} RoomOpening;
+
+/* The most gaps one wall can carry (the doored-wall scratch arrays size to it). */
+#define ROOM_MAX_OPENINGS_PER_WALL 8
+
+/* A thick-walled room built AROUND its door gaps (never CSG): floor always,
+   ceiling if `ceil`, a thick slab per present wall (wn/we/ws/ww) with the
+   openings for that wall left as gaps (piers + headers; the floor fills each
+   doorway's threshold strip). */
+void make_room_doored(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h, sol_f32 t,
+                      int wn, int we, int ws, int ww, int ceil,
+                      const RoomOpening *ops, int n_ops);
 
 /* An index card (P3 item 6): a FILE/ALIAS/NOTE's body — an upright slab
    standing on its bottom edge, facing +/-Z. */

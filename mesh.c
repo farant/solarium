@@ -144,47 +144,6 @@ static void push_quad4(MeshBuilder *b,
     mb_push_triangle(b, a, d, e);
 }
 
-/* A room shell: every present face INTERIOR — normals point inward and the
-   winding is CCW from inside, so the geometry stays correct if back-face
-   culling is ever enabled. Origin at the floor's center, y in [0,h].
-   World-scale UVs: u/v run in meters, so a texture tiles at the same density
-   on a 2m wall and an 8m wall. Each wall and the ceiling is OPTIONAL (the
-   follies direction: three-walled stages, roofless cells, bare platforms);
-   the floor is always present — a room you can't stand in isn't a room. */
-void make_room(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h,
-               int wall_n, int wall_e, int wall_s, int wall_w, int ceil) {
-    sol_f32 hw = w * 0.5f, hd = d * 0.5f;
-
-    /* floor (normal +Y); ceiling (normal -Y) if present */
-    push_quad4(b, -hw, 0.0f, -hd, 0.0f, 0.0f,   -hw, 0.0f,  hd, 0.0f, d,
-                   hw, 0.0f,  hd, w,    d,       hw, 0.0f, -hd, w,    0.0f,
-               0.0f, 1.0f, 0.0f);
-    if (ceil)
-        push_quad4(b, -hw, h,    -hd, 0.0f, 0.0f,    hw, h,    -hd, w,    0.0f,
-                       hw, h,     hd, w,    d,      -hw, h,     hd, 0.0f, d,
-                   0.0f, -1.0f, 0.0f);
-
-    /* north wall (z = -hd, faces +Z into the room) / south (z = +hd, faces -Z) */
-    if (wall_n)
-        push_quad4(b, -hw, 0.0f, -hd, 0.0f, 0.0f,    hw, 0.0f, -hd, w,    0.0f,
-                       hw, h,    -hd, w,    h,      -hw, h,    -hd, 0.0f, h,
-                   0.0f, 0.0f, 1.0f);
-    if (wall_s)
-        push_quad4(b,  hw, 0.0f,  hd, 0.0f, 0.0f,   -hw, 0.0f,  hd, w,    0.0f,
-                      -hw, h,     hd, w,    h,       hw, h,     hd, 0.0f, h,
-                   0.0f, 0.0f, -1.0f);
-
-    /* west wall (x = -hw, faces +X) / east (x = +hw, faces -X) */
-    if (wall_w)
-        push_quad4(b, -hw, 0.0f,  hd, 0.0f, 0.0f,   -hw, 0.0f, -hd, d,    0.0f,
-                      -hw, h,    -hd, d,    h,      -hw, h,     hd, 0.0f, h,
-                   1.0f, 0.0f, 0.0f);
-    if (wall_e)
-        push_quad4(b,  hw, 0.0f, -hd, 0.0f, 0.0f,    hw, 0.0f,  hd, d,    0.0f,
-                       hw, h,     hd, d,    h,       hw, h,    -hd, 0.0f, h,
-                   -1.0f, 0.0f, 0.0f);
-}
-
 
 /* Axis-aligned face helpers for the wall pieces: a rect facing +/-Z, +/-X,
    or +/-Y, corners ordered CCW from the normal's side, world-scale UVs. */
@@ -287,6 +246,84 @@ void make_wall_with_opening(MeshBuilder *b, sol_f32 w, sol_f32 h,
     face_y(b, lx1, rx0, 0.0f, zb, zf, 1);
 }
 
+/* an axis-aligned solid box, all six faces (CCW from each normal). Cheap and
+   robust: abutting boxes meet back-to-back (opposite-facing coplanar quads
+   never z-fight), so doored walls can be assembled from whole boxes without
+   the face-skipping bookkeeping make_wall_with_opening does by hand. */
+static void aabb_box(MeshBuilder *b, sol_f32 x0, sol_f32 x1, sol_f32 y0,
+                     sol_f32 y1, sol_f32 z0, sol_f32 z1) {
+    face_z(b, x0, x1, y0, y1, z1,  1);
+    face_z(b, x0, x1, y0, y1, z0, -1);
+    face_x(b, x1, y0, y1, z0, z1,  1);
+    face_x(b, x0, y0, y1, z0, z1, -1);
+    face_y(b, x0, x1, y1, z0, z1,  1);
+    face_y(b, x0, x1, y0, z0, z1, -1);
+}
+
+/* one thick room wall, built around its gaps. runx=1: the wall runs along X
+   (N/S walls), its two faces at z=f0,f1, span [s0,s1] in x. runx=0: runs
+   along Z (E/W walls), faces at x=f0,f1, span [s0,s1] in z. `ops` is the full
+   room list; only entries with .wall==wall_id are used (their .center is in
+   the run axis). Up to ROOM_MAX_OPENINGS_PER_WALL gaps per wall. Emits piers
+   + headers; the room floor (full outer footprint) fills each doorway's
+   threshold strip, so no threshold face is emitted here (it would z-fight). */
+static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
+                             sol_f32 s0, sol_f32 s1, sol_f32 h,
+                             const RoomOpening *ops, int n_ops, int wall_id) {
+    sol_f32 lo[ROOM_MAX_OPENINGS_PER_WALL];
+    sol_f32 hi[ROOM_MAX_OPENINGS_PER_WALL];
+    sol_f32 oy[ROOM_MAX_OPENINGS_PER_WALL];
+    int     k = 0, i, j;
+    sol_f32 cur;
+    for (i = 0; i < n_ops; i++) {
+        sol_f32 c, hwid;
+        if (ops[i].wall != wall_id) continue;
+        if (k >= ROOM_MAX_OPENINGS_PER_WALL) break;
+        c = ops[i].center; hwid = ops[i].width * 0.5f;
+        lo[k] = c - hwid; hi[k] = c + hwid; oy[k] = ops[i].height;
+        k++;
+    }
+    for (i = 1; i < k; i++) {                 /* insertion sort by lo */
+        sol_f32 pivot_lo = lo[i], pivot_hi = hi[i], pivot_oy = oy[i];
+        j = i - 1;
+        while (j >= 0 && lo[j] > pivot_lo) {
+            lo[j + 1] = lo[j]; hi[j + 1] = hi[j]; oy[j + 1] = oy[j]; j--;
+        }
+        lo[j + 1] = pivot_lo; hi[j + 1] = pivot_hi; oy[j + 1] = pivot_oy;
+    }
+    cur = s0;
+    for (i = 0; i <= k; i++) {
+        sol_f32 gL = (i < k) ? lo[i] : s1;
+        sol_f32 gR = (i < k) ? hi[i] : s1;
+        if (gL < s0) gL = s0;
+        if (gR > s1) gR = s1;
+        if (gL > cur) {                        /* solid pier [cur, gL] */
+            if (runx) aabb_box(b, cur, gL, 0.0f, h, f0, f1);
+            else      aabb_box(b, f0, f1, 0.0f, h, cur, gL);
+        }
+        if (i < k) {
+            if (oy[i] < h) {                   /* header above the gap */
+                if (runx) aabb_box(b, gL, gR, oy[i], h, f0, f1);
+                else      aabb_box(b, f0, f1, oy[i], h, gL, gR);
+            }
+            cur = gR;
+        }
+    }
+}
+
+void make_room_doored(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h, sol_f32 t,
+                      int wn, int we, int ws, int ww, int ceil,
+                      const RoomOpening *ops, int n_ops) {
+    sol_f32 hw = w * 0.5f, hd = d * 0.5f;
+    if (t < 0.02f) t = 0.02f;
+    aabb_box(b, -hw - t, hw + t, -t, 0.0f, -hd - t, hd + t);   /* full outer footprint: no corner toe-notch, fills every doorway strip */
+    if (ceil) aabb_box(b, -hw, hw, h, h + t, -hd, hd);
+    if (wn) emit_doored_wall(b, 1, -hd - t, -hd, -hw, hw, h, ops, n_ops, ROOM_WALL_N);
+    if (ws) emit_doored_wall(b, 1,  hd, hd + t, -hw, hw, h, ops, n_ops, ROOM_WALL_S);
+    if (we) emit_doored_wall(b, 0,  hw, hw + t, -hd - t, hd + t, h, ops, n_ops, ROOM_WALL_E);
+    if (ww) emit_doored_wall(b, 0, -hw - t, -hw, -hd - t, hd + t, h, ops, n_ops, ROOM_WALL_W);
+}
+
 /* An index card (P3 item 6): a small upright slab standing on its bottom
    edge — a FILE/ALIAS/NOTE's body in a room. Faces +/-Z, x centered, y in
    [0,h], thickness t (a future size cue: fat manuscript, thin note).
@@ -358,8 +395,9 @@ static void emit_box(MeshBuilder *b, const float *p)  { (void)p; make_box(b, 1.0
 static void emit_grid(MeshBuilder *b, const float *p) { (void)p; make_grid(b, 6.0f, 6.0f, 8); }
 static void emit_page(MeshBuilder *b, const float *p) { (void)p; make_page(b, 0.9f, 1.2f); }
 static void emit_room(MeshBuilder *b, const float *p) {
-    make_room(b, p[0], p[1], p[2],
-              p[3] > 0.5f, p[4] > 0.5f, p[5] > 0.5f, p[6] > 0.5f, p[7] > 0.5f);
+    make_room_doored(b, p[0], p[1], p[2], 0.20f,
+                     p[3] > 0.5f, p[4] > 0.5f, p[5] > 0.5f, p[6] > 0.5f,
+                     p[7] > 0.5f, (const RoomOpening *)0, 0);
 }
 static void emit_wall(MeshBuilder *b, const float *p) { make_wall_with_opening(b, p[0], p[1], p[2], p[3], p[4], p[5]); }
 static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1], p[2]); }
