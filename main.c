@@ -9695,6 +9695,45 @@ static void render(AppState *state) {
                 }
             }
         }
+
+        /* doorway labels (fs-tree): each room's name — the path it represents —
+           in large text above its doorway, facing outward so you read it as you
+           approach. Derived from the routes, like the doorways themselves; the
+           home hub is skipped (you start inside it). */
+        {
+            Route droutes[ROUTE_MAX];
+            int   dn = route_all(&state->scene, droutes, ROUTE_MAX);
+            int   di, dside;
+            for (di = 0; di < dn; di++) {
+                Route *r = &droutes[di];
+                if (!r->valid) continue;
+                for (dside = 0; dside < 2; dside++) {
+                    sol_u32     room = dside ? r->room_hi : r->room_lo;
+                    int         wall = dside ? r->wall_hi : r->wall_lo;
+                    vec3        door = dside ? r->door_hi : r->door_lo;
+                    const char *rt   = scene_meta_get(&state->scene, room, "room_type");
+                    const char *nm   = scene_meta_get(&state->scene, room, "name");
+                    float       yaw  = 0.0f, nx = 0.0f, nz = 1.0f, lpx, nw, x0;
+                    mat4        dm;
+                    if (rt && strcmp(rt, "home") == 0) continue;
+                    if (!nm || !nm[0]) continue;
+                    if      (wall == ROOM_WALL_N) { yaw = sol_radians(180.0f); nx = 0.0f;  nz = -1.0f; }
+                    else if (wall == ROOM_WALL_E) { yaw = sol_radians(90.0f);  nx = 1.0f;  nz = 0.0f;  }
+                    else if (wall == ROOM_WALL_S) { yaw = 0.0f;                nx = 0.0f;  nz = 1.0f;  }
+                    else                          { yaw = sol_radians(-90.0f); nx = -1.0f; nz = 0.0f;  }
+                    lpx = 0.35f / lh;                       /* ~35 cm tall letters */
+                    text_measure(uf, nm, 1.0f, &nw, (float *)0);
+                    x0  = -nw * lpx * 0.5f;                 /* centered over the opening */
+                    dm  = mat4_mul(
+                              mat4_translate(vec3_make(door.x + nx * 0.30f, door.y,
+                                                       door.z + nz * 0.30f)),
+                              quat_to_mat4(quat_from_axis_angle(
+                                  vec3_make(0.0f, 1.0f, 0.0f), yaw)));
+                    wtext_block(uf, vp, dm, nm, x0, ROUTE_DOOR_H + 0.2f, lpx, 0.0f,
+                                0.93f, 0.91f, 0.85f);       /* warm off-white */
+                }
+            }
+        }
     }
 
     /* P9 item 2: stained glass — the church_glass objects, translucent, drawn
