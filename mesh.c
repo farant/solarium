@@ -438,7 +438,7 @@ static void emit_box(MeshBuilder *b, const float *p)  { (void)p; make_box(b, 1.0
 static void emit_grid(MeshBuilder *b, const float *p) { (void)p; make_grid(b, 6.0f, 6.0f, 8); }
 static void emit_page(MeshBuilder *b, const float *p) { (void)p; make_page(b, 0.9f, 1.2f); }
 static void emit_room(MeshBuilder *b, const float *p) {
-    make_room_doored(b, p[0], p[1], p[2], 0.20f,
+    make_room_doored(b, p[0], p[1], p[2], 0.20f, /* == ROUTE_WALL_T */
                      p[3] > 0.5f, p[4] > 0.5f, p[5] > 0.5f, p[6] > 0.5f,
                      p[7] > 0.5f, (const RoomOpening *)0, 0);
 }

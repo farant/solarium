@@ -45,7 +45,7 @@ void    make_path(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t);
 #define WALKWAY_STEP_RISE 0.18f
 void    make_walkway(MeshBuilder *b, sol_f32 len, sol_f32 w, sol_f32 t, sol_f32 dy);
 
-/* wall ids for a doored room: N=-z, E=+x, S=+z, W=-x (matches make_room) */
+/* wall ids for a doored room: N=-z, E=+x, S=+z, W=-x (matches make_room_doored) */
 #define ROOM_WALL_N 0
 #define ROOM_WALL_E 1
 #define ROOM_WALL_S 2

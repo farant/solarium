@@ -252,7 +252,6 @@ float collide_clamp_y(const ColliderSet *cs, vec3 feet, float dy,
    the collider's INTERIOR face sits exactly at the rendered wall, and the
    slab extends outward where no one stands. Wall slabs also run past the
    room's corners by this much so two meeting walls leave no diagonal gap. */
-#define COLLIDE_SHELL_T 0.20f
 
 /* Emit one box given in an object's LOCAL frame through its world matrix.
    Rests on the layer's standing assumption — upright (yaw + per-axis scale,
@@ -614,7 +613,7 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
                local frame. Underside is LEG-RELATIVE (y0 - tt), not global. */
             Route r;
             mat4  m  = scene_world_matrix(s, o);
-            float ww = ROUTE_DOOR_W + 0.4f, hw2 = ww * 0.5f, tt = 0.15f;
+            float ww = ROUTE_DECK_W, hw2 = ww * 0.5f, tt = ROUTE_DECK_T;
             if (route_for_walkway(s, o->handle, &r) && r.valid) {
                 float lx = r.corner.x - r.door_lo.x, lz = r.corner.z - r.door_lo.z;
                 float ly = r.corner.y - r.door_lo.y;

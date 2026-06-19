@@ -8,6 +8,8 @@
 #define ROUTE_DOOR_W 1.4f
 #define ROUTE_DOOR_H 2.1f
 #define ROUTE_WALL_T 0.20f
+#define ROUTE_DECK_W (ROUTE_DOOR_W - 0.2f)   /* walkway deck a touch NARROWER than the door, so it passes through the opening cleanly */
+#define ROUTE_DECK_T 0.15f                    /* walkway deck thickness */
 #define ROUTE_MAX    256
 #define ROUTE_STRAIGHT_EPS 0.5f   /* exit-axis offset under which a route is "straight" */
 

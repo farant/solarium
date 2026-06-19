@@ -4110,7 +4110,7 @@ static void connections_rebuild(AppState *st) {
                        r->corner.y - r->door_lo.y,
                        r->door_hi.x - r->door_lo.x, r->door_hi.z - r->door_lo.z,
                        r->door_hi.y - r->door_lo.y,
-                       ROUTE_DOOR_W + 0.4f, 0.15f);
+                       ROUTE_DECK_W, ROUTE_DECK_T);
         if (mb.index_count > 0) o->mesh = mesh_from_builder(&mb);
         mb_free(&mb);
     }
