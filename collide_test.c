@@ -293,8 +293,8 @@ int main(void) {
 
     /* ================= piece 2: the derivation (collide_rebuild) ========= */
 
-    /* ---- a sealed room: 4 wall slabs + ceiling, interior faces exactly at
-       the rendered planes (make_room: x=+/-w/2, z=+/-d/2) */
+    /* ---- a sealed room: floor + 4 wall slabs + ceiling (make_room_doored:
+       full-footprint floor, thick walls, x=+/-w/2, z=+/-d/2 interior planes) */
     {
         Scene       s;
         ColliderSet cs;
@@ -307,7 +307,7 @@ int main(void) {
         add_ref(&s, 0, v3(0, 0, 0), qid(), "room", prm, 8);
         collide_rebuild(&cs, &s);
         printf("room: %d boxes\n", cs.count);
-        if (cs.count != 5) { printf("FAIL: sealed room = 4 walls + ceiling\n"); return 1; }
+        if (cs.count != 6) { printf("FAIL: sealed room = floor + 4 walls + ceiling\n"); return 1; }
 
         p = press(&cs, v3(0, 0, 0), v3(0, 0, 0.1f), 30);
         printf("room south: z=%.3f (want ~%.3f)\n", p.z, 2.0f - R);
@@ -339,7 +339,7 @@ int main(void) {
         collide_rebuild(&cs, &s);
         p = press(&cs, v3(0, 0, 0), v3(0, 0, 0.1f), 40);
         printf("open south: %d boxes, z=%.3f\n", cs.count, p.z);
-        if (cs.count != 4 || p.z < 2.5f) {
+        if (cs.count != 5 || p.z < 2.5f) {
             printf("FAIL: an absent wall must not resist\n");
             return 1;
         }
@@ -348,8 +348,8 @@ int main(void) {
     }
 
     /* ---- the defaults-merge: a 3-param room (w,d,h only) still gets its
-       flags from the registry schema — sealed, 5 boxes (the item-7
-       schema-growth rule, honored by the derivation too) */
+       flags from the registry schema — sealed, 6 boxes (floor + 4 walls +
+       ceiling; the item-7 schema-growth rule, honored by the derivation too) */
     {
         Scene       s;
         ColliderSet cs;
@@ -360,7 +360,7 @@ int main(void) {
         add_ref(&s, 0, v3(0, 0, 0), qid(), "room", prm, 3);
         collide_rebuild(&cs, &s);
         printf("defaults: %d boxes\n", cs.count);
-        if (cs.count != 5) {
+        if (cs.count != 6) {
             printf("FAIL: absent params must take registry defaults\n");
             return 1;
         }
@@ -508,8 +508,10 @@ int main(void) {
             float z = b.vertices[i * 12 + 2];
             if (z > maxz) maxz = z;
         }
-        /* emit order in collide_rebuild: n, s, w, e, ceil -> south is [1] */
-        inner = cs.boxes[1].cz - cs.boxes[1].hz;
+        /* emit order in collide_rebuild: floor[0], ceil[1], walls N,E,S,W ->
+           south is [4]; doored walls are THICK (make_room_doored), so the
+           collider's OUTER face meets the emitter's outermost vertex */
+        inner = cs.boxes[4].cz + cs.boxes[4].hz;
         printf("one author: mesh max z=%.5f, collider face=%.5f\n", maxz, inner);
         if (!approx(inner, maxz, 0.0001f)) {
             printf("FAIL: emitter and collider have diverged — two authors\n");

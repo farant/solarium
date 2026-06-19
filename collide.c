@@ -11,6 +11,9 @@
 #include "gothic.h"     /* the plan + survival: the church read a
                            THIRD time — render and physics agree by
                            construction (P6 item 9) */
+#include "route.h"       /* doored-room openings + L-walkway routes: the
+                            collider reads route.c exactly as the mesh does
+                            (one author, two readers) */
 #include <string.h>     /* strcmp */
 
 #define COLLIDE_MAX_ITERS 3       /* push-outs per substep; a corner needs 2 */
@@ -312,28 +315,62 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
         if (o->mesh_ref == NULL) continue;
 
         if (strcmp(o->mesh_ref, "room") == 0) {
-            /* the shell: a slab per PRESENT wall, interior face at the
-               rendered plane (make_room: x = +/-w/2, z = +/-d/2, y in
-               [0,h]); the ceiling underside at y = h for fly's crown */
+            /* floor + a thick slab per present wall, built around the SAME door
+               gaps the mesh uses (route.c is the one author). The floor spans
+               the FULL outer footprint (matches make_room_doored) so doorway
+               strips stay walkable; headers over doors are NOT collided (the
+               player passes under the lintel). */
             float w  = ref_p(o, "w"), d = ref_p(o, "d"), h = ref_p(o, "h");
             float hw = w * 0.5f, hd = d * 0.5f;
-            float t  = COLLIDE_SHELL_T, ht = t * 0.5f;
+            float t  = ROUTE_WALL_T, ht = t * 0.5f;
             mat4  m  = scene_world_matrix(s, o);
-            if (ref_p(o, "wn") > 0.5f)
-                emit_local_box(cs, m, o->handle, 0.0f, -hd - ht, hw + t, ht, 0.0f, h);
-            if (ref_p(o, "ws") > 0.5f)
-                emit_local_box(cs, m, o->handle, 0.0f,  hd + ht, hw + t, ht, 0.0f, h);
-            if (ref_p(o, "ww") > 0.5f)
-                emit_local_box(cs, m, o->handle, -hw - ht, 0.0f, ht, hd + t, 0.0f, h);
-            if (ref_p(o, "we") > 0.5f)
-                emit_local_box(cs, m, o->handle,  hw + ht, 0.0f, ht, hd + t, 0.0f, h);
+            RoomOpening ops[16];
+            int   no = (o->parent != 0) ? route_room_openings(s, o->parent, ops, 16) : 0;
+            int   walls[4];
+            int   wi;
+            emit_local_box(cs, m, o->handle, 0.0f, 0.0f, hw + t, hd + t, -t, 0.0f); /* floor: full footprint */
             if (ref_p(o, "ceil") > 0.5f)
                 emit_local_box(cs, m, o->handle, 0.0f, 0.0f, hw, hd, h, h + t);
-            /* the floor: a thin slab whose TOP face is the floor plane (y=0), so
-               a room is walkable on its own floor even when it floats free with
-               no terrain beneath it (fs-tree). Harmless for grounded rooms — its
-               top coincides with the ground they already sit on. */
-            emit_local_box(cs, m, o->handle, 0.0f, 0.0f, hw, hd, -t, 0.0f);
+            walls[0] = ref_p(o, "wn") > 0.5f; walls[1] = ref_p(o, "we") > 0.5f;
+            walls[2] = ref_p(o, "ws") > 0.5f; walls[3] = ref_p(o, "ww") > 0.5f;
+            for (wi = 0; wi < 4; wi++) {
+                float s0, s1, fixc, fhalf;
+                int   runx = (wi == ROOM_WALL_N || wi == ROOM_WALL_S);
+                float lo[8], hi[8];
+                int   k = 0, gi, a;
+                float cur;
+                if (!walls[wi]) continue;
+                if (wi == ROOM_WALL_N)      { s0 = -hw;     s1 = hw;     fixc = -hd - ht; fhalf = ht; }
+                else if (wi == ROOM_WALL_S) { s0 = -hw;     s1 = hw;     fixc =  hd + ht; fhalf = ht; }
+                else if (wi == ROOM_WALL_E) { s0 = -hd - t; s1 = hd + t; fixc =  hw + ht; fhalf = ht; }
+                else                        { s0 = -hd - t; s1 = hd + t; fixc = -hw - ht; fhalf = ht; }
+                for (gi = 0; gi < no; gi++) {
+                    float c, gh;
+                    if (ops[gi].wall != wi) continue;
+                    if (k >= 8) break;
+                    c = ops[gi].center; gh = ops[gi].width * 0.5f;
+                    lo[k] = c - gh; hi[k] = c + gh; k++;
+                }
+                for (gi = 1; gi < k; gi++) {
+                    float la = lo[gi], ha = hi[gi];
+                    a = gi - 1;
+                    while (a >= 0 && lo[a] > la) { lo[a + 1] = lo[a]; hi[a + 1] = hi[a]; a--; }
+                    lo[a + 1] = la; hi[a + 1] = ha;
+                }
+                cur = s0;
+                for (gi = 0; gi <= k; gi++) {
+                    float gL = (gi < k) ? lo[gi] : s1;
+                    float gR = (gi < k) ? hi[gi] : s1;
+                    if (gL < s0) gL = s0;
+                    if (gR > s1) gR = s1;
+                    if (gL > cur) {
+                        float mid = (cur + gL) * 0.5f, half = (gL - cur) * 0.5f;
+                        if (runx) emit_local_box(cs, m, o->handle, mid, fixc, half, fhalf, 0.0f, h);
+                        else      emit_local_box(cs, m, o->handle, fixc, mid, fhalf, half, 0.0f, h);
+                    }
+                    if (gi < k) cur = gR;
+                }
+            }
 
         } else if (strcmp(o->mesh_ref, "wall") == 0) {
             /* the around-the-gap pieces at their REAL thickness — mirror
@@ -571,23 +608,45 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
                            len * 0.5f, w * 0.5f, -t, 0.0f);
 
         } else if (strcmp(o->mesh_ref, "walkway") == 0) {
-            /* mirror make_walkway: one box per step, deck top at (i+1)*rise.
-               The step-up treaty makes each rise climbable. */
-            float len = ref_p(o, "len"), w = ref_p(o, "w");
-            float t   = ref_p(o, "t"),   dy = ref_p(o, "dy");
-            float hl  = len * 0.5f, hw = w * 0.5f;
-            float ady = (dy < 0.0f) ? -dy : dy, tread, rise;
-            int   n, i;
-            mat4  m = scene_world_matrix(s, o);
-            n     = (ady < 0.02f) ? 1 : (int)(ady / WALKWAY_STEP_RISE) + 1;
-            if (n < 1)   n = 1;
-            if (n > 128) n = 128;
-            tread = len / (float)n;
-            rise  = dy  / (float)n;
-            for (i = 0; i < n; i++) {
-                float cx = -hl + ((float)i + 0.5f) * tread;
-                emit_local_box(cs, m, o->handle, cx, 0.0f,
-                               tread * 0.5f, hw, -t, (float)(i + 1) * rise);
+            /* mirror make_walkway_L: per-step boxes along each of the two legs
+               + the corner landing, recomputed from the route. The walkway sits
+               at door_lo with identity rot, so its object frame == the mesh's
+               local frame. Underside is LEG-RELATIVE (y0 - tt), not global. */
+            Route r;
+            mat4  m  = scene_world_matrix(s, o);
+            float ww = ROUTE_DOOR_W + 0.4f, hw2 = ww * 0.5f, tt = 0.15f;
+            if (route_for_walkway(s, o->handle, &r) && r.valid) {
+                float lx = r.corner.x - r.door_lo.x, lz = r.corner.z - r.door_lo.z;
+                float ly = r.corner.y - r.door_lo.y;
+                float ex = r.door_hi.x - r.door_lo.x, ez = r.door_hi.z - r.door_lo.z;
+                float ey = r.door_hi.y - r.door_lo.y;
+                float l1sq = lx * lx + lz * lz;
+                float l2sq = (ex - lx) * (ex - lx) + (ez - lz) * (ez - lz);
+                int   seg;
+                for (seg = 0; seg < 2; seg++) {
+                    float x0 = seg ? lx : 0.0f, z0 = seg ? lz : 0.0f, y0 = seg ? ly : 0.0f;
+                    float x1 = seg ? ex : lx,   z1 = seg ? ez : lz,   y1 = seg ? ey : ly;
+                    float dx = x1 - x0, dz = z1 - z0, dy = y1 - y0;
+                    float len = sqrtf(dx * dx + dz * dz);
+                    float ady = (dy < 0.0f) ? -dy : dy;
+                    int   nstep, i2, rx;
+                    if (len < 1e-4f) continue;
+                    rx = ((dx < 0.0f ? -dx : dx) >= (dz < 0.0f ? -dz : dz));
+                    nstep = (ady < 0.02f) ? 1 : (int)(ady / WALKWAY_STEP_RISE) + 1;
+                    if (nstep < 1) nstep = 1;
+                    if (nstep > 128) nstep = 128;
+                    for (i2 = 0; i2 < nstep; i2++) {
+                        float a0 = (float)i2 / (float)nstep, a1 = (float)(i2 + 1) / (float)nstep;
+                        float cxs = x0 + dx * (a0 + a1) * 0.5f;
+                        float czs = z0 + dz * (a0 + a1) * 0.5f;
+                        float yd  = y0 + dy * a1;
+                        float halfrun = len / (float)nstep * 0.5f;
+                        if (rx) emit_local_box(cs, m, o->handle, cxs, czs, halfrun, hw2, y0 - tt, yd);
+                        else    emit_local_box(cs, m, o->handle, cxs, czs, hw2, halfrun, y0 - tt, yd);
+                    }
+                }
+                if (l1sq > 1e-6f && l2sq > 1e-6f)
+                    emit_local_box(cs, m, o->handle, lx, lz, hw2, hw2, ly - tt, ly);
             }
 
         /* ---- the follies (P6 item 10): each reads the SAME truncation
