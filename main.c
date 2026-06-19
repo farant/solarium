@@ -5026,6 +5026,13 @@ static sol_bool mesh_asset_key(const SceneObject *o, char *buf) {
     size_t             len;
     if (!o->mesh_ref) return SOL_FALSE;
     if (strcmp(o->mesh_ref, "arrow") == 0) return SOL_FALSE;
+    /* room + walkway are scene-derived: connections_rebuild owns their meshes
+       (destroys + rebuilds them each pass, like arrows_rebuild does arrows).
+       They must NEVER be shared through the asset store, or that mesh_destroy
+       frees a buffer the store still references — double-freeing it and, via
+       buffer-id reuse, blanking an unrelated object (the disappearing room). */
+    if (strcmp(o->mesh_ref, "room") == 0 ||
+        strcmp(o->mesh_ref, "walkway") == 0) return SOL_FALSE;
     n = mesh_ref_schema(o->mesh_ref, &names, &defaults);
     if (n < 0) return SOL_FALSE;
     (void)defaults;
