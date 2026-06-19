@@ -144,7 +144,7 @@ static void solve_path(Scene *s, Route *r, vec3 plo, vec3 phi,
     int   cwh[4], cwr[4], ckind[4];   /* per-combo: H wall, R wall, kind */
     float csh[4], csr[4];             /* per-combo: H/R run-axis half-extent */
     static const float frac[7] = { 0.0f, 0.35f, -0.35f, 0.65f, -0.65f, 0.9f, -0.9f };
-    float best = 1e30f;
+    float best = 1e30f, tlo = 0.0f;
     int   found = 0, ci, gi, gj, gjn;
     int   bWlo = hwx, bWhi = rwz;
     float bOlo = 0.0f, bOhi = 0.0f;
@@ -157,6 +157,13 @@ static void solve_path(Scene *s, Route *r, vec3 plo, vec3 phi,
 
     for (ci = 0; ci < 4; ci++) {
         if (csh[ci] - m <= 0.0f || csr[ci] - m <= 0.0f) continue;
+        /* the ideal home-door offset: track the destination's position along the
+           wall's run axis, clamped to the wall, so doors on a shared wall order
+           by destination and the paths fan out instead of crossing each other */
+        tlo = (cwh[ci] == ROOM_WALL_E || cwh[ci] == ROOM_WALL_W) ? (phi.z - plo.z)
+                                                                 : (phi.x - plo.x);
+        if (tlo >   csh[ci] - m)  tlo =   csh[ci] - m;
+        if (tlo < -(csh[ci] - m)) tlo = -(csh[ci] - m);
         gjn = (ckind[ci] == 0 || ckind[ci] == 3) ? 1 : 7;   /* straight derives dR */
         for (gi = 0; gi < 7; gi++) {
             float dH = frac[gi] * (csh[ci] - m);
@@ -198,7 +205,8 @@ static void solve_path(Scene *s, Route *r, vec3 plo, vec3 phi,
                     }
                 }
                 if (!ok) continue;
-                al   = (dH < 0.0f ? -dH : dH) + (dR < 0.0f ? -dR : dR);
+                al   = ((dH - tlo) < 0.0f ? -(dH - tlo) : (dH - tlo))
+                         + (dR < 0.0f ? -dR : dR);
                 cost = al;
                 if (ckind[ci] == 1 || ckind[ci] == 2) cost += 2.0f;            /* a bend costs */
                 /* strongly prefer exiting toward the room's dominant direction,
