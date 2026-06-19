@@ -27,6 +27,7 @@
 #include "wtext.h"               /* world-space SDF text — note cards (P3 item 8) */
 #include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
+#include "route.h"
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
 #include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
 #include "component.h"           /* behavior as data — the overlay doctrine (P4 item 6) */
@@ -4082,58 +4083,71 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
     return 4.0f;   /* fallback */
 }
 
-/* Derive each walkway's transform + params from the two rooms it connects
-   (models arrows_rebuild). Anchored at the LOWER room's edge, climbing dy to
-   the higher; rebuilt geometry so render + collision (via params) agree. */
-static void walkways_rebuild(AppState *st) {
+/* Derive ALL connection geometry from the route author (route.c): each
+   walkway becomes an L (or straight) ribbon anchored at its lower door, and
+   each room's shell is rebuilt with the doorways its routes pierce. Rooms and
+   walkways store no geometry — this runs on load and after every edit, so a
+   new root can never leave a sibling's path stale (the take-1 bug). */
+static void connections_rebuild(AppState *st) {
     Scene  *s = &st->scene;
-    sol_u32 i, j;
-    for (i = 0; i < s->count; i++) {
-        SceneObject *o = &s->objects[i];
-        sol_u32      ha = 0, hb = 0, lo, hi;
-        vec3         pa, pb, plo, phi, dir, mid;
-        float        ea, eb, dx, dz, lenxz, dy, yaw, wp[4];
+    Route   routes[ROUTE_MAX];
+    int     n = route_all(s, routes, ROUTE_MAX), i;
+    sol_u32 j;
+
+    /* 1. walkways: anchor at the lower door, mesh in local coords */
+    for (i = 0; i < n; i++) {
+        Route       *r = &routes[i];
+        SceneObject *o = scene_get(s, r->walkway);
         MeshBuilder  mb;
-        if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
-        for (j = 0; j < o->rel_count; j++) {
-            if (strcmp(o->relations[j].type, "connects") != 0) continue;
-            if (ha == 0)      ha = o->relations[j].target;
-            else if (hb == 0) hb = o->relations[j].target;
-        }
-        if (ha == 0 || hb == 0 || !scene_get(s, ha) || !scene_get(s, hb)) {
-            mesh_destroy(&o->mesh);
-            continue;
-        }
-        pa = object_world_pos(s, ha);
-        pb = object_world_pos(s, hb);
-        lo = (pa.y <= pb.y) ? ha : hb;
-        hi = (lo == ha) ? hb : ha;
-        plo = object_world_pos(s, lo);
-        phi = object_world_pos(s, hi);
-        ea = room_half_extent(s, lo);
-        eb = room_half_extent(s, hi);
-        dx = phi.x - plo.x; dz = phi.z - plo.z;
-        lenxz = (float)sqrt((double)(dx * dx + dz * dz));
-        if (lenxz < 0.001f) { mesh_destroy(&o->mesh); continue; }
-        dir = vec3_make(dx / lenxz, 0.0f, dz / lenxz);
-        plo = vec3_add(plo, vec3_scale(dir, ea));
-        phi = vec3_sub(phi, vec3_scale(dir, eb));
-        dx = phi.x - plo.x; dz = phi.z - plo.z;
-        lenxz = (float)sqrt((double)(dx * dx + dz * dz));
-        dy = phi.y - plo.y;
-        if (lenxz < 0.05f) { mesh_destroy(&o->mesh); continue; }
-        yaw = (float)atan2((double)(-dz), (double)dx);
-        mid = vec3_make((plo.x + phi.x) * 0.5f, plo.y, (plo.z + phi.z) * 0.5f);
-        /* origin at the LOWER edge (mid.y = plo.y); dy in params carries the rise */
-        o->pos = mid;
-        o->rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw);
-        wp[0] = lenxz; wp[1] = 1.6f; wp[2] = 0.15f; wp[3] = dy;
-        scene_mesh_params_set(s, o->handle, wp, 4);
+        if (!o) continue;
         mesh_destroy(&o->mesh);
+        if (!r->valid) continue;
+        o->pos = r->door_lo;
+        o->rot = quat_identity();
         mb_init(&mb);
-        make_walkway(&mb, wp[0], wp[1], wp[2], wp[3]);
+        make_walkway_L(&mb,
+                       r->corner.x - r->door_lo.x, r->corner.z - r->door_lo.z,
+                       r->corner.y - r->door_lo.y,
+                       r->door_hi.x - r->door_lo.x, r->door_hi.z - r->door_lo.z,
+                       r->door_hi.y - r->door_lo.y,
+                       ROUTE_DOOR_W + 0.4f, 0.15f);
         if (mb.index_count > 0) o->mesh = mesh_from_builder(&mb);
         mb_free(&mb);
+    }
+
+    /* 2. rooms: rebuild each shell child with its doorways */
+    for (j = 0; j < s->count; j++) {
+        SceneObject *room = &s->objects[j];
+        const char  *rt;
+        sol_u32      k;
+        if (room->mesh_ref) continue;                 /* room parents are empties */
+        rt = scene_meta_get(s, room->handle, "room_type");
+        if (!rt) continue;
+        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        for (k = 0; k < s->count; k++) {
+            SceneObject *shell = &s->objects[k];
+            RoomOpening  ops[16];
+            int          no;
+            float        w, d, h;
+            MeshBuilder  mb;
+            if (shell->parent != room->handle || !shell->mesh_ref ||
+                strcmp(shell->mesh_ref, "room") != 0) continue;
+            w = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
+            d = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
+            h = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
+            no = route_room_openings(s, room->handle, ops, 16);
+            mesh_destroy(&shell->mesh);
+            mb_init(&mb);
+            make_room_doored(&mb, w, d, h, ROUTE_WALL_T,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "wn") > 0.5f,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "we") > 0.5f,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ws") > 0.5f,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ceil") > 0.5f,
+                             ops, no);
+            if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
+            mb_free(&mb);
+        }
     }
 }
 
@@ -6590,7 +6604,7 @@ static void create_root_from_path(AppState *st, const char *path) {
 
     scene_resolve_meshes(&st->scene);
     apply_kind_materials(&st->scene);
-    walkways_rebuild(st);
+    connections_rebuild(st);
     collide_rebuild(&st->colliders, &st->scene);
     scene_save(&st->scene, "scene.stml");
 
@@ -7924,7 +7938,7 @@ static sol_bool load_palace(AppState *st) {
     scene_release_meshes(&old);                   /* RELEASE (the old) */
     scene_free(&old);
     arrows_rebuild(st);              /* edges re-derive from the loaded cards */
-    walkways_rebuild(st);            /* and the room-to-room connectors */
+    connections_rebuild(st);         /* rooms + walkway connectors re-derive */
     collide_rebuild(&st->colliders, &st->scene);  /* and so do the walls */
     meadow_rebuild(st);                           /* and the grass */
     forest_rebuild(st);                           /* and the woods */
