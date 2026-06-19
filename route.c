@@ -69,7 +69,7 @@ static int routes_pass1(Scene *s, Route *out, int max) {
         SceneObject *o = &s->objects[i];
         sol_u32 ra, rb, lo, hi;
         vec3    pa, pb, plo, phi;
-        float   dx, dz, adx, adz;
+        float   dx, dz, adx, adz, hwl, hdl, hwh, hdh, mh;
         Route  *r;
         if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
         walkway_rooms(o, &ra, &rb);
@@ -85,28 +85,36 @@ static int routes_pass1(Scene *s, Route *out, int max) {
         dx = phi.x - plo.x; dz = phi.z - plo.z;
         adx = dx < 0.0f ? -dx : dx; adz = dz < 0.0f ? -dz : dz;
         if (adx < 1e-3f && adz < 1e-3f) { n++; continue; }
-        if (adz < ROUTE_STRAIGHT_EPS) {
+        room_half(s, lo, &hwl, &hdl);
+        room_half(s, hi, &hwh, &hdh);
+        mh = ROUTE_DOOR_W * 0.5f + 0.5f;     /* keep an off-center door clear of the corner */
+        /* STRAIGHT (off-center coupled doors) when the perpendicular offset
+           still fits within BOTH facing walls — no L corner needed, the door
+           just slides along the wall. Otherwise an L. This is what lets doors
+           sit off-center: a modestly-offset room gets a clean straight path. */
+        if (adx >= adz && adz <= hdh - mh && adz <= hdl - mh) {
             r->wall_lo = (dx > 0.0f) ? ROOM_WALL_E : ROOM_WALL_W;
             r->wall_hi = (dx > 0.0f) ? ROOM_WALL_W : ROOM_WALL_E;
             r->straight = 1;
-        } else if (adx < ROUTE_STRAIGHT_EPS) {
+        } else if (adz > adx && adx <= hwh - mh && adx <= hwl - mh) {
             r->wall_lo = (dz > 0.0f) ? ROOM_WALL_S : ROOM_WALL_N;
             r->wall_hi = (dz > 0.0f) ? ROOM_WALL_N : ROOM_WALL_S;
             r->straight = 1;
         } else {
-            /* diagonal: pick the L variant (which axis the lo room exits) whose
-               legs avoid OTHER rooms. Variant A exits along x (corner hi.x,lo.z);
-               variant B exits along z (corner lo.x,hi.z). Default to the
-               dominant axis; switch only when it clips and the alternate is
-               clear (the two endpoint rooms are excluded from the test). */
+            /* diagonal L: variant A exits along x (corner hi.x,lo.z); variant B
+               exits along z (corner lo.x,hi.z). A variant is "bad" if a leg cuts
+               through another room OR its corner lands inside an endpoint room.
+               Default to the dominant axis; switch only to escape a bad variant. */
             float hwd    = ROUTE_DECK_W * 0.5f + 0.1f;
             int   a_clip = leg_clips(s, plo.x, plo.z, phi.x, plo.z, hwd, lo, hi) ||
                            leg_clips(s, phi.x, plo.z, phi.x, phi.z, hwd, lo, hi);
             int   b_clip = leg_clips(s, plo.x, plo.z, plo.x, phi.z, hwd, lo, hi) ||
                            leg_clips(s, plo.x, phi.z, phi.x, phi.z, hwd, lo, hi);
+            int   a_bad  = a_clip || (adz < hdh) || (adx < hwl);  /* A corner in hi/lo */
+            int   b_bad  = b_clip || (adx < hwh) || (adz < hdl);  /* B corner in hi/lo */
             int   use_b  = (adz > adx) ? 1 : 0;
-            if (use_b && b_clip && !a_clip)  use_b = 0;
-            if (!use_b && a_clip && !b_clip) use_b = 1;
+            if (use_b && b_bad && !a_bad)  use_b = 0;
+            if (!use_b && a_bad && !b_bad) use_b = 1;
             if (!use_b) {
                 r->wall_lo = (dx > 0.0f) ? ROOM_WALL_E : ROOM_WALL_W;
                 r->wall_hi = (dz > 0.0f) ? ROOM_WALL_N : ROOM_WALL_S;

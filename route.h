@@ -12,7 +12,6 @@
 #define ROUTE_DECK_T 0.15f                    /* walkway deck thickness */
 #define ROUTE_DECK_DROP 0.02f                 /* deck sits this far below the floors, so its top doesn't z-fight the room floor at the thresholds */
 #define ROUTE_MAX    256
-#define ROUTE_STRAIGHT_EPS 0.5f   /* exit-axis offset under which a route is "straight" */
 
 /* One connection's fully-resolved geometry. World coords. The lower-Y room is
    the anchor: door_lo is the mesh origin of the walkway; the path bends at
