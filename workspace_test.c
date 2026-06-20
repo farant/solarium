@@ -44,6 +44,69 @@ int main(void) {
         CHECK(!scene_object_active(&s, b));      /* photos hidden while home active */
         scene_free(&s);
     }
+    /* id scheme: namespaced per workspace, monotonic */
+    {
+        Scene s; sol_u32 g;
+        scene_init(&s);
+        CHECK(workspace_gate_count(&s, "home") == 0);
+        g = workspace_add_gate(&s, "home", vec3_make(0,0,0), 0.0f,
+                               "home-1", "photos", "photos-1", "photos");
+        CHECK(g != 0);
+        CHECK(workspace_gate_count(&s, "home") == 1);
+        CHECK(strcmp(scene_meta_get(&s, g, "portal_id"), "home-1") == 0);
+        CHECK(strcmp(scene_meta_get(&s, g, "target_ws"), "photos") == 0);
+        CHECK(strcmp(scene_meta_get(&s, g, "target_portal_id"), "photos-1") == 0);
+        CHECK(strcmp(scene_meta_get(&s, g, "workspace"), "home") == 0);
+        CHECK(scene_get(&s, g)->kind == KIND_PORTAL);
+        scene_free(&s);
+    }
+    /* link: a pair cross-references, each gate tagged to its own side */
+    {
+        Scene s; sol_u32 out; sol_u32 i, ret = 0;
+        const char *out_id, *ret_id;
+        scene_init(&s);
+        out = workspace_link(&s, "home",   vec3_make(0,0,0),  0.0f,
+                                 "photos", vec3_make(5,0,0),  0.0f);
+        CHECK(out != 0);
+        out_id = scene_meta_get(&s, out, "portal_id");
+        ret_id = scene_meta_get(&s, out, "target_portal_id");
+        CHECK(strcmp(scene_meta_get(&s, out, "workspace"), "home") == 0);
+        CHECK(strcmp(scene_meta_get(&s, out, "target_ws"), "photos") == 0);
+        for (i = 0; i < s.count; i++) {                       /* find the partner */
+            const char *pid = scene_meta_get(&s, s.objects[i].handle, "portal_id");
+            if (pid && strcmp(pid, ret_id) == 0) { ret = s.objects[i].handle; break; }
+        }
+        CHECK(ret != 0);
+        CHECK(strcmp(scene_meta_get(&s, ret, "workspace"), "photos") == 0);
+        CHECK(strcmp(scene_meta_get(&s, ret, "target_ws"), "home") == 0);
+        CHECK(strcmp(scene_meta_get(&s, ret, "target_portal_id"), out_id) == 0);
+        scene_free(&s);
+    }
+    /* home room is tagged and is a real room (a "room" shell child) */
+    {
+        Scene s; sol_u32 room, i; int shell = 0;
+        scene_init(&s);
+        room = workspace_add_home_room(&s, "photos", vec3_make(0, 12, 0));
+        CHECK(strcmp(scene_meta_get(&s, room, "workspace"), "photos") == 0);
+        CHECK(strcmp(scene_meta_get(&s, room, "room_type"), "home") == 0);
+        for (i = 0; i < s.count; i++) {
+            SceneObject *o = &s.objects[i];
+            if (o->parent == room && o->mesh_ref && strcmp(o->mesh_ref, "room") == 0) shell = 1;
+        }
+        CHECK(shell);
+        scene_free(&s);
+    }
+    /* anchor find-or-create is idempotent */
+    {
+        Scene s; sol_u32 a1, a2;
+        scene_init(&s);
+        a1 = workspace_anchor_add(&s, "photos");
+        a2 = workspace_anchor_add(&s, "photos");
+        CHECK(a1 != 0 && a1 == a2);
+        CHECK(workspace_anchor_find(&s, "photos") == a1);
+        CHECK(workspace_anchor_find(&s, "nope") == 0);
+        scene_free(&s);
+    }
     if (fails == 0) printf("workspace_test: OK\n");
     return fails ? 1 : 0;
 }

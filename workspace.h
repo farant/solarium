@@ -14,4 +14,31 @@ const char *workspace_of(Scene *s, sol_u32 handle);
 /* Visible/live under the current filter? s->active_ws == "" => always true. */
 sol_bool    scene_object_active(Scene *s, sol_u32 handle);
 
+/* a WorkspaceAnchor: a parent-0 empty carrying meta["workspace_name"]. The
+   identity + display handle of a workspace, and what "Portal to..." lists. */
+sol_u32 workspace_anchor_find(Scene *s, const char *name);   /* 0 if none */
+sol_u32 workspace_anchor_add(Scene *s, const char *name);    /* find-or-create */
+
+/* count of KIND_PORTAL gates tagged into workspace `ws` (for id minting) */
+int     workspace_gate_count(Scene *s, const char *ws);
+
+/* a fresh open-topped home room tagged into `ws`, at `pos`. Returns the room
+   anchor handle. (Factored to mirror populate_home_scene's room.) */
+sol_u32 workspace_add_home_room(Scene *s, const char *ws, vec3 pos);
+
+/* Add one gate: a KIND_PORTAL object, mesh_ref "gate", tagged into `ws`, with
+   the full link meta. `yaw` is its facing (radians about world up). Returns
+   the gate handle. */
+sol_u32 workspace_add_gate(Scene *s, const char *ws, vec3 pos, float yaw,
+                           const char *self_id, const char *target_ws,
+                           const char *target_id, const char *label);
+
+/* Create a LINKED PAIR: an outbound gate in `from_ws` at (from_pos,from_yaw)
+   and a return gate in `to_ws` at (to_pos,to_yaw), cross-referenced by id.
+   Each gate's display name is the OTHER workspace's name, derived internally.
+   Returns the outbound gate handle. */
+sol_u32 workspace_link(Scene *s,
+                       const char *from_ws, vec3 from_pos, float from_yaw,
+                       const char *to_ws,   vec3 to_pos,   float to_yaw);
+
 #endif /* SOL_WORKSPACE_H */
