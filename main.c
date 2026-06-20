@@ -4139,7 +4139,88 @@ static void connections_rebuild(AppState *st) {
             w = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
             d = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
             h = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
-            no = route_room_openings(s, room->handle, ops, 16);
+            no = route_room_openings_in(routes, n, s, room->handle, ops, 16);
+            mesh_destroy(&shell->mesh);
+            mb_init(&mb);
+            make_room_doored(&mb, w, d, h, ROUTE_WALL_T,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "wn") > 0.5f,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "we") > 0.5f,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ws") > 0.5f,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f,
+                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ceil") > 0.5f,
+                             ops, no);
+            if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
+            mb_free(&mb);
+        }
+    }
+}
+
+/* Incident rebuild for the LIVE editor drag: re-thread only the walkways that
+   touch `focus`, and rebuild only the shells of the rooms those walkways touch —
+   a handful of meshes, not the whole graph. route_all is cheap now; this keeps
+   the per-frame GPU buffer churn small. The full connections_rebuild runs once
+   on release for the authoritative result (+ colliders + save). */
+static void connections_rebuild_focus(AppState *st, sol_u32 focus) {
+    Scene  *s = &st->scene;
+    Route   routes[ROUTE_MAX];
+    int     n, i;
+    sol_u32 j;
+    sol_u32 touched[ROUTE_MAX * 2];
+    int     nt = 0;
+    if (focus == 0) { connections_rebuild(st); return; }   /* full pass solves on its own */
+    n = route_all(s, routes, ROUTE_MAX);
+
+    /* walkways incident to focus (collect the rooms they touch) */
+    for (i = 0; i < n; i++) {
+        Route       *r = &routes[i];
+        SceneObject *o = scene_get(s, r->walkway);
+        MeshBuilder  mb;
+        if (!o) continue;
+        if (r->room_lo != focus && r->room_hi != focus) continue;
+        if (nt < ROUTE_MAX * 2) touched[nt++] = r->room_lo;
+        if (nt < ROUTE_MAX * 2) touched[nt++] = r->room_hi;
+        mesh_destroy(&o->mesh);
+        if (!r->valid) continue;
+        o->pos = r->door_lo;
+        o->pos.y -= ROUTE_DECK_DROP;
+        o->rot = quat_identity();
+        mb_init(&mb);
+        make_walkway_L(&mb,
+                       r->corner.x - r->door_lo.x, r->corner.z - r->door_lo.z,
+                       r->corner.y - r->door_lo.y,
+                       r->door_hi.x - r->door_lo.x, r->door_hi.z - r->door_lo.z,
+                       r->door_hi.y - r->door_lo.y,
+                       ROUTE_DECK_W, ROUTE_DECK_T);
+        if (mb.index_count > 0) o->mesh = mesh_from_builder(&mb);
+        mb_free(&mb);
+    }
+    if (nt < ROUTE_MAX * 2) touched[nt++] = focus;
+
+    /* shells of the touched rooms only */
+    for (j = 0; j < s->count; j++) {
+        SceneObject *room = &s->objects[j];
+        const char  *rt;
+        sol_u32      k;
+        int          ti, hit = 0;
+        if (room->mesh_ref) continue;
+        rt = scene_meta_get(s, room->handle, "room_type");
+        if (!rt) continue;
+        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        for (ti = 0; ti < nt; ti++)
+            if (touched[ti] == room->handle) { hit = 1; break; }
+        if (!hit) continue;
+        for (k = 0; k < s->count; k++) {
+            SceneObject *shell = &s->objects[k];
+            RoomOpening  ops[16];
+            int          no;
+            float        w, d, h;
+            MeshBuilder  mb;
+            if (shell->parent != room->handle || !shell->mesh_ref ||
+                strcmp(shell->mesh_ref, "room") != 0) continue;
+            w = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
+            d = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
+            h = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
+            no = route_room_openings_in(routes, n, s, room->handle, ops, 16);
             mesh_destroy(&shell->mesh);
             mb_init(&mb);
             make_room_doored(&mb, w, d, h, ROUTE_WALL_T,
@@ -7073,15 +7154,20 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->editor_del_was = del_now;
     }
 
-    /* per-frame: drive re-thread + save from the editor's flags */
-    if (st->editor.dirty) {
+    /* commit (an edit's release) = full authoritative rebuild + colliders +
+       save. A mid-drag `dirty` does the cheap INCIDENT re-thread (only the
+       dragged room + its walkways) so paths follow live — affordable now that
+       the solver is fast and the rebuild is scoped to a few meshes, not all ~19.
+       Colliders aren't used by the RTS camera, so they wait for release. */
+    if (st->editor.commit) {
         connections_rebuild(st);
         collide_rebuild(&st->colliders, &st->scene);
-        st->editor.dirty = SOL_FALSE;
-    }
-    if (st->editor.commit) {
         scene_save(&st->scene, "scene.stml");
         st->editor.commit = SOL_FALSE;
+        st->editor.dirty  = SOL_FALSE;
+    } else if (st->editor.dirty) {
+        connections_rebuild_focus(st, st->editor.room);
+        st->editor.dirty = SOL_FALSE;
     }
 
     /* G gathers the selected FILE/FOLDER card into the first workspace as an

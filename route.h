@@ -37,4 +37,11 @@ int  route_for_walkway(Scene *s, sol_u32 walkway, Route *out);
    make_room_doored / the collider. Returns the count written (<= max). */
 int  route_room_openings(Scene *s, sol_u32 room, RoomOpening *out, int max);
 
+/* The same two readers over ALREADY-COMPUTED routes — call route_all ONCE per
+   rebuild and pass the result, instead of each reader re-solving the whole
+   graph (the §1.4 one-author pattern; the wrappers above are these + a solve). */
+int  route_for_walkway_in(const Route *all, int n, sol_u32 walkway, Route *out);
+int  route_room_openings_in(const Route *all, int n, Scene *s, sol_u32 room,
+                            RoomOpening *out, int max);
+
 #endif

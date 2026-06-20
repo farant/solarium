@@ -308,7 +308,10 @@ static float ref_p(const SceneObject *o, const char *name) {
 
 void collide_rebuild(ColliderSet *cs, Scene *s) {
     sol_u32 i;
+    Route   routes[ROUTE_MAX];
+    int     nroutes;
     collide_set_clear(cs);
+    nroutes = route_all(s, routes, ROUTE_MAX);   /* ONCE: the room/walkway cases query it */
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         if (o->mesh_ref == NULL) continue;
@@ -324,7 +327,7 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
             float t  = ROUTE_WALL_T, ht = t * 0.5f;
             mat4  m  = scene_world_matrix(s, o);
             RoomOpening ops[16];
-            int   no = (o->parent != 0) ? route_room_openings(s, o->parent, ops, 16) : 0;
+            int   no = (o->parent != 0) ? route_room_openings_in(routes, nroutes, s, o->parent, ops, 16) : 0;
             int   walls[4];
             int   wi;
             emit_local_box(cs, m, o->handle, 0.0f, 0.0f, hw + t, hd + t, -t, 0.0f); /* floor: full footprint */
@@ -614,7 +617,7 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
             Route r;
             mat4  m  = scene_world_matrix(s, o);
             float ww = ROUTE_DECK_W, hw2 = ww * 0.5f, tt = ROUTE_DECK_T;
-            if (route_for_walkway(s, o->handle, &r) && r.valid) {
+            if (route_for_walkway_in(routes, nroutes, o->handle, &r) && r.valid) {
                 float lx = r.corner.x - r.door_lo.x, lz = r.corner.z - r.door_lo.z;
                 float ly = r.corner.y - r.door_lo.y;
                 float ex = r.door_hi.x - r.door_lo.x, ez = r.door_hi.z - r.door_lo.z;

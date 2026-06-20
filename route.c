@@ -24,26 +24,47 @@ static void room_half(Scene *s, sol_u32 room, float *hw, float *hd) {
     }
 }
 
-/* Does the axis-aligned leg from (ax,az) to (bx,bz), swept to the deck
-   half-width `hwd`, pass through any home/mirror room other than `ea`/`eb`?
-   Used to pick the L variant that doesn't cut through a bystander room. */
-static int leg_clips(Scene *s, float ax, float az, float bx, float bz,
-                     float hwd, sol_u32 ea, sol_u32 eb) {
+/* A room reduced to what the solver needs, collected ONCE per route_all so the
+   candidate search doesn't re-scan the whole scene (476 string-keyed objects)
+   for every leg test. This is what turns the brute-force search from
+   O(candidates x objects) into O(candidates x rooms). */
+typedef struct { sol_u32 handle; vec3 pos; float hw, hd; } RoomInfo;
+
+static int collect_rooms(Scene *s, RoomInfo *ri, int max) {
     sol_u32 i;
-    float   lx0 = (ax < bx ? ax : bx) - hwd, lx1 = (ax > bx ? ax : bx) + hwd;
-    float   lz0 = (az < bz ? az : bz) - hwd, lz1 = (az > bz ? az : bz) + hwd;
-    for (i = 0; i < s->count; i++) {
+    int     n = 0;
+    for (i = 0; i < s->count && n < max; i++) {
         SceneObject *o  = &s->objects[i];
         const char  *rt = scene_meta_get(s, o->handle, "room_type");
-        float        hw, hd;
-        vec3         p;
         if (!rt) continue;
         if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
-        if (o->handle == ea || o->handle == eb) continue;
-        room_half(s, o->handle, &hw, &hd);
-        p = obj_pos(s, o->handle);
-        if (lx1 < p.x - hw || lx0 > p.x + hw) continue;   /* no X overlap */
-        if (lz1 < p.z - hd || lz0 > p.z + hd) continue;   /* no Z overlap */
+        ri[n].handle = o->handle;
+        ri[n].pos    = obj_pos(s, o->handle);
+        room_half(s, o->handle, &ri[n].hw, &ri[n].hd);
+        n++;
+    }
+    return n;
+}
+
+/* a room's collected pos/half by handle (NULL if not found) */
+static const RoomInfo *room_find(const RoomInfo *ri, int nr, sol_u32 h) {
+    int i;
+    for (i = 0; i < nr; i++) if (ri[i].handle == h) return &ri[i];
+    return NULL;
+}
+
+/* Does the axis-aligned leg from (ax,az) to (bx,bz), swept to the deck
+   half-width `hwd`, pass through any room other than `ea`/`eb`? Used to pick
+   the L variant that doesn't cut through a bystander room. */
+static int leg_clips(const RoomInfo *ri, int nr, float ax, float az,
+                     float bx, float bz, float hwd, sol_u32 ea, sol_u32 eb) {
+    int   i;
+    float lx0 = (ax < bx ? ax : bx) - hwd, lx1 = (ax > bx ? ax : bx) + hwd;
+    float lz0 = (az < bz ? az : bz) - hwd, lz1 = (az > bz ? az : bz) + hwd;
+    for (i = 0; i < nr; i++) {
+        if (ri[i].handle == ea || ri[i].handle == eb) continue;
+        if (lx1 < ri[i].pos.x - ri[i].hw || lx0 > ri[i].pos.x + ri[i].hw) continue; /* no X overlap */
+        if (lz1 < ri[i].pos.z - ri[i].hd || lz0 > ri[i].pos.z + ri[i].hd) continue; /* no Z overlap */
         return 1;
     }
     return 0;
@@ -129,7 +150,7 @@ static int pt_in_room(vec3 p, vec3 c, float hw, float hd) {
    meets the wall, not at the wall center. Fills walls + door_lo/corner/door_hi
    and records the two placed doors. Falls back to a best-effort dominant-axis L
    (which may clip) only if no clean placement exists. */
-static void solve_path(Scene *s, Route *r, vec3 plo, vec3 phi,
+static void solve_path(const RoomInfo *ri, int nr, Route *r, vec3 plo, vec3 phi,
                        float hwl, float hdl, float hwh, float hdh,
                        PlacedDoor *pl, int *np) {
     float dx = phi.x - plo.x, dz = phi.z - plo.z;
@@ -198,10 +219,10 @@ static void solve_path(Scene *s, Route *r, vec3 plo, vec3 phi,
                 }
                 if (ok) {
                     if (ckind[ci] == 0 || ckind[ci] == 3) {
-                        if (leg_clips(s, dlo.x, dlo.z, dhi.x, dhi.z, hwd, lo, hi)) ok = 0;
+                        if (leg_clips(ri, nr, dlo.x, dlo.z, dhi.x, dhi.z, hwd, lo, hi)) ok = 0;
                     } else {
-                        if (leg_clips(s, dlo.x, dlo.z, cor.x, cor.z, hwd, lo, hi)) ok = 0;
-                        if (leg_clips(s, cor.x, cor.z, dhi.x, dhi.z, hwd, lo, hi)) ok = 0;
+                        if (leg_clips(ri, nr, dlo.x, dlo.z, cor.x, cor.z, hwd, lo, hi)) ok = 0;
+                        if (leg_clips(ri, nr, cor.x, cor.z, dhi.x, dhi.z, hwd, lo, hi)) ok = 0;
                     }
                 }
                 if (!ok) continue;
@@ -248,18 +269,22 @@ static void solve_path(Scene *s, Route *r, vec3 plo, vec3 phi,
 }
 
 int route_all(Scene *s, Route *out, int max) {
-    int       n = routes_pass1(s, out, max), i, np = 0;
+    RoomInfo   ri[ROUTE_MAX];
+    int        nr = collect_rooms(s, ri, ROUTE_MAX);
+    int        n = routes_pass1(s, out, max), i, np = 0;
     PlacedDoor placed[ROUTE_MAX * 2];
     for (i = 0; i < n; i++) {
-        Route *r = &out[i];
+        Route          *r = &out[i];
+        const RoomInfo *lo, *hi;
         vec3   plo, phi;
         float  hwl, hdl, hwh, hdh, l1, l2, tot;
         if (!r->valid) continue;
-        plo = obj_pos(s, r->room_lo);
-        phi = obj_pos(s, r->room_hi);
-        room_half(s, r->room_lo, &hwl, &hdl);
-        room_half(s, r->room_hi, &hwh, &hdh);
-        solve_path(s, r, plo, phi, hwl, hdl, hwh, hdh, placed, &np);
+        lo = room_find(ri, nr, r->room_lo);
+        hi = room_find(ri, nr, r->room_hi);
+        if (!lo || !hi) { r->valid = 0; continue; }   /* a connects target that isn't a room: drop it */
+        plo = lo->pos; phi = hi->pos;
+        hwl = lo->hw;  hdl = lo->hd;  hwh = hi->hw;  hdh = hi->hd;
+        solve_path(ri, nr, r, plo, phi, hwl, hdl, hwh, hdh, placed, &np);
         /* rise: steady climb over the run, corner height interpolated by leg len */
         l1 = (float)sqrt((double)((r->corner.x - r->door_lo.x) * (r->corner.x - r->door_lo.x) +
                                   (r->corner.z - r->door_lo.z) * (r->corner.z - r->door_lo.z)));
@@ -273,21 +298,28 @@ int route_all(Scene *s, Route *out, int max) {
     return n;
 }
 
-int route_for_walkway(Scene *s, sol_u32 walkway, Route *out) {
-    Route all[ROUTE_MAX];
-    int   n = route_all(s, all, ROUTE_MAX), i;
+/* reader over already-computed routes (no re-solve) — the one-author pattern:
+   compute route_all ONCE per rebuild, then query the result many times. */
+int route_for_walkway_in(const Route *all, int n, sol_u32 walkway, Route *out) {
+    int i;
     for (i = 0; i < n; i++) {
         if (all[i].walkway == walkway && all[i].valid) { *out = all[i]; return 1; }
     }
     return 0;
 }
 
-int route_room_openings(Scene *s, sol_u32 room, RoomOpening *out, int max) {
+int route_for_walkway(Scene *s, sol_u32 walkway, Route *out) {
     Route all[ROUTE_MAX];
-    int   n = route_all(s, all, ROUTE_MAX), i, m = 0;
-    vec3  rp = obj_pos(s, room);
+    int   n = route_all(s, all, ROUTE_MAX);
+    return route_for_walkway_in(all, n, walkway, out);
+}
+
+int route_room_openings_in(const Route *all, int n, Scene *s, sol_u32 room,
+                           RoomOpening *out, int max) {
+    int  i, m = 0;
+    vec3 rp = obj_pos(s, room);
     for (i = 0; i < n && m < max; i++) {
-        Route *r = &all[i];
+        const Route *r = &all[i];
         if (!r->valid) continue;
         if (r->room_lo == room) {
             int   wall = r->wall_lo;
@@ -306,4 +338,10 @@ int route_room_openings(Scene *s, sol_u32 room, RoomOpening *out, int max) {
         }
     }
     return m;
+}
+
+int route_room_openings(Scene *s, sol_u32 room, RoomOpening *out, int max) {
+    Route all[ROUTE_MAX];
+    int   n = route_all(s, all, ROUTE_MAX);
+    return route_room_openings_in(all, n, s, room, out, max);
 }
