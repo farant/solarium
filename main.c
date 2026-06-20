@@ -2649,6 +2649,7 @@ typedef struct AppState {
     int         plant_wall;     /* descent: ROOM_WALL_* the carried folder is aimed at */
     float       plant_off;      /* descent: offset along that wall */
     sol_bool    plant_aim;      /* descent: a valid wall-aim this frame */
+    sol_u32     last_room;      /* descent: room you were in last frame (walk-in edge) */
     sol_bool    lmb_was_down;
     sol_bool    editor_del_was;    /* edge-detect Delete/Backspace -> disconnect (editor) */
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
@@ -10970,6 +10971,25 @@ int main(void) {
                 &state.wind_dx, &state.wind_dz, &state.wind_gust);
         update(&state, dt);                           /* animate the scene */
         carry_update(&state);
+        {   /* descent: walking into a preview room finalizes it (edge-triggered) */
+            sol_u32 room = descend_room_at(&state.scene, state.camera.pos);
+            if (room != 0 && room != state.last_room) {
+                const char *rt = scene_meta_get(&state.scene, room, "room_type");
+                if (rt && strcmp(rt, "preview") == 0) {
+                    const char *sp = descend_finalize(&state.scene, room);
+                    if (sp) {
+                        room_mirror_scan(&state.scene, room, sp);   /* fill with cards */
+                        scene_resolve_meshes(&state.scene);
+                        apply_kind_materials(&state.scene);
+                        connections_rebuild(&state);
+                        collide_rebuild(&state.colliders, &state.scene);
+                        scene_save(&state.scene, "scene.stml");
+                        printf("finalized '%s'\n", sp);
+                    }
+                }
+            }
+            state.last_room = room;
+        }
         components_update(&state.scene, (float)now, (float)dt);  /* overlays
                                                          rewrite BEFORE the tree
                                                          and render read poses */
