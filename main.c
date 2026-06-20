@@ -30,6 +30,7 @@
 #include "route.h"
 #include "editor.h"              /* the top-down spatial-tree editor (Task 2-4) */
 #include "descend.h"             /* fs-tree descent: plant a folder as a door */
+#include "workspace.h"           /* active-workspace view filter (Portals) */
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
 #include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
 #include "component.h"           /* behavior as data — the overlay doctrine (P4 item 6) */
@@ -2982,6 +2983,7 @@ static void bvh_refresh(AppState *st) {
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         if (o->mesh.index_count == 0) continue;
+        if (!scene_object_active(s, o->handle)) continue;   /* hidden workspace */
         if (n >= st->bvh_count || st->bvh_ids[n] != o->handle) same = SOL_FALSE;
         st->bvh_ids[n]   = o->handle;
         st->bvh_boxes[n] = aabb_transform(scene_world_matrix(s, o),
@@ -4134,6 +4136,7 @@ static void connections_rebuild(AppState *st) {
         rt = scene_meta_get(s, room->handle, "room_type");
         if (!rt) continue;
         if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        if (!scene_object_active(s, room->handle)) continue;   /* hidden workspace */
         for (k = 0; k < s->count; k++) {
             SceneObject *shell = &s->objects[k];
             RoomOpening  ops[16];
@@ -8192,12 +8195,14 @@ static int rescan_mirrors(AppState *st) {
 static sol_bool load_palace(AppState *st) {
     Scene fresh, old;
     int   changes;
+    char  keep_ws[SOL_WS_NAME_CAP];
     if (!scene_load(&fresh, "scene.stml")) return SOL_FALSE;
     /* THE SWAP, acquire-first (P4 item 4): the fresh scene realizes its
        meshes BEFORE the old scene releases, so a shape present on both
        sides never sees refcount zero — survivors keep their buffers.
        Then the old scene's registry refs go back and its uniquely-owned
        meshes (arrows, glb parts) die outright. */
+    strcpy(keep_ws, st->scene.active_ws[0] ? st->scene.active_ws : "home");
     old       = st->scene;
     st->scene = fresh;
     scene_reimport_glbs(st);
@@ -8221,6 +8226,7 @@ static sol_bool load_palace(AppState *st) {
         scene_save(&st->scene, "scene.stml");
         printf("reconciled on load: %d change(s)\n", changes);
     }
+    strcpy(st->scene.active_ws, keep_ws);   /* a reload keeps your workspace */
     return SOL_TRUE;
 }
 
@@ -8753,6 +8759,11 @@ static int init_scene(AppState *state) {
         forest_rebuild(state);
         adopt_legacy_motion(state);   /* no-op for the home scene; movers exist only in loaded scenes */
     }
+
+    /* start filtered to "home" (every untagged object IS home, so this shows
+       everything in today's scene) + register the enumerable home anchor */
+    strcpy(state->scene.active_ws, "home");
+    workspace_anchor_add(&state->scene, "home");   /* enumerable home (idempotent) */
 
     /* spawn standing at the south edge of the scene, facing -Z at eye height
        with a slight downward tilt (2.5 was above the 2.2 doorway lintels) */
@@ -9344,6 +9355,7 @@ static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) 
         const SceneObject *o = &state->scene.objects[i];
         mat4 model;
         if (o->mesh.index_count == 0) continue;   /* empties cast nothing */
+        if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
         if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
             continue;                             /* water casts nothing */
         if (lvis && !lvis[o->handle]) continue;   /* outside this cascade's box */
@@ -9366,6 +9378,7 @@ static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) 
             int                clip;
             float              speed;
             if (!sg) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
             sm = skinned_get(sg);
             if (!sm) continue;
             skin_anim_of(o, &clip, &speed);
@@ -9631,6 +9644,7 @@ static void render(AppState *state) {
         mat4  model;
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
+        if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
         if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
             continue;                             /* ponds: the WATER PASS draws them */
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_glass") == 0)
@@ -9683,6 +9697,7 @@ static void render(AppState *state) {
             int           clip;
             float         speed;
             if (!sg) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
             sm = skinned_get(sg);
             if (!sm) continue;
             skin_anim_of(o, &clip, &speed);
