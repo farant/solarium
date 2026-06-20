@@ -67,7 +67,9 @@ serialization round-trips:
 - `scene.h`: append `KIND_PORTAL` after `KIND_TOMBSTONE` (value 6).
 - `scene_io.c`: append `"portal"` to `KIND_NAMES` (index 6).
 
-A gate is a parent-0 object with `mesh_ref = "portal"` and link meta:
+A gate is a parent-0 object with `mesh_ref = "gate"` and link meta (the mesh
+is named `"gate"`, not `"portal"` — `"portal"` is already taken by the gothic
+church-arch mesh at `mesh.c:981`):
 
 | meta key            | meaning                                                        |
 |---------------------|----------------------------------------------------------------|
@@ -201,7 +203,7 @@ until the player has left its volume once, then clear the guard.
 
 ## 6. The gate mesh & rendering
 
-- Synthesized in the `mesh.c` registry as `mesh_ref = "portal"` — per the
+- Synthesized in the `mesh.c` registry as `mesh_ref = "gate"` — per the
   synthesized-never-sourced law — a rectangular/arched doorframe plus a glowing
   inner quad. Keep it simple in v1; it can grow prettier later.
 - The shimmer is a **static emissive** material (or the existing P9 stained-glass
