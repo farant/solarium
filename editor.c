@@ -156,3 +156,129 @@ void editor_apply_resize(Scene *s, sol_u32 room, EditZone zone, float gx, float 
         }
     }
 }
+
+/* world ground point where the cursor ray meets the plane y = floor_y */
+static sol_bool editor_ground_at(const Camera *c, float nx, float ny, float aspect,
+                                 float floor_y, vec3 *out) {
+    Ray   r = camera_ray(c, nx, ny, aspect);
+    float t;
+    if (!ray_vs_plane(r, vec3_make(0.0f, floor_y, 0.0f),
+                      vec3_make(0.0f, 1.0f, 0.0f), &t)) return SOL_FALSE;
+    *out = vec3_add(r.origin, vec3_scale(r.dir, t));
+    return SOL_TRUE;
+}
+
+/* nearest room (parent handle) the cursor falls within (body or grab band).
+   Fills zone + ground point. 0 if none. */
+static sol_u32 editor_room_under(Scene *s, const Camera *c, float nx, float ny,
+                                 float aspect, EditZone *zone_out, vec3 *gp_out) {
+    sol_u32 i, best = 0;
+    float   bestd = 1e30f;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        RoomRect     r;
+        vec3         gp;
+        EditZone     z;
+        float        dx, dz, dd;
+        if (o->mesh_ref) continue;                      /* anchors are empties */
+        if (!scene_meta_get(s, o->handle, "room_type")) continue;
+        r = editor_room_rect(s, o->handle);
+        if (!editor_ground_at(c, nx, ny, aspect, r.floor_y, &gp)) continue;
+        z = editor_classify(r, gp.x, gp.z, EDITOR_GRAB_BAND);
+        if (z == EDIT_ZONE_NONE) continue;
+        dx = gp.x - r.cx; dz = gp.z - r.cz; dd = dx * dx + dz * dz;
+        if (dd < bestd) {
+            bestd = dd; best = o->handle;
+            if (zone_out) *zone_out = z;
+            if (gp_out)   *gp_out   = gp;
+        }
+    }
+    return best;
+}
+
+/* is the cursor over a room's connection node (projected to screen)? */
+static sol_bool editor_port_hit(const Camera *c, RoomRect r, float nx, float ny,
+                                float aspect) {
+    vec3 pw = vec3_make(r.cx, r.floor_y + EDITOR_PORT_LIFT, r.cz);
+    mat4 vp = mat4_mul(camera_proj(c, aspect), camera_view(c));
+    vec3 ndc;
+    float ex, ey;
+    if (!mat4_project_point(vp, pw, &ndc)) return SOL_FALSE;
+    ex = ndc.x - nx; ey = ndc.y - ny;
+    return (sol_bool)(ex * ex + ey * ey <= EDITOR_PORT_NDC * EDITOR_PORT_NDC);
+}
+
+void editor_press(Editor *e, Scene *s, const Camera *c,
+                  float nx, float ny, float aspect) {
+    EditZone z = EDIT_ZONE_NONE;
+    vec3     gp;
+    sol_u32  room;
+    e->action = EDIT_IDLE;
+    room = editor_room_under(s, c, nx, ny, aspect, &z, &gp);
+    if (room == 0) return;                          /* main.c may select a walkway */
+    {
+        RoomRect r = editor_room_rect(s, room);
+        if (editor_port_hit(c, r, nx, ny, aspect)) {
+            e->action       = EDIT_CONNECT;
+            e->room         = room;          /* highlight the connect source */
+            e->connect_from = room;
+            e->cursor_world = gp;
+            e->selected_wk  = 0;
+            return;
+        }
+        e->room        = room;
+        e->selected_wk = 0;
+        if (z == EDIT_ZONE_BODY) {
+            e->action   = EDIT_MOVE;
+            e->grab_off = vec3_make(r.cx - gp.x, 0.0f, r.cz - gp.z);
+        } else {
+            e->action = EDIT_RESIZE;
+            e->zone   = z;
+        }
+    }
+}
+
+void editor_drag(Editor *e, Scene *s, const Camera *c,
+                 float nx, float ny, float aspect) {
+    vec3     gp;
+    RoomRect r;
+    if (e->action == EDIT_IDLE) return;
+    if (e->action == EDIT_CONNECT) {
+        r = editor_room_rect(s, e->connect_from);
+        if (editor_ground_at(c, nx, ny, aspect, r.floor_y, &gp)) e->cursor_world = gp;
+        return;
+    }
+    r = editor_room_rect(s, e->room);
+    if (!editor_ground_at(c, nx, ny, aspect, r.floor_y, &gp)) return;
+    if (e->action == EDIT_MOVE) {
+        editor_apply_move(s, e->room, gp.x + e->grab_off.x, gp.z + e->grab_off.z);
+        e->dirty = SOL_TRUE;
+    } else if (e->action == EDIT_RESIZE) {
+        editor_apply_resize(s, e->room, e->zone, gp.x, gp.z);
+        e->dirty = SOL_TRUE;
+    }
+}
+
+void editor_release(Editor *e, Scene *s, const Camera *c,
+                    float nx, float ny, float aspect) {
+    if (e->action == EDIT_CONNECT) {
+        EditZone z;
+        vec3     gp;
+        sol_u32  target = editor_room_under(s, c, nx, ny, aspect, &z, &gp);
+        if (target != 0 && editor_connect(s, e->connect_from, target) != 0) {
+            e->dirty = SOL_TRUE; e->commit = SOL_TRUE;
+        }
+    } else if (e->action == EDIT_MOVE || e->action == EDIT_RESIZE) {
+        e->commit = SOL_TRUE;
+    }
+    e->action       = EDIT_IDLE;
+    e->connect_from = 0;
+}
+
+void editor_delete_selected(Editor *e, Scene *s) {
+    if (e->selected_wk != 0) {
+        editor_disconnect(s, e->selected_wk);
+        e->selected_wk = 0;
+        e->dirty = SOL_TRUE; e->commit = SOL_TRUE;
+    }
+}

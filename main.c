@@ -28,6 +28,7 @@
 #include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
 #include "route.h"
+#include "editor.h"              /* the top-down spatial-tree editor (Task 2-4) */
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
 #include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
 #include "component.h"           /* behavior as data — the overlay doctrine (P4 item 6) */
@@ -2481,6 +2482,7 @@ static RhiTexture build_decal_atlas(void) {
 
 typedef struct AppState {
     int         fb_width, fb_height;
+    Editor      editor;         /* top-down spatial-tree editor (zero = inactive) */
     RhiPipeline pipeline;
     RhiPipeline post_pipeline;  /* fullscreen tonemap/encode pass (item 7b) */
     RhiPipeline glass_pipeline; /* P9 item 2: church_glass — alpha-blend, depth-write-off */
@@ -2643,6 +2645,7 @@ typedef struct AppState {
     sol_u32     selected_handle;   /* 0 = none */
     sol_u32     carried;          /* object being carried; 0 = none */
     sol_bool    lmb_was_down;
+    sol_bool    editor_del_was;    /* edge-detect Delete/Backspace -> disconnect (editor) */
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
     /* drag-to-place (P3 item 4) */
     sol_u32     floor_handle;      /* room structure: never draggable (§1.2 is
@@ -6627,6 +6630,50 @@ static void cmd_new_root(AppState *st) {
     palette_prompt(&st->palette, "root path", create_root_from_path);
 }
 
+/* frame all rooms for the editor's entry vantage: centroid + farthest-room
+   radius (with margin). */
+static void editor_frame_rooms(AppState *st, vec3 *center, float *radius) {
+    sol_u32 i;
+    int     n = 0;
+    vec3    c = vec3_make(0.0f, 0.0f, 0.0f);
+    float   maxd = 0.0f;
+    for (i = 0; i < st->scene.count; i++) {
+        sol_u32 h = st->scene.objects[i].handle;
+        if (!scene_meta_get(&st->scene, h, "room_type")) continue;
+        c = vec3_add(c, object_world_pos(&st->scene, h));
+        n++;
+    }
+    if (n > 0) c = vec3_scale(c, 1.0f / (float)n);
+    else       c = vec3_make(0.0f, HOME_FLOOR_Y, 0.0f);
+    for (i = 0; i < st->scene.count; i++) {
+        sol_u32 h = st->scene.objects[i].handle;
+        vec3    p;
+        float   dx, dz, dd;
+        if (!scene_meta_get(&st->scene, h, "room_type")) continue;
+        p  = object_world_pos(&st->scene, h);
+        dx = p.x - c.x; dz = p.z - c.z;
+        dd = (float)sqrt((double)(dx * dx + dz * dz));
+        if (dd > maxd) maxd = dd;
+    }
+    *center = c;
+    *radius = maxd + 14.0f;
+}
+
+/* G / palette: toggle the top-down editor. The camera enter/exit + cursor mode
+   happen in read_input on the active edge (it has the GLFWwindow). */
+static void cmd_toggle_editor(AppState *st) {
+    st->editor.active = (sol_bool)!st->editor.active;
+}
+
+static sol_bool can_disconnect(AppState *st) {
+    return (sol_bool)(st->editor.active && st->editor.selected_wk != 0);
+}
+
+/* palette: remove the selected walkway. */
+static void cmd_disconnect(AppState *st) {
+    editor_delete_selected(&st->editor, &st->scene);
+}
+
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
@@ -6652,7 +6699,9 @@ static Command g_commands[] = {
     { "Mint dust emitter",           NULL, 0,          cmd_mint_dust,         NULL,                  SOL_FALSE },
     { "Carry / place selected",      "E", GLFW_KEY_E, cmd_carry_toggle,      can_carry_toggle,      SOL_FALSE },
     { "Mint fox",                    "Y", GLFW_KEY_Y, cmd_mint_fox,          NULL,                  SOL_FALSE },
-    { "New root...",                 NULL, 0,          cmd_new_root,          NULL,                  SOL_FALSE }
+    { "New root...",                 NULL, 0,          cmd_new_root,          NULL,                  SOL_FALSE },
+    { "Top-down editor",             NULL, 0,          cmd_toggle_editor,     NULL,                  SOL_FALSE },
+    { "Disconnect selected",         NULL, 0,          cmd_disconnect,        can_disconnect,        SOL_FALSE }
 };
 
 #define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
@@ -6755,7 +6804,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     dragging = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     if (st->mouse_skip > 0) {
         st->mouse_skip--;                           /* reseed only; don't apply the delta */
-    } else if (fp || (dragging && st->drag_handle == 0)) {
+    } else if ((fp || (dragging && st->drag_handle == 0)) && !st->editor.active) {
         /* in orbit, a drag that started ON an object carries it (item 4)
            instead of rotating the camera — drag_handle gates the look */
         float dx = (float)(mx - st->mouse_last_x);
@@ -6779,6 +6828,30 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        no save button in a memory palace). */
     {
         sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+
+        if (st->editor.active) {                       /* ---- editor mouse ---- */
+            int    ww, wh;
+            float  nx, ny, aspect;
+            glfwGetWindowSize(w, &ww, &wh);
+            aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
+            nx = 2.0f * (float)mx / (float)ww - 1.0f;
+            ny = 1.0f - 2.0f * (float)my / (float)wh;
+            if (lmb && !st->lmb_was_down) {
+                editor_press(&st->editor, &st->scene, &st->camera, nx, ny, aspect);
+                if (st->editor.action == EDIT_IDLE) {
+                    float   t;
+                    sol_u32 hit = pick_at(st, w, nx, ny, &t);   /* rooms are pick-skipped: this finds a walkway */
+                    st->editor.selected_wk = object_is_walkway(&st->scene, hit) ? hit : 0;
+                    st->selected_handle    = st->editor.selected_wk;
+                } else {
+                    st->selected_handle = st->editor.room;       /* highlight the room */
+                }
+            } else if (lmb && st->lmb_was_down) {
+                editor_drag(&st->editor, &st->scene, &st->camera, nx, ny, aspect);
+            } else if (!lmb && st->lmb_was_down) {
+                editor_release(&st->editor, &st->scene, &st->camera, nx, ny, aspect);
+            }
+        } else {
 
         if (lmb && !st->lmb_was_down) {                 /* ---- press ---- */
             st->press_x = mx;
@@ -6950,6 +7023,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             st->drag_handle = 0;
             st->drag_moved  = SOL_FALSE;
         }
+        }                                               /* ---- end editor else ---- */
         st->lmb_was_down = lmb;
     }
 
@@ -6961,11 +7035,53 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             Command *cmd = &g_commands[ci];
             sol_bool now;
             if (cmd->key == 0) continue;
+            if (st->editor.active)
+                { cmd->was_down = SOL_FALSE; continue; }       /* editor: hotkeys off; use the palette */
             now = glfwGetKey(w, cmd->key) == GLFW_PRESS;
             if (now && !cmd->was_down && (cmd->can_run == NULL || cmd->can_run(st)))
                 cmd->run(st);
             cmd->was_down = now;
         }
+    }
+
+    /* editor enter/exit: framed RTS camera in, saved first-person camera out */
+    if (st->editor.active && !st->editor.was_active) {
+        vec3  center;
+        float radius;
+        st->editor.saved_cam = st->camera;
+        editor_frame_rooms(st, &center, &radius);
+        camera_enter_rts(&st->camera, center, radius);
+        st->editor.action      = EDIT_IDLE;
+        st->editor.selected_wk = 0;
+        st->selected_handle    = 0;
+        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        st->mouse_skip = 2;
+    } else if (!st->editor.active && st->editor.was_active) {
+        st->camera = st->editor.saved_cam;
+        st->selected_handle = 0;
+        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        st->mouse_skip = 2;
+    }
+    st->editor.was_active = st->editor.active;
+
+    /* Delete / Backspace: drop the selected walkway while editing */
+    {
+        sol_bool del_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_DELETE) == GLFW_PRESS ||
+                                      glfwGetKey(w, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
+        if (st->editor.active && del_now && !st->editor_del_was)
+            editor_delete_selected(&st->editor, &st->scene);
+        st->editor_del_was = del_now;
+    }
+
+    /* per-frame: drive re-thread + save from the editor's flags */
+    if (st->editor.dirty) {
+        connections_rebuild(st);
+        collide_rebuild(&st->colliders, &st->scene);
+        st->editor.dirty = SOL_FALSE;
+    }
+    if (st->editor.commit) {
+        scene_save(&st->scene, "scene.stml");
+        st->editor.commit = SOL_FALSE;
     }
 
     /* G gathers the selected FILE/FOLDER card into the first workspace as an
