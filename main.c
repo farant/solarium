@@ -3081,6 +3081,7 @@ static void meadow_rebuild(AppState *st) {
         if (st->meadow_count >= (int)(sizeof st->meadow / sizeof st->meadow[0]))
             break;
         if (!o->mesh_ref || strcmp(o->mesh_ref, "terrain") != 0) continue;
+        if (!scene_object_active(&st->scene, o->handle)) continue;   /* hidden workspace */
         w   = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "w");
         d   = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "d");
         amp = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "amp");
@@ -4789,6 +4790,7 @@ static void forest_rebuild(AppState *st) {
         if (st->forest_count >= (int)(sizeof st->forest / sizeof st->forest[0]))
             break;
         if (!o->mesh_ref || strcmp(o->mesh_ref, "terrain") != 0) continue;
+        if (!scene_object_active(&st->scene, o->handle)) continue;   /* hidden workspace */
         w   = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "w");
         d   = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "d");
         amp = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "amp");
@@ -9557,6 +9559,7 @@ static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) 
             SceneObject   *o  = scene_get(&state->scene, pt->source);
             mat4 model;
             if (!o || um->index_count == 0) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
             if (lvis && !lvis[o->handle]) continue;
             model = scene_world_matrix(&state->scene, o);
             rhi_set_uniform_mat4("uModel", model.m);
@@ -9970,6 +9973,7 @@ static void render(AppState *state) {
             Material       mat;
             mat4 model;
             if (!o || um->index_count == 0) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
             if (vis && !vis[o->handle]) continue;
             mat   = (pt->kind == ORN_BALUSTER) ? o->material : pt->material;
             model = scene_world_matrix(&state->scene, o);
@@ -10238,6 +10242,7 @@ static void render(AppState *state) {
             float dx, dy, dz;
             if (o->mesh.index_count == 0) continue;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "church_glass") != 0) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
             if (vis && !vis[o->handle]) continue;
             gm = scene_world_matrix(&state->scene, o);
             dx = gm.m[12] - eye.x; dy = gm.m[13] - eye.y; dz = gm.m[14] - eye.z;
@@ -10280,6 +10285,7 @@ static void render(AppState *state) {
             mat4 model;
             if (o->mesh.index_count == 0) continue;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "church_decals") != 0) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
             if (vis && !vis[o->handle]) continue;
             model = scene_world_matrix(&state->scene, o);
             rhi_set_uniform_mat4("uModel", model.m);
@@ -10304,6 +10310,7 @@ static void render(AppState *state) {
             mat4  model;
             float r, depth, alpha;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "pond") != 0) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
             if (o->mesh.index_count == 0) continue;
             if (vis && !vis[o->handle]) continue;
             r     = mesh_ref_param("pond", o->mesh_params, o->mesh_param_count, "r");
@@ -10521,6 +10528,7 @@ static void render(AppState *state) {
                     mat4  m;
                     float r, dx, dz;
                     if (!o->mesh_ref || strcmp(o->mesh_ref, "pond") != 0) continue;
+                    if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
                     m = scene_world_matrix(&state->scene, o);
                     if (state->camera.pos.y >= m.m[13]) continue;   /* above the surface */
                     r  = mesh_ref_param("pond", o->mesh_params, o->mesh_param_count, "r");
