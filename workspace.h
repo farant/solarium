@@ -41,4 +41,13 @@ sol_u32 workspace_link(Scene *s,
                        const char *from_ws, vec3 from_pos, float from_yaw,
                        const char *to_ws,   vec3 to_pos,   float to_yaw);
 
+/* the gate carrying meta["portal_id"] == id, or 0. */
+sol_u32 workspace_find_gate_by_id(Scene *s, const char *portal_id);
+
+/* Where a traveller arriving at `gate` stands: `stand` meters in front of the
+   gate along its facing, raised by `eye`; *out_yaw is the gate's facing (you
+   arrive looking the way it points, into the world). */
+void    workspace_spawn_at_gate(Scene *s, sol_u32 gate, float stand, float eye,
+                                vec3 *out_pos, float *out_yaw);
+
 #endif /* SOL_WORKSPACE_H */

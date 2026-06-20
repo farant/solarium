@@ -3,6 +3,7 @@
 #include "sol_math.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
@@ -105,6 +106,25 @@ int main(void) {
         CHECK(a1 != 0 && a1 == a2);
         CHECK(workspace_anchor_find(&s, "photos") == a1);
         CHECK(workspace_anchor_find(&s, "nope") == 0);
+        scene_free(&s);
+    }
+    /* arrival: find by id, and spawn stands in front along the gate's yaw */
+    {
+        Scene s; sol_u32 g; vec3 p; float yaw;
+        scene_init(&s);
+        /* gate at x=10, facing yaw = +pi/2 */
+        g = workspace_add_gate(&s, "home", vec3_make(10,5,0), 1.5707963f,
+                               "home-1", "b", "b-1", "b");
+        CHECK(workspace_find_gate_by_id(&s, "home-1") == g);
+        CHECK(workspace_find_gate_by_id(&s, "nope") == 0);
+        workspace_spawn_at_gate(&s, g, 1.5f, 1.65f, &p, &yaw);
+        CHECK(fabs((double)(p.y - (5.0f + 1.65f))) < 1e-3);   /* raised by eye */
+        CHECK(fabs((double)(yaw - 1.5707963f)) < 1e-3);        /* faces the way the gate points */
+        /* stands 1.5 in front: horizontal displacement magnitude ~= 1.5 */
+        {
+            double dx = p.x - 10.0, dz = p.z - 0.0;
+            CHECK(fabs(sqrt(dx*dx + dz*dz) - 1.5) < 1e-2);
+        }
         scene_free(&s);
     }
     if (fails == 0) printf("workspace_test: OK\n");

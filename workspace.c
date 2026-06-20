@@ -3,6 +3,7 @@
 #include "sol_math.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 const char *workspace_of(Scene *s, sol_u32 handle) {
     sol_u32 h = handle;
@@ -110,4 +111,34 @@ sol_u32 workspace_link(Scene *s,
     workspace_add_gate(s, to_ws, to_pos, to_yaw,
                        id_to, from_ws, id_from, from_ws);
     return out;
+}
+
+sol_u32 workspace_find_gate_by_id(Scene *s, const char *portal_id) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        const char *pid;
+        if (s->objects[i].kind != KIND_PORTAL) continue;
+        pid = scene_meta_get(s, s->objects[i].handle, "portal_id");
+        if (pid && strcmp(pid, portal_id) == 0) return s->objects[i].handle;
+    }
+    return 0;
+}
+
+void workspace_spawn_at_gate(Scene *s, sol_u32 gate, float stand, float eye,
+                             vec3 *out_pos, float *out_yaw) {
+    SceneObject *o = scene_get(s, gate);
+    mat4  m;
+    vec3  gp, fwd;
+    quat  q;
+    float yaw;
+    if (!o) { out_pos->x = out_pos->y = out_pos->z = 0.0f; *out_yaw = 0.0f; return; }
+    m   = scene_world_matrix(s, o);
+    gp  = vec3_make(m.m[12], m.m[13], m.m[14]);             /* translation column */
+    q   = o->rot;                                           /* pure-yaw quaternion */
+    yaw = 2.0f * (float)atan2((double)q.y, (double)q.w);
+    fwd = vec3_make((float)cos((double)yaw), 0.0f, (float)sin((double)yaw));
+    out_pos->x = gp.x + fwd.x * stand;
+    out_pos->y = gp.y + eye;
+    out_pos->z = gp.z + fwd.z * stand;
+    *out_yaw   = yaw;
 }
