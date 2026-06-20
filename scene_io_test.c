@@ -282,8 +282,8 @@ int main(void) {
             float       wall_p[6];
             mb_init(&mb);
             if (!mesh_ref_build("room", (const float *)0, 0, &mb) ||
-                mb.vertex_count != 24 || mb.index_count != 36) {
-                printf("FAIL: room shell should be 6 quads (24v/36i), got %uv/%ui\n",
+                mb.vertex_count != 144 || mb.index_count != 216) {
+                printf("FAIL: room shell (4 thick doored walls + floor + ceiling, 6 boxes) should be 144v/216i, got %uv/%ui\n",
                        (unsigned)mb.vertex_count, (unsigned)mb.index_count);
                 mb_free(&mb); scene_free(&b); scene_free(&scene);
                 return 1;
@@ -324,8 +324,9 @@ int main(void) {
                 folly_p[6] = 0.0f; folly_p[7] = 0.0f;
                 mesh_ref_build("room", folly_p, 8, &mb);
             }
-            if (mb.vertex_count != 4 || mb.index_count != 6) {
-                printf("FAIL: floor-only room should be 1 quad (4v/6i)\n");
+            if (mb.vertex_count != 24 || mb.index_count != 36) {
+                printf("FAIL: floor-only room should be 1 thick box (24v/36i), got %uv/%ui\n",
+                       (unsigned)mb.vertex_count, (unsigned)mb.index_count);
                 mb_free(&mb); scene_free(&b); scene_free(&scene);
                 return 1;
             }
