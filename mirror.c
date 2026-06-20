@@ -14,16 +14,37 @@
    assumes the anchor is unrotated, true of every room built so far). Auto-
    layout applies ONLY here: the moment a card is dragged it is placed, and
    placement is the user's forever. */
-#define TRAY_COLS   8
-#define TRAY_X0   (-1.6f)
+#define TRAY_COLS   8            /* the minimum (small rooms); wider rooms get more */
 #define TRAY_DX     0.45f
 #define TRAY_Z0     2.2f
 #define TRAY_DZ   (-0.42f)
 
-static vec3 tray_slot(int i) {
-    int  col = i % TRAY_COLS, row = i / TRAY_COLS;
-    vec3 p;
-    p.x = TRAY_X0 + (float)col * TRAY_DX;
+/* Columns scale with the room's interior width, so the tray fills wider rooms
+   HORIZONTALLY (more columns) instead of always 8 columns + growing down in
+   rows. The room's width is the "room" shell child's first mesh param. */
+static int tray_cols(Scene *s, sol_u32 room) {
+    sol_u32 j;
+    float   w = 10.0f;
+    int     cols;
+    for (j = 0; j < s->count; j++) {
+        const SceneObject *o = &s->objects[j];
+        if (o->parent == room && o->mesh_ref && strcmp(o->mesh_ref, "room") == 0) {
+            w = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "w");
+            break;
+        }
+    }
+    cols = (int)((w - 1.4f) / TRAY_DX);   /* keep cards ~0.7 off each side wall */
+    if (cols < TRAY_COLS) cols = TRAY_COLS;
+    if (cols > 48) cols = 48;
+    return cols;
+}
+
+/* a centered grid: the row of `cols` slots is centered on the room's x axis */
+static vec3 tray_slot(int i, int cols) {
+    int   col = i % cols, row = i / cols;
+    float x0  = -((float)(cols - 1) * TRAY_DX) * 0.5f;
+    vec3  p;
+    p.x = x0 + (float)col * TRAY_DX;
     p.y = 0.0f;
     p.z = TRAY_Z0 + (float)row * TRAY_DZ;
     return p;
@@ -34,6 +55,7 @@ int room_mirror_scan(Scene *s, sol_u32 room, const char *dirpath) {
     Mesh      empty = {0};
     quat      qid;
     int       i, changed = 0, tray_n = 0;
+    int       cols = tray_cols(s, room);   /* tray width scales with the room */
     sol_u32   j;
 
     if (!fs_scan_dir(dirpath, &l)) return -1;
@@ -75,7 +97,7 @@ int room_mirror_scan(Scene *s, sol_u32 room, const char *dirpath) {
         }
         if (found) continue;
 
-        pos = tray_slot(tray_n++);
+        pos = tray_slot(tray_n++, cols);
         one.x = 1.0f; one.y = 1.0f; one.z = 1.0f;
         h = scene_add(s, room, empty, pos, qid, one);
         scene_kind_set(s, h, l.entries[i].is_dir ? KIND_FOLDER : KIND_FILE);
@@ -126,6 +148,7 @@ sol_u32 workspace_add_alias(Scene *s, sol_u32 room, const char *path, const char
     vec3    one;
     sol_u32 j, h;
     int     slot = 0;
+    int     cols = tray_cols(s, room);
 
     for (j = 0; j < s->count; j++) {
         const SceneObject *o = &s->objects[j];
@@ -137,7 +160,7 @@ sol_u32 workspace_add_alias(Scene *s, sol_u32 room, const char *path, const char
 
     qid.x = 0.0f; qid.y = 0.0f; qid.z = 0.0f; qid.w = 1.0f;
     one.x = 1.0f; one.y = 1.0f; one.z = 1.0f;
-    h = scene_add(s, room, empty, tray_slot(slot), qid, one);
+    h = scene_add(s, room, empty, tray_slot(slot, cols), qid, one);
     scene_kind_set(s, h, KIND_ALIAS);
     scene_content_set(s, h, path);
     if (name) scene_meta_set(s, h, "name", name);
