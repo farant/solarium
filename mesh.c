@@ -404,7 +404,7 @@ static void walkway_leg(MeshBuilder *b, sol_f32 x0, sol_f32 z0, sol_f32 y0,
             bz0 = (sz < tz) ? sz : tz; bz1 = (sz < tz) ? tz : sz;
             bx0 = sx - hw; bx1 = sx + hw;
         }
-        aabb_box(b, bx0, bx1, y0 - t, yd, bz0, bz1);
+        aabb_box(b, bx0, bx1, yd - t, yd, bz0, bz1);   /* a thin FLOATING board per step (air below) */
     }
 }
 

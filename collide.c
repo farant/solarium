@@ -643,8 +643,9 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
                         float czs = z0 + dz * (a0 + a1) * 0.5f;
                         float yd  = y0 + dy * a1;
                         float halfrun = len / (float)nstep * 0.5f;
-                        if (rx) emit_local_box(cs, m, o->handle, cxs, czs, halfrun, hw2, y0 - tt, yd);
-                        else    emit_local_box(cs, m, o->handle, cxs, czs, hw2, halfrun, y0 - tt, yd);
+                        /* thin FLOATING board per step (air below), matching make_walkway_L */
+                        if (rx) emit_local_box(cs, m, o->handle, cxs, czs, halfrun, hw2, yd - tt, yd);
+                        else    emit_local_box(cs, m, o->handle, cxs, czs, hw2, halfrun, yd - tt, yd);
                     }
                 }
                 if (l1sq > 1e-6f && l2sq > 1e-6f)
