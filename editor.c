@@ -2,6 +2,7 @@
 
 #include "editor.h"
 #include "mesh.h"       /* mesh_ref_param */
+#include "workspace.h"  /* scene_object_active */
 #include "sol_math.h"
 
 #include <string.h>     /* strcmp, memset */
@@ -70,6 +71,7 @@ sol_bool editor_can_connect(Scene *s, sol_u32 a, sol_u32 b) {
     if (a == 0 || b == 0 || a == b) return SOL_FALSE;
     if (!scene_meta_get(s, a, "room_type")) return SOL_FALSE;
     if (!scene_meta_get(s, b, "room_type")) return SOL_FALSE;
+    if (!scene_object_active(s, a) || !scene_object_active(s, b)) return SOL_FALSE;
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         sol_u32      x = 0, y = 0, j;
@@ -182,6 +184,7 @@ static sol_u32 editor_room_under(Scene *s, const Camera *c, float nx, float ny,
         float        dx, dz, dd;
         if (o->mesh_ref) continue;                      /* anchors are empties */
         if (!scene_meta_get(s, o->handle, "room_type")) continue;
+        if (!scene_object_active(s, o->handle)) continue;   /* hidden workspace */
         r = editor_room_rect(s, o->handle);
         if (!editor_ground_at(c, nx, ny, aspect, r.floor_y, &gp)) continue;
         z = editor_classify(r, gp.x, gp.z, EDITOR_GRAB_BAND);

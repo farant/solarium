@@ -117,7 +117,7 @@ fi
 if [ "$MODE" = "editortest" ]; then
     set -x
     clang -std=c89 -pedantic-errors -Werror -g -fsanitize=address,undefined \
-        editor.c editor_test.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c camera.c \
+        editor.c editor_test.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c camera.c workspace.c \
         -o editor_test
     echo "built ./editor_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
@@ -128,7 +128,7 @@ fi
 if [ "$MODE" = "descendtest" ]; then
     set -x
     clang -std=c89 -pedantic-errors -Werror -g -fsanitize=address,undefined \
-        descend.c descend_test.c editor.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c camera.c \
+        descend.c descend_test.c editor.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c camera.c workspace.c \
         -o descend_test
     echo "built ./descend_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0

@@ -174,6 +174,19 @@ int main(void) {
         scene_free(&s);
     }
 
+    /* the editor refuses to connect a room in a non-active workspace */
+    {
+        Scene s; sol_u32 a, b;
+        scene_init(&s);
+        a = add_room(&s, 0.0f,  12.0f, 0.0f, 8.0f, 8.0f);
+        b = add_room(&s, 14.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        CHECK(editor_can_connect(&s, a, b));         /* both visible: connectable */
+        scene_meta_set(&s, b, "workspace", "hidden");
+        strcpy(s.active_ws, "home");
+        CHECK(!editor_can_connect(&s, a, b));        /* b hidden: refused */
+        scene_free(&s);
+    }
+
     if (fails == 0) printf("editor_test: OK\n");
     return fails ? 1 : 0;
 }
