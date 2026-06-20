@@ -198,6 +198,78 @@ int main(void) {
         printf("mat4_ortho NDC corners: ok\n");
     }
 
+    /* CAMERA_RTS enter: frames the disc — mode set, ortho_h = radius, eye sits
+       BACK along -forward (so the disc is in front of the camera). */
+    camera_enter_rts(&c, vec3_make(0.0f, 12.0f, 0.0f), 30.0f);
+    printf("rts enter: mode=%d ortho_h=%.2f pos=(%.2f,%.2f,%.2f)\n",
+           (int)c.mode, c.ortho_h, c.pos.x, c.pos.y, c.pos.z);
+    if (c.mode != CAMERA_RTS) { printf("FAIL: enter_rts did not set mode\n"); return 1; }
+    if (!approx(c.ortho_h, 30.0f)) { printf("FAIL: enter_rts ortho_h\n"); return 1; }
+    {
+        vec3 f = camera_forward(&c);
+        /* the framed center should be ~BACK*forward ahead of the eye */
+        vec3 ahead = vec3_add(c.pos, vec3_scale(f, 80.0f));
+        if (!approx(ahead.x, 0.0f) || !approx(ahead.y, 12.0f) || !approx(ahead.z, 0.0f)) {
+            printf("FAIL: enter_rts did not frame the center\n"); return 1;
+        }
+    }
+
+    /* RTS pan: W slides the eye in the ground plane, height unchanged. */
+    clear_input(&in);
+    in.forward = SOL_TRUE;
+    {
+        vec3 before = c.pos;
+        camera_update(&c, &in, 1.0f);
+        printf("rts pan -> pos=(%.2f,%.2f,%.2f)\n", c.pos.x, c.pos.y, c.pos.z);
+        if (!approx(c.pos.y, before.y)) { printf("FAIL: rts pan changed height\n"); return 1; }
+        if (approx(c.pos.x, before.x) && approx(c.pos.z, before.z)) {
+            printf("FAIL: rts pan did not move\n"); return 1;
+        }
+        if (!(c.pos.z < before.z)) { printf("FAIL: rts pan W should go -Z\n"); return 1; }
+    }
+
+    /* RTS zoom: scroll up shrinks the ortho extent (zoom in). */
+    clear_input(&in);
+    in.zoom = 1.0f;
+    {
+        float before = c.ortho_h;
+        camera_update(&c, &in, 1.0f);
+        printf("rts zoom -> ortho_h=%.3f\n", c.ortho_h);
+        if (!(c.ortho_h < before)) { printf("FAIL: rts zoom did not zoom in\n"); return 1; }
+    }
+
+    /* RTS zoom clamps: many scroll-in notches floor at MIN_H, many scroll-out
+       notches cap at MAX_H. */
+    {
+        int k;
+        clear_input(&in);
+        in.zoom = 5.0f;                       /* scroll in hard */
+        for (k = 0; k < 200; k++) camera_update(&c, &in, 1.0f);
+        printf("rts zoom floor -> ortho_h=%.3f\n", c.ortho_h);
+        if (!approx(c.ortho_h, 5.0f)) { printf("FAIL: rts zoom did not floor at MIN_H\n"); return 1; }
+        clear_input(&in);
+        in.zoom = -5.0f;                      /* scroll out hard */
+        for (k = 0; k < 200; k++) camera_update(&c, &in, 1.0f);
+        printf("rts zoom cap -> ortho_h=%.3f\n", c.ortho_h);
+        if (!approx(c.ortho_h, 200.0f)) { printf("FAIL: rts zoom did not cap at MAX_H\n"); return 1; }
+    }
+
+    /* RTS ray is PARALLEL: two different NDC points share a direction but have
+       different origins (perspective rays would share an origin instead). */
+    {
+        Ray ra = camera_ray(&c, -0.5f, 0.0f, 1.777f);
+        Ray rb = camera_ray(&c,  0.5f, 0.0f, 1.777f);
+        printf("rts rays: dirA=(%.3f,%.3f,%.3f) origA.x=%.3f origB.x=%.3f\n",
+               ra.dir.x, ra.dir.y, ra.dir.z, ra.origin.x, rb.origin.x);
+        if (!approx(ra.dir.x, rb.dir.x) || !approx(ra.dir.y, rb.dir.y) ||
+            !approx(ra.dir.z, rb.dir.z)) {
+            printf("FAIL: rts rays should be parallel\n"); return 1;
+        }
+        if (approx(ra.origin.x, rb.origin.x) && approx(ra.origin.z, rb.origin.z)) {
+            printf("FAIL: rts ray origins should differ across the view rect\n"); return 1;
+        }
+    }
+
     printf("camera_test: OK\n");
     return 0;
 }

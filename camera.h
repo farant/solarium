@@ -18,7 +18,9 @@ typedef enum {
     CAMERA_WALK = 0,   /* first-person: movement locked to the ground plane;
                           height settles to CAMERA_EYE_HEIGHT while moving */
     CAMERA_FLY,        /* first-person: full-3D movement + vertical */
-    CAMERA_ORBIT       /* orbit a target: drag to rotate, scroll to dolly */
+    CAMERA_ORBIT,      /* orbit a target: drag to rotate, scroll to dolly */
+    CAMERA_RTS         /* top-down editor: angled orthographic, pan + zoom,
+                          fixed orientation (the spatial-tree editor view) */
 } CameraMode;
 
 typedef struct {
@@ -33,6 +35,8 @@ typedef struct {
     float      ground_y;     /* the floor under the camera (item 10: terrain
                                 feeds this per frame); walk settles toward
                                 ground_y + CAMERA_EYE_HEIGHT */
+    float      ortho_h;      /* CAMERA_RTS: half-height of the ortho view box,
+                                world units; zoom changes this */
 } Camera;
 
 /* Per-frame input, filled by the platform layer (main.c polls GLFW). look_dx/dy
@@ -56,5 +60,6 @@ Ray  camera_ray(const Camera *c, float ndc_x, float ndc_y, float aspect);  /* pi
 void camera_enter_orbit(Camera *c, vec3 target);   /* aim at target, remember radius */
 void camera_enter_fp(Camera *c);                    /* back to first-person walk */
 void camera_focus(Camera *c, vec3 target, vec3 normal, float half_height);  /* framed head-on view */
+void camera_enter_rts(Camera *c, vec3 center, float radius);  /* angled top-down, framing a disc of `radius` about `center` */
 
 #endif /* CAMERA_H */
