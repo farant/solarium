@@ -14,6 +14,7 @@
 #include "route.h"       /* doored-room openings + L-walkway routes: the
                             collider reads route.c exactly as the mesh does
                             (one author, two readers) */
+#include "workspace.h"   /* the active-workspace membership predicate */
 #include <string.h>     /* strcmp */
 
 #define COLLIDE_MAX_ITERS 3       /* push-outs per substep; a corner needs 2 */
@@ -315,6 +316,7 @@ void collide_rebuild(ColliderSet *cs, Scene *s) {
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         if (o->mesh_ref == NULL) continue;
+        if (!scene_object_active(s, o->handle)) continue;   /* hidden workspace */
 
         if (strcmp(o->mesh_ref, "room") == 0) {
             /* floor + a thick slab per present wall, built around the SAME door

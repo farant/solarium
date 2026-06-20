@@ -7,6 +7,7 @@
    `build.sh coltest`. */
 
 #include "collide.h"
+#include "scene.h"
 #include "flora.h"
 #include "gothic.h"
 #include "sol_math.h"
@@ -682,6 +683,30 @@ int main(void) {
         printf("tree agreement: trunk blocks, boughs admit, "
                "the box reads the chain\n");
     }
+    /* a room tagged into a hidden workspace contributes no colliders */
+    {
+        Scene s; ColliderSet cs; Mesh empty;
+        sol_u32 hr, sh, orr, osh; float p[8]; int base, after;
+        memset(&empty, 0, sizeof empty);
+        p[0]=8;p[1]=8;p[2]=3;p[3]=1;p[4]=1;p[5]=1;p[6]=1;p[7]=0;
+        scene_init(&s); collide_set_init(&cs);
+        hr = scene_add(&s, 0, empty, v3(0,12,0), qid(), v3(1,1,1));
+        scene_meta_set(&s, hr, "room_type", "home");
+        sh = scene_add(&s, hr, empty, v3(0,0,0), qid(), v3(1,1,1));
+        scene_mesh_ref_set(&s, sh, "room"); scene_mesh_params_set(&s, sh, p, 8);
+        collide_rebuild(&cs, &s); base = cs.count;
+        orr = scene_add(&s, 0, empty, v3(40,12,0), qid(), v3(1,1,1));
+        scene_meta_set(&s, orr, "room_type", "home");
+        scene_meta_set(&s, orr, "workspace", "hidden");
+        osh = scene_add(&s, orr, empty, v3(0,0,0), qid(), v3(1,1,1));
+        scene_mesh_ref_set(&s, osh, "room"); scene_mesh_params_set(&s, osh, p, 8);
+        strcpy(s.active_ws, "home");
+        collide_rebuild(&cs, &s); after = cs.count;
+        if (after != base) { printf("FAIL: a hidden-workspace room must not collide\n"); return 1; }
+        printf("hidden-workspace collide filter: OK\n");
+        collide_set_free(&cs); scene_free(&s);
+    }
+
     printf("collide_test: OK\n");
     return 0;
 }

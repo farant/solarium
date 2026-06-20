@@ -1,5 +1,6 @@
 #include "route.h"
 #include "mesh.h"
+#include "workspace.h"
 #include <math.h>
 #include <string.h>
 
@@ -38,6 +39,7 @@ static int collect_rooms(Scene *s, RoomInfo *ri, int max) {
         const char  *rt = scene_meta_get(s, o->handle, "room_type");
         if (!rt) continue;
         if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        if (!scene_object_active(s, o->handle)) continue;   /* hidden workspace */
         ri[n].handle = o->handle;
         ri[n].pos    = obj_pos(s, o->handle);
         room_half(s, o->handle, &ri[n].hw, &ri[n].hd);
@@ -97,7 +99,10 @@ static int routes_pass1(Scene *s, Route *out, int max) {
         r = &out[n];
         memset(r, 0, sizeof *r);
         r->walkway = o->handle;
-        if (ra == 0 || rb == 0 || !scene_get(s, ra) || !scene_get(s, rb)) { n++; continue; }
+        if (ra == 0 || rb == 0 || !scene_get(s, ra) || !scene_get(s, rb) ||
+            !scene_object_active(s, ra) || !scene_object_active(s, rb)) {
+            n++; continue;   /* missing OR hidden-workspace endpoint: no route */
+        }
         pa = obj_pos(s, ra); pb = obj_pos(s, rb);
         lo = (pa.y <= pb.y) ? ra : rb;
         hi = (lo == ra) ? rb : ra;

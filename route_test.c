@@ -106,6 +106,22 @@ int main(void) {
                 r.corner.z > -5.0f && r.corner.z < 5.0f));
         scene_free(&s);
     }
+    /* a room in a non-active workspace is not routed to */
+    {
+        Scene s; Route routes[ROUTE_MAX]; int i, n, touches = 0;
+        sol_u32 home, other;
+        scene_init(&s);
+        home  = add_room(&s, 0.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        other = add_room(&s, 14.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        add_walkway(&s, home, other);                  /* would otherwise route */
+        scene_meta_set(&s, other, "workspace", "hidden");
+        strcpy(s.active_ws, "home");                   /* ...but other is hidden */
+        n = route_all(&s, routes, ROUTE_MAX);
+        for (i = 0; i < n; i++)
+            if (routes[i].room_lo == other || routes[i].room_hi == other) touches = 1;
+        CHECK(!touches);
+        scene_free(&s);
+    }
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;
 }

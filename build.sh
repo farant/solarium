@@ -95,7 +95,7 @@ if [ "$MODE" = "coltest" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        collide.c route.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c collide_test.c \
+        collide.c route.c workspace.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c collide_test.c \
         -o collide_test
     echo "built ./collide_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
@@ -106,7 +106,7 @@ fi
 if [ "$MODE" = "routetest" ]; then
     set -x
     clang -std=c89 -pedantic-errors -Werror -g -fsanitize=address,undefined \
-        route.c route_test.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c \
+        route.c workspace.c route_test.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c \
         -o route_test
     echo "built ./route_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
