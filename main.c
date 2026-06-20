@@ -29,6 +29,7 @@
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
 #include "route.h"
 #include "editor.h"              /* the top-down spatial-tree editor (Task 2-4) */
+#include "descend.h"             /* fs-tree descent: plant a folder as a door */
 #include "bvh.h"                 /* the spatial index (P4 item 2) */
 #include "asset.h"               /* refcounted ownership for shared assets (P4 item 4) */
 #include "component.h"           /* behavior as data — the overlay doctrine (P4 item 6) */
@@ -2644,6 +2645,10 @@ typedef struct AppState {
     /* picking / selection (item 4) */
     sol_u32     selected_handle;   /* 0 = none */
     sol_u32     carried;          /* object being carried; 0 = none */
+    sol_u32     plant_room;     /* descent: room you're aiming a folder tablet in; 0 = none */
+    int         plant_wall;     /* descent: ROOM_WALL_* the carried folder is aimed at */
+    float       plant_off;      /* descent: offset along that wall */
+    sol_bool    plant_aim;      /* descent: a valid wall-aim this frame */
     sol_bool    lmb_was_down;
     sol_bool    editor_del_was;    /* edge-detect Delete/Backspace -> disconnect (editor) */
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
@@ -6568,16 +6573,30 @@ static vec3 carry_place_point(AppState *st) {
     return place;
 }
 
-/* E: put down what you're carrying, else pick up the selected movable object. */
+/* E: put down what you're carrying, else pick up the selected movable object.
+   A carried FOLDER aimed at a wall PLANTS as a door (descent). */
 static void cmd_carry_toggle(AppState *st) {
     if (st->carried != 0) {
         SceneObject *o = scene_get(&st->scene, st->carried);
         if (o) {
-            vec3 w = carry_place_point(st);
-            o->pos = scene_world_to_local(&st->scene, o->parent, w);
-            scene_save(&st->scene, "scene.stml");
+            const char *cname = o->content;   /* capture before descend_plant reallocs s->objects */
+            if (o->kind == KIND_FOLDER && st->plant_aim &&
+                descend_plant(&st->scene, st->plant_room, st->carried,
+                              st->plant_wall, st->plant_off) != 0) {
+                scene_resolve_meshes(&st->scene);
+                apply_kind_materials(&st->scene);
+                connections_rebuild(st);
+                collide_rebuild(&st->colliders, &st->scene);
+                scene_save(&st->scene, "scene.stml");
+                printf("planted '%s' as a door\n", cname ? cname : "?");
+            } else {
+                vec3 w = carry_place_point(st);
+                o->pos = scene_world_to_local(&st->scene, o->parent, w);
+                scene_save(&st->scene, "scene.stml");
+            }
         }
-        st->carried = 0;
+        st->carried   = 0;
+        st->plant_aim = SOL_FALSE;
     } else {
         sol_u32 t = carry_target(st, st->selected_handle);
         if (t != 0) st->carried = t;
@@ -6585,13 +6604,34 @@ static void cmd_carry_toggle(AppState *st) {
 }
 
 /* Per-frame: float the carried object in front of the camera. Called right after
-   update() (so it runs before components_update reads poses). */
+   update() (so it runs before components_update reads poses). A carried FOLDER
+   tablet instead snaps flat to the wall you're aiming at (descent planting). */
 static void carry_update(AppState *st) {
     SceneObject *o;
     vec3         fwd, hold;
     if (st->carried == 0) return;
     o = scene_get(&st->scene, st->carried);
     if (!o) { st->carried = 0; return; }                   /* it vanished */
+    st->plant_aim = SOL_FALSE;
+    if (o->kind == KIND_FOLDER) {
+        sol_u32 room = descend_room_at(&st->scene, st->camera.pos);
+        if (room != 0) {
+            RoomRect r = editor_room_rect(&st->scene, room);
+            Ray   ray;
+            int   wall;
+            float off;
+            ray.origin = st->camera.pos;
+            ray.dir    = camera_forward(&st->camera);
+            if (descend_wall_aim(r, ray, ROUTE_DOOR_H, &wall, &off)) {
+                vec3 wpt = descend_door_point(r, wall, off);
+                wpt.y += 1.0f;                              /* hover at ~door height */
+                o->pos = scene_world_to_local(&st->scene, o->parent, wpt);
+                st->plant_room = room; st->plant_wall = wall;
+                st->plant_off = off;  st->plant_aim = SOL_TRUE;
+                return;
+            }
+        }
+    }
     fwd     = camera_forward(&st->camera);
     hold    = vec3_add(st->camera.pos, vec3_scale(fwd, CARRY_HOLD_DIST));
     hold.y -= CARRY_HOLD_DROP;
@@ -9574,6 +9614,8 @@ static void render(AppState *state) {
         mat4  model;
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
+        if (scene_meta_get(&state->scene, o->handle, "planted"))
+            continue;                             /* a planted folder is a door now */
         if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
             continue;                             /* ponds: the WATER PASS draws them */
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_glass") == 0)
