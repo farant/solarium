@@ -9299,6 +9299,71 @@ static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) 
     }
 }
 
+/* Project a world point to framebuffer pixels (UI space, y-down). FALSE if
+   behind the camera. */
+static sol_bool editor_world_to_screen(AppState *st, float aspect, vec3 wp,
+                                        float *sx, float *sy) {
+    mat4 vp = mat4_mul(camera_proj(&st->camera, aspect), camera_view(&st->camera));
+    vec3 ndc;
+    if (!mat4_project_point(vp, wp, &ndc)) return SOL_FALSE;
+    *sx = (ndc.x * 0.5f + 0.5f) * (float)st->fb_width;
+    *sy = (0.5f - ndc.y * 0.5f) * (float)st->fb_height;
+    return SOL_TRUE;
+}
+
+/* The editor's 2D affordances, drawn inside the open UI batch. */
+static void editor_draw_overlay(AppState *st) {
+    float   aspect = (st->fb_height > 0)
+                   ? (float)st->fb_width / (float)st->fb_height : 1.0f;
+    float   hs = 6.0f;     /* half handle size, pixels */
+    sol_u32 i;
+    if (!st->editor.active) return;
+    for (i = 0; i < st->scene.count; i++) {
+        sol_u32  h = st->scene.objects[i].handle;
+        RoomRect r;
+        vec3     cw[4], port;
+        float    px[4], py[4], psx, psy;
+        int      k, ok = 1;
+        sol_bool active_room;
+        if (st->scene.objects[i].mesh_ref) continue;
+        if (!scene_meta_get(&st->scene, h, "room_type")) continue;
+        r = editor_room_rect(&st->scene, h);
+        cw[0] = vec3_make(r.cx - r.hw, r.floor_y, r.cz - r.hd);
+        cw[1] = vec3_make(r.cx + r.hw, r.floor_y, r.cz - r.hd);
+        cw[2] = vec3_make(r.cx + r.hw, r.floor_y, r.cz + r.hd);
+        cw[3] = vec3_make(r.cx - r.hw, r.floor_y, r.cz + r.hd);
+        for (k = 0; k < 4; k++)
+            if (!editor_world_to_screen(st, aspect, cw[k], &px[k], &py[k])) ok = 0;
+        if (!ok) continue;
+        active_room = (sol_bool)(st->editor.action != EDIT_IDLE && st->editor.room == h);
+        /* footprint outline (brighter on the active room) */
+        for (k = 0; k < 4; k++) {
+            int n = (k + 1) & 3;
+            if (active_room)
+                ui_line(px[k], py[k], px[n], py[n], 2.0f, 1.0f, 0.85f, 0.30f, 0.95f);
+            else
+                ui_line(px[k], py[k], px[n], py[n], 1.5f, 0.65f, 0.72f, 0.80f, 0.85f);
+        }
+        /* corner resize handles */
+        for (k = 0; k < 4; k++)
+            ui_quad(px[k] - hs, py[k] - hs, 2.0f * hs, 2.0f * hs,
+                    0.92f, 0.92f, 0.96f, 0.95f);
+        /* connection node (port) above the center */
+        port = vec3_make(r.cx, r.floor_y + EDITOR_PORT_LIFT, r.cz);
+        if (editor_world_to_screen(st, aspect, port, &psx, &psy))
+            ui_quad(psx - 5.0f, psy - 5.0f, 10.0f, 10.0f, 0.45f, 0.85f, 1.0f, 0.95f);
+    }
+    /* rubber-band: from the source room's port to the live cursor ground point */
+    if (st->editor.action == EDIT_CONNECT && st->editor.connect_from != 0) {
+        RoomRect r = editor_room_rect(&st->scene, st->editor.connect_from);
+        vec3     port = vec3_make(r.cx, r.floor_y + EDITOR_PORT_LIFT, r.cz);
+        float    ax, ay, bx, by;
+        if (editor_world_to_screen(st, aspect, port, &ax, &ay) &&
+            editor_world_to_screen(st, aspect, st->editor.cursor_world, &bx, &by))
+            ui_line(ax, ay, bx, by, 2.0f, 0.45f, 0.85f, 1.0f, 0.9f);
+    }
+}
+
 static void render(AppState *state) {
     float   aspect;
     float   us;        /* UI scale: sizes track the framebuffer (see pass 3) */
@@ -10402,6 +10467,7 @@ static void render(AppState *state) {
     }
     palette_draw(&state->palette, state, state->mono_font,
                  g_commands, G_COMMAND_COUNT, state->fb_width, state->fb_height);
+    editor_draw_overlay(state);
     ui_end();
     yardstick_ms(&state->t_post, glfwGetTime() - rt2);
 }
