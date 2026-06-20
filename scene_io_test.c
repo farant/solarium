@@ -1037,6 +1037,39 @@ int main(void) {
         scene_free(&cs);
     }
 
+    /* a KIND_PORTAL object survives save+load with its kind + meta intact */
+    {
+        Scene s, r;
+        sol_u32 h, i;
+        Mesh empty;
+        int found = 0;
+        memset(&empty, 0, sizeof empty);
+        scene_init(&s);
+        h = scene_add(&s, 0, empty, vec3_make(1.0f, 2.0f, 3.0f),
+                      quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+        scene_kind_set(&s, h, KIND_PORTAL);
+        scene_mesh_ref_set(&s, h, "gate");
+        scene_meta_set(&s, h, "portal_id", "home-1");
+        if (!scene_save(&s, "scene_io_test_portal.stml")) {
+            printf("FAIL: could not save portal scene\n"); return 1;
+        }
+        if (!scene_load(&r, "scene_io_test_portal.stml")) {
+            printf("FAIL: could not load portal scene\n"); return 1;
+        }
+        for (i = 0; i < r.count; i++) {
+            if (r.objects[i].kind == KIND_PORTAL) {
+                const char *pid = scene_meta_get(&r, r.objects[i].handle, "portal_id");
+                found = 1;
+                if (!pid || strcmp(pid, "home-1") != 0) {
+                    printf("FAIL: portal lost its portal_id\n"); return 1;
+                }
+            }
+        }
+        if (!found) { printf("FAIL: KIND_PORTAL did not round-trip\n"); return 1; }
+        scene_free(&s); scene_free(&r);
+        printf("portal kind round-trip: OK\n");
+    }
+
     printf("scene_io_test: OK\n");
     return 0;
 }

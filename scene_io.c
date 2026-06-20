@@ -21,7 +21,7 @@
    never written (absent attribute = plain, which keeps old files byte-stable
    and old readers forward-compatible). */
 static const char *KIND_NAMES[] = {
-    "plain", "file", "folder", "alias", "note", "tombstone"
+    "plain", "file", "folder", "alias", "note", "tombstone", "portal"
 };
 #define KIND_COUNT (sizeof(KIND_NAMES) / sizeof(KIND_NAMES[0]))
 

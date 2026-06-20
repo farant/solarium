@@ -36,7 +36,8 @@ typedef enum {
     KIND_FOLDER,
     KIND_ALIAS,
     KIND_NOTE,
-    KIND_TOMBSTONE
+    KIND_TOMBSTONE,
+    KIND_PORTAL          /* a workspace travel gate (Portals & Workspaces) */
 } ObjectKind;
 
 /* room for texgen's 10 knobs with slack — scene stays generic about kinds */
