@@ -21,6 +21,7 @@ void scene_init(Scene *s) {
     s->count = 0;
     s->capacity = 0;
     s->next_handle = 1;       /* 0 reserved for "none" / root */
+    s->active_ws[0] = '\0';
 }
 
 /* free every string + collection an object owns (symmetric with the setters) */

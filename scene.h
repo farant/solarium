@@ -6,6 +6,8 @@
 #include "mesh.h"
 #include "material.h"
 
+#define SOL_WS_NAME_CAP 64   /* max workspace-name length + NUL */
+
 typedef struct { char *key; char *value; }     MetaEntry;
 typedef struct { char *type; sol_u32 target; } Relation;
 
@@ -92,6 +94,9 @@ typedef struct {
     sol_u32      count;
     sol_u32      capacity;
     sol_u32      next_handle;   /* monotonic counter; never reused */
+    char     active_ws[SOL_WS_NAME_CAP];  /* runtime view filter: the workspace
+                          currently shown; "" = unfiltered (show all). NEVER
+                          serialized — reset on load, set by the app. */
 } Scene;
 
 void         scene_init(Scene *s);
