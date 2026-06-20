@@ -447,6 +447,20 @@ static void emit_path(MeshBuilder *b, const float *p) { make_path(b, p[0], p[1],
 static void emit_walkway(MeshBuilder *b, const float *p) {
     make_walkway(b, p[0], p[1], p[2], p[3]);
 }
+/* a freestanding portal gate (Portals & Workspaces): two posts + a lintel
+   framing a thin central pane. opening faces local +/-Z; base at y=0.
+   params: w (opening width), h (height), t (depth), post (post/lintel width). */
+static void emit_gate(MeshBuilder *b, const float *p) {
+    float w = p[0], h = p[1], t = p[2], pw = p[3];
+    float hw = w * 0.5f, hz = t * 0.5f;
+    /* left + right posts */
+    aabb_box(b, -hw - pw, -hw,     0.0f, h,      -hz, hz);
+    aabb_box(b,  hw,       hw + pw, 0.0f, h,      -hz, hz);
+    /* lintel across the top */
+    aabb_box(b, -hw - pw,  hw + pw, h - pw, h,    -hz, hz);
+    /* the shimmer pane: thin slab filling the opening */
+    aabb_box(b, -hw, hw, 0.0f, h - pw, -0.02f, 0.02f);
+}
 /* ---- terrain (item 10): the floating plot ----
    A heightfield top over a skirt and base slab — an ISLAND, not a world:
    heights come from seeded fBm value noise, masked to a ZERO RIM at the
@@ -947,6 +961,10 @@ static const MeshRefEntry REGISTRY[] = {
                  { 4.0f, 3.0f, 1.5f, 1.0f, 2.2f, 0.15f }, emit_wall },
     { "path", 3, { "len", "w", "t" }, { 6.0f, 1.5f, 0.15f }, emit_path },
     { "walkway", 4, { "len", "w", "t", "dy" }, { 4.0f, 1.6f, 0.15f, 0.0f }, emit_walkway },
+    /* gate (Portals & Workspaces): a freestanding doorframe portal — posts +
+       lintel + a thin glowing pane. NON-solid by design (collide_rebuild has
+       no "gate" case), so you walk through the trigger. */
+    { "gate", 4, { "w", "h", "t", "post" }, { 1.6f, 2.4f, 0.18f, 0.16f }, emit_gate },
     { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
     /* board: a card grown to furniture scale (item 8) — same slab geometry,
        bottom-origin, front face toward local +Z. Its OWN ref name is its

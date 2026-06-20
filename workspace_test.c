@@ -1,5 +1,6 @@
 #include "workspace.h"
 #include "scene.h"
+#include "mesh.h"
 #include "sol_math.h"
 #include <stdio.h>
 #include <string.h>
@@ -126,6 +127,14 @@ int main(void) {
             CHECK(fabs(sqrt(dx*dx + dz*dz) - 1.5) < 1e-2);
         }
         scene_free(&s);
+    }
+    /* the gate mesh builds with geometry */
+    {
+        MeshBuilder b;
+        mb_init(&b);
+        CHECK(mesh_ref_build("gate", (const float *)0, 0, &b) == SOL_TRUE);
+        CHECK(b.vertex_count > 0 && b.index_count > 0);
+        mb_free(&b);
     }
     if (fails == 0) printf("workspace_test: OK\n");
     return fails ? 1 : 0;
