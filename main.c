@@ -6769,6 +6769,84 @@ static void cmd_new_root(AppState *st) {
     palette_prompt(&st->palette, "root path", create_root_from_path);
 }
 
+/* the world position + facing for an outbound gate placed in front of the
+   player. The gate faces the player (yaw + PI) so you walk INTO it. */
+static void outbound_gate_placement(AppState *st, vec3 *pos, float *yaw) {
+    vec3  f = camera_forward(&st->camera);
+    float fl = (float)sqrt((double)(f.x * f.x + f.z * f.z));
+    vec3  fwd = (fl > 1e-4f) ? vec3_make(f.x / fl, 0.0f, f.z / fl)
+                             : vec3_make(0.0f, 0.0f, 1.0f);
+    pos->x = st->camera.pos.x + fwd.x * 3.0f;
+    pos->z = st->camera.pos.z + fwd.z * 3.0f;
+    pos->y = st->camera.pos.y - CAMERA_EYE_HEIGHT;     /* floor level */
+    *yaw   = st->camera.yaw + (float)SOL_PI;            /* face the player */
+}
+
+/* "New workspace <name>": a fresh empty home world + a linked gate pair. */
+static void create_workspace_from_name(AppState *st, const char *name) {
+    vec3  gpos, hroom;
+    float gyaw;
+    const char *cur = st->scene.active_ws[0] ? st->scene.active_ws : "home";
+    if (!name || name[0] == '\0') { printf("workspace: empty name\n"); return; }
+    if (workspace_anchor_find(&st->scene, name) != 0 ||
+        strcmp(name, cur) == 0) { printf("workspace '%s' already exists\n", name); return; }
+    workspace_anchor_add(&st->scene, name);
+    /* the new world's home room — at the same origin as the base home. The
+       overlap is harmless: only the active workspace is ever shown/collided,
+       so the filter keeps the two worlds from ever being seen together. */
+    hroom = vec3_make(0.0f, HOME_FLOOR_Y, 0.0f);
+    workspace_add_home_room(&st->scene, name, hroom);
+    outbound_gate_placement(st, &gpos, &gyaw);
+    /* return gate sits just inside the new home room, facing into it */
+    workspace_link(&st->scene, cur, gpos, gyaw,
+                   name, vec3_make(hroom.x, hroom.y, hroom.z + 3.0f), 0.0f);
+    scene_resolve_meshes(&st->scene);
+    apply_kind_materials(&st->scene);
+    connections_rebuild(st);
+    collide_rebuild(&st->colliders, &st->scene);
+    scene_save(&st->scene, "scene.stml");
+    printf("new workspace '%s' — step through the gate\n", name);
+}
+
+static void cmd_new_workspace(AppState *st) {
+    palette_prompt(&st->palette, "new workspace name", create_workspace_from_name);
+}
+
+/* "Portal to <name>": a gate to an EXISTING workspace. */
+static void portal_to_named(AppState *st, const char *name) {
+    vec3  gpos, hroom; float gyaw;
+    const char *cur = st->scene.active_ws[0] ? st->scene.active_ws : "home";
+    if (!name || name[0] == '\0') return;
+    if (workspace_anchor_find(&st->scene, name) == 0 && strcmp(name, "home") != 0) {
+        printf("no workspace '%s'\n", name); return;
+    }
+    if (strcmp(name, cur) == 0) { printf("already in '%s'\n", name); return; }
+    outbound_gate_placement(st, &gpos, &gyaw);
+    /* the return gate lands near the target's home room (or origin if unknown) */
+    {
+        sol_u32 hr = 0, i;
+        for (i = 0; i < st->scene.count; i++) {
+            if (strcmp(workspace_of(&st->scene, st->scene.objects[i].handle), name) == 0 &&
+                scene_meta_get(&st->scene, st->scene.objects[i].handle, "room_type")) {
+                hr = st->scene.objects[i].handle; break;
+            }
+        }
+        hroom = hr ? object_world_pos(&st->scene, hr) : vec3_make(0.0f, HOME_FLOOR_Y, 0.0f);
+    }
+    workspace_link(&st->scene, cur, gpos, gyaw,
+                   name, vec3_make(hroom.x, hroom.y, hroom.z + 3.0f), 0.0f);
+    scene_resolve_meshes(&st->scene);
+    apply_kind_materials(&st->scene);
+    connections_rebuild(st);
+    collide_rebuild(&st->colliders, &st->scene);
+    scene_save(&st->scene, "scene.stml");
+    printf("portal to '%s' opened\n", name);
+}
+
+static void cmd_portal_to(AppState *st) {
+    palette_prompt(&st->palette, "portal to workspace", portal_to_named);
+}
+
 /* frame all rooms for the editor's entry vantage: centroid + farthest-room
    radius (with margin). */
 static void editor_frame_rooms(AppState *st, vec3 *center, float *radius) {
@@ -6836,6 +6914,8 @@ static Command g_commands[] = {
     { "Mint lantern",                "O", GLFW_KEY_O, cmd_mint_lantern,      NULL,                  SOL_FALSE },
     { "Mint pond",                   "Q", GLFW_KEY_Q, cmd_mint_pond,         NULL,                  SOL_FALSE },
     { "Mint dust emitter",           NULL, 0,          cmd_mint_dust,         NULL,                  SOL_FALSE },
+    { "New workspace",               NULL, 0,          cmd_new_workspace,     NULL,                  SOL_FALSE },
+    { "Portal to",                   NULL, 0,          cmd_portal_to,         NULL,                  SOL_FALSE },
     { "Carry / place selected",      "E", GLFW_KEY_E, cmd_carry_toggle,      can_carry_toggle,      SOL_FALSE },
     { "Mint fox",                    "Y", GLFW_KEY_Y, cmd_mint_fox,          NULL,                  SOL_FALSE },
     { "New root...",                 NULL, 0,          cmd_new_root,          NULL,                  SOL_FALSE },
