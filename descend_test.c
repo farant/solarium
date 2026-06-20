@@ -104,10 +104,10 @@ int main(void) {
         fld  = add_folder_card(&s, home, "/tmp/sub");
         pv   = descend_plant(&s, home, fld, ROOM_WALL_E, 0.0f);
         CHECK(pv != 0);
-        CHECK(strcmp(scene_meta_get(&s, pv, "room_type"), "preview") == 0);
+        CHECK(strcmp(scene_meta_get(&s, pv, "room_type"), "mirror") == 0);
         CHECK(strcmp(scene_meta_get(&s, pv, "source_path"), "/tmp/sub") == 0);
         CHECK(strcmp(scene_meta_get(&s, pv, "name"), "sub") == 0);
-        CHECK(scene_meta_get(&s, fld, "planted") != NULL);          /* card is a door */
+        CHECK(scene_meta_get(&s, fld, "planted") != NULL);          /* opened: no duplicate */
         for (i = 0; i < s.count; i++) {                            /* find the walkway */
             SceneObject *o = &s.objects[i];
             if (o->mesh_ref && strcmp(o->mesh_ref, "walkway") == 0) { wk = o->handle; break; }
@@ -139,20 +139,6 @@ int main(void) {
                              quat_identity(), vec3_make(1.0f,1.0f,1.0f));
         scene_kind_set(&s, nofolder, KIND_FOLDER);                       /* folder but no content */
         CHECK(descend_plant(&s, home, nofolder, ROOM_WALL_E, 0.0f) == 0);
-        scene_free(&s);
-    }
-
-    /* finalize: flip preview->mirror, return the path to scan, idempotent */
-    {
-        Scene s; sol_u32 home, fld, pv; const char *sp;
-        scene_init(&s);
-        home = add_room(&s, 0.0f, 12.0f, 0.0f, 10.0f, 10.0f);
-        fld  = add_folder_card(&s, home, "/tmp/sub");
-        pv   = descend_plant(&s, home, fld, ROOM_WALL_E, 0.0f);
-        sp   = descend_finalize(&s, pv);
-        CHECK(sp != NULL && strcmp(sp, "/tmp/sub") == 0);
-        CHECK(strcmp(scene_meta_get(&s, pv, "room_type"), "mirror") == 0);   /* flipped */
-        CHECK(descend_finalize(&s, pv) == NULL);                             /* idempotent */
         scene_free(&s);
     }
 

@@ -2649,7 +2649,7 @@ typedef struct AppState {
     int         plant_wall;     /* descent: ROOM_WALL_* the carried folder is aimed at */
     float       plant_off;      /* descent: offset along that wall */
     sol_bool    plant_aim;      /* descent: a valid wall-aim this frame */
-    sol_u32     last_room;      /* descent: room you were in last frame (walk-in edge) */
+    vec3        carry_origin;   /* descent: a folder card's pre-carry local pos (snaps back on drop) */
     sol_bool    lmb_was_down;
     sol_bool    editor_del_was;    /* edge-detect Delete/Backspace -> disconnect (editor) */
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
@@ -6575,21 +6575,31 @@ static vec3 carry_place_point(AppState *st) {
 }
 
 /* E: put down what you're carrying, else pick up the selected movable object.
-   A carried FOLDER aimed at a wall PLANTS as a door (descent). */
+   A carried FOLDER, dropped while aiming at a wall, OPENS the folder as a real
+   sub-room (door + walkway + its contents) — and the folder card snaps back to
+   its own spot in the room rather than being placed (folders are tray-resident
+   navigation, not props). A non-folder places on the ground as before. */
 static void cmd_carry_toggle(AppState *st) {
     if (st->carried != 0) {
         SceneObject *o = scene_get(&st->scene, st->carried);
         if (o) {
             const char *cname = o->content;   /* capture before descend_plant reallocs s->objects */
-            if (o->kind == KIND_FOLDER && st->plant_aim &&
-                descend_plant(&st->scene, st->plant_room, st->carried,
-                              st->plant_wall, st->plant_off) != 0) {
-                scene_resolve_meshes(&st->scene);
-                apply_kind_materials(&st->scene);
-                connections_rebuild(st);
-                collide_rebuild(&st->colliders, &st->scene);
+            if (o->kind == KIND_FOLDER) {
+                o->pos = st->carry_origin;    /* the folder stays home (restore pre-carry pos) */
+                if (st->plant_aim) {
+                    sol_u32 pv = descend_plant(&st->scene, st->plant_room, st->carried,
+                                               st->plant_wall, st->plant_off);
+                    if (pv != 0) {
+                        const char *sp = scene_meta_get(&st->scene, pv, "source_path");
+                        if (sp) room_mirror_scan(&st->scene, pv, sp);   /* fill the new room now */
+                        scene_resolve_meshes(&st->scene);
+                        apply_kind_materials(&st->scene);
+                        connections_rebuild(st);
+                        collide_rebuild(&st->colliders, &st->scene);
+                        printf("opened '%s' as a room\n", cname ? cname : "?");
+                    }
+                }
                 scene_save(&st->scene, "scene.stml");
-                printf("planted '%s' as a door\n", cname ? cname : "?");
             } else {
                 vec3 w = carry_place_point(st);
                 o->pos = scene_world_to_local(&st->scene, o->parent, w);
@@ -6600,7 +6610,11 @@ static void cmd_carry_toggle(AppState *st) {
         st->plant_aim = SOL_FALSE;
     } else {
         sol_u32 t = carry_target(st, st->selected_handle);
-        if (t != 0) st->carried = t;
+        if (t != 0) {
+            SceneObject *co = scene_get(&st->scene, t);
+            st->carried = t;
+            if (co) st->carry_origin = co->pos;   /* remember its spot, to snap a folder back */
+        }
     }
 }
 
@@ -9615,8 +9629,6 @@ static void render(AppState *state) {
         mat4  model;
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
-        if (scene_meta_get(&state->scene, o->handle, "planted"))
-            continue;                             /* a planted folder is a door now */
         if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
             continue;                             /* ponds: the WATER PASS draws them */
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_glass") == 0)
@@ -10971,25 +10983,6 @@ int main(void) {
                 &state.wind_dx, &state.wind_dz, &state.wind_gust);
         update(&state, dt);                           /* animate the scene */
         carry_update(&state);
-        {   /* descent: walking into a preview room finalizes it (edge-triggered) */
-            sol_u32 room = descend_room_at(&state.scene, state.camera.pos);
-            if (room != 0 && room != state.last_room) {
-                const char *rt = scene_meta_get(&state.scene, room, "room_type");
-                if (rt && strcmp(rt, "preview") == 0) {
-                    const char *sp = descend_finalize(&state.scene, room);
-                    if (sp) {
-                        room_mirror_scan(&state.scene, room, sp);   /* fill with cards */
-                        scene_resolve_meshes(&state.scene);
-                        apply_kind_materials(&state.scene);
-                        connections_rebuild(&state);
-                        collide_rebuild(&state.colliders, &state.scene);
-                        scene_save(&state.scene, "scene.stml");
-                        printf("finalized '%s'\n", sp);
-                    }
-                }
-            }
-            state.last_room = room;
-        }
         components_update(&state.scene, (float)now, (float)dt);  /* overlays
                                                          rewrite BEFORE the tree
                                                          and render read poses */

@@ -105,10 +105,10 @@ sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
     sol_u32      room, shell, wk;
     float        p[8];
     const char  *path, *name, *slash;
-    Material     ghost = material_default();
+    Material     stone = material_default();
     int          guard;
     if (!card || card->kind != KIND_FOLDER) return 0;
-    if (scene_meta_get(s, folder_card, "planted")) return 0;   /* already a door */
+    if (scene_meta_get(s, folder_card, "planted")) return 0;   /* already opened */
     if (!card->content) return 0;
     path = card->content;   /* capture BEFORE any scene_add reallocs s->objects (dangles card) */
 
@@ -118,7 +118,7 @@ sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
     else if (wall == ROOM_WALL_S) outn = vec3_make(0.0f, 0.0f,  1.0f);
     else if (wall == ROOM_WALL_E) outn = vec3_make(1.0f, 0.0f,  0.0f);
     else                          outn = vec3_make(-1.0f, 0.0f, 0.0f);   /* W */
-    center   = vec3_add(door, vec3_scale(outn, DESCEND_GAP + 5.0f));     /* gap + half preview depth */
+    center   = vec3_add(door, vec3_scale(outn, DESCEND_GAP + 5.0f));     /* gap + half sub-room depth */
     center.y = pr.floor_y;
     guard = 0;
     while (descend_spot_occupied(s, center, 5.5f) && guard < 20) {
@@ -129,7 +129,7 @@ sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
     room  = scene_add(s, 0, empty, center, quat_identity(), vec3_make(1.0f,1.0f,1.0f));
     slash = strrchr(path, '/');
     name  = (slash && slash[1]) ? slash + 1 : path;
-    scene_meta_set(s, room, "room_type",   "preview");
+    scene_meta_set(s, room, "room_type",   "mirror");   /* a real room: routes + scans like a root */
     scene_meta_set(s, room, "source_path", path);
     scene_meta_set(s, room, "name",        name);
 
@@ -138,9 +138,9 @@ sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
     scene_mesh_ref_set(s, shell, "room");
     p[0]=10.0f; p[1]=10.0f; p[2]=3.0f; p[3]=1.0f; p[4]=1.0f; p[5]=1.0f; p[6]=1.0f; p[7]=0.0f;
     scene_mesh_params_set(s, shell, p, 8);
-    ghost.base_color = vec3_make(0.35f, 0.42f, 0.55f);   /* dim, bluish — a ghost */
-    ghost.roughness  = 0.95f;
-    scene_material_set(s, shell, ghost);
+    stone.base_color = vec3_make(0.55f, 0.53f, 0.50f);   /* same stone as a root room */
+    stone.roughness  = 0.92f;
+    scene_material_set(s, shell, stone);
 
     wk = scene_add(s, 0, empty, vec3_make(0.0f,0.0f,0.0f), quat_identity(),
                    vec3_make(1.0f,1.0f,1.0f));
@@ -148,25 +148,6 @@ sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
     scene_rel_add(s, wk, "connects", parent_room);
     scene_rel_add(s, wk, "connects", room);
 
-    scene_meta_set(s, folder_card, "planted", "1");   /* the card is a door now */
+    scene_meta_set(s, folder_card, "planted", "1");   /* opened: refuse a duplicate room */
     return room;
-}
-
-const char *descend_finalize(Scene *s, sol_u32 preview_room) {
-    const char *rt = scene_meta_get(s, preview_room, "room_type");
-    sol_u32     i;
-    if (!rt || strcmp(rt, "preview") != 0) return NULL;
-    scene_meta_set(s, preview_room, "room_type", "mirror");
-    for (i = 0; i < s->count; i++) {       /* normalize the shell material */
-        SceneObject *o = &s->objects[i];
-        if (o->parent == preview_room && o->mesh_ref &&
-            strcmp(o->mesh_ref, "room") == 0) {
-            Material stone = material_default();
-            stone.base_color = vec3_make(0.55f, 0.53f, 0.50f);
-            stone.roughness  = 0.92f;
-            scene_material_set(s, o->handle, stone);
-            break;
-        }
-    }
-    return scene_meta_get(s, preview_room, "source_path");
 }

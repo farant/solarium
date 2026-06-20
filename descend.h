@@ -27,17 +27,12 @@ vec3 descend_door_point(RoomRect r, int wall, float offset);
 
 /* ---- scene ops (headless, unit-tested; built in Task 2) ---- */
 
-/* Plant `folder_card` as a door on `parent_room`'s `wall` at `offset`: build a
-   "preview" room outward from the wall (Y-nudged clear), a walkway joining them,
-   and mark the card planted. Returns the new preview room handle, 0 if refused
-   (not a folder / already planted / no content). */
+/* Plant `folder_card`: build a real "mirror" sub-room for its folder outward
+   from `parent_room`'s `wall` at `offset` (Y-nudged clear), a walkway joining
+   them, and mark the card opened. Returns the new room handle, 0 if refused
+   (not a folder / already opened / no content). The CALLER populates the room
+   (room_mirror_scan) + rebuilds + saves — descend.c stays free of the fs. */
 sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
                       int wall, float offset);
-
-/* Promote a preview room to a real mirror room: flip room_type preview->mirror
-   and normalize its material. Returns the source_path to scan (the CALLER runs
-   room_mirror_scan + rebuild + save), or NULL if it wasn't a preview
-   (idempotent). */
-const char *descend_finalize(Scene *s, sol_u32 preview_room);
 
 #endif /* SOL_DESCEND_H */
