@@ -2633,6 +2633,7 @@ typedef struct AppState {
     sol_bool    ghost;          /* 'X': debug no-clip — building wants to pass through walls */
     /* room graph (P3 item 7) */
     sol_u32     current_room;   /* containing room's anchor handle; 0 = outside (derived per frame) */
+    sol_u32     portal_debounce;   /* gate just arrived at: ignore until you leave it */
     float       ambient_scale;  /* eased toward the room's ambient (sealed = dim) */
     /* text (P3 item 3) */
     Font       *ui_font;        /* DejaVu Sans, SDF atlas; NULL if load failed */
@@ -8224,6 +8225,7 @@ static void bind_runtime_handles(AppState *st) {
     st->selected_handle = 0;
     st->drag_handle     = 0;
     st->current_room    = 0;
+    st->portal_debounce = 0;
 }
 
 /* Reconcile every mirror against disk + validate aliases (6c/6d): resolves
@@ -8264,6 +8266,73 @@ static int rescan_mirrors(AppState *st) {
         }
     }
     return total;
+}
+
+/* Re-derive everything that hangs off the scene spine after the ACTIVE set
+   changes (a workspace switch) — no file load, no glb reimport. The shared
+   tail of load_palace. */
+static void world_rebuild(AppState *st) {
+    scene_resolve_meshes(&st->scene);
+    connections_rebuild(st);
+    collide_rebuild(&st->colliders, &st->scene);
+    meadow_rebuild(st);
+    forest_rebuild(st);
+    apply_kind_materials(&st->scene);
+}
+
+#define PORTAL_TRIGGER_R 1.1f    /* walk within this of a gate's mouth to travel */
+
+/* Switch to the workspace gate `g` leads to and set the camera at its partner. */
+static void portal_travel(AppState *st, sol_u32 g) {
+    const char *target = scene_meta_get(&st->scene, g, "target_ws");
+    const char *retid  = scene_meta_get(&st->scene, g, "target_portal_id");
+    sol_u32     ret;
+    vec3        pos; float yaw;
+    if (!target || !retid) return;
+    scene_save(&st->scene, "scene.stml");           /* persist the world you leave */
+    strncpy(st->scene.active_ws, target, SOL_WS_NAME_CAP - 1);  /* fixed buffer: */
+    st->scene.active_ws[SOL_WS_NAME_CAP - 1] = '\0';            /* a hand-edited overlong name can't overflow */
+    world_rebuild(st);
+    ret = workspace_find_gate_by_id(&st->scene, retid);
+    if (ret != 0) {
+        workspace_spawn_at_gate(&st->scene, ret, 1.5f, CAMERA_EYE_HEIGHT, &pos, &yaw);
+        st->camera.pos = pos;
+        st->camera.yaw = yaw;
+        st->portal_debounce = ret;                  /* don't bounce back through it */
+    } else {
+        st->portal_debounce = 0;                    /* fallback: stay put */
+    }
+    st->current_room = room_containing(&st->scene, st->camera.pos);
+    printf("entered workspace '%s'\n", target);
+}
+
+/* Per-frame: if not carrying, fire the first active gate whose mouth you're in
+   (skipping the one you just arrived at until you step away from it). */
+static void portal_update(AppState *st) {
+    sol_u32 i;
+    if (st->carried != 0) return;                   /* hands full: no travel */
+    /* clear the debounce once you've stepped clear of the arrival gate */
+    if (st->portal_debounce != 0) {
+        vec3 gp = object_world_pos(&st->scene, st->portal_debounce);
+        float dx = st->camera.pos.x - gp.x, dz = st->camera.pos.z - gp.z;
+        if ((float)sqrt((double)(dx*dx + dz*dz)) > PORTAL_TRIGGER_R * 1.6f)
+            st->portal_debounce = 0;
+    }
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        vec3  gp; float dx, dz, dy;
+        if (o->kind != KIND_PORTAL) continue;
+        if (!scene_object_active(&st->scene, o->handle)) continue;
+        if (o->handle == st->portal_debounce) continue;
+        gp = object_world_pos(&st->scene, o->handle);
+        dx = st->camera.pos.x - gp.x; dz = st->camera.pos.z - gp.z;
+        dy = st->camera.pos.y - (gp.y + CAMERA_EYE_HEIGHT);   /* gate base vs eye */
+        if ((float)sqrt((double)(dx*dx + dz*dz)) < PORTAL_TRIGGER_R &&
+            dy > -1.0f && dy < 2.5f) {               /* roughly at the mouth's height */
+            portal_travel(st, o->handle);
+            return;                                  /* one switch per frame */
+        }
+    }
 }
 
 /* Load the palace from scene.stml and bring it fully to life (6e): glb
@@ -11079,6 +11148,7 @@ int main(void) {
         wind_at((float)now, state.camera.pos.x, state.camera.pos.z,
                 &state.wind_dx, &state.wind_dz, &state.wind_gust);
         update(&state, dt);                           /* animate the scene */
+        portal_update(&state);
         carry_update(&state);
         components_update(&state.scene, (float)now, (float)dt);  /* overlays
                                                          rewrite BEFORE the tree
