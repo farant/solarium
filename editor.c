@@ -83,3 +83,76 @@ sol_bool editor_can_connect(Scene *s, sol_u32 a, sol_u32 b) {
     }
     return SOL_TRUE;
 }
+
+/* Create a walkway joining rooms a and b (parent-0, two "connects" edges).
+   Returns the new walkway handle, or 0 if the pair is invalid. */
+sol_u32 editor_connect(Scene *s, sol_u32 a, sol_u32 b) {
+    Mesh    empty;
+    sol_u32 wk;
+    if (!editor_can_connect(s, a, b)) return 0;
+    memset(&empty, 0, sizeof empty);
+    wk = scene_add(s, 0, empty, vec3_make(0.0f, 0.0f, 0.0f), quat_identity(),
+                   vec3_make(1.0f, 1.0f, 1.0f));
+    scene_mesh_ref_set(s, wk, "walkway");
+    scene_rel_add(s, wk, "connects", a);
+    scene_rel_add(s, wk, "connects", b);
+    return wk;
+}
+
+/* Remove a walkway (its connects edges go with it). No-op if not a walkway. */
+void editor_disconnect(Scene *s, sol_u32 walkway) {
+    SceneObject *o = scene_get(s, walkway);
+    if (o && o->mesh_ref && strcmp(o->mesh_ref, "walkway") == 0)
+        scene_remove(s, walkway);
+}
+
+/* Move a room: write its anchor's world XZ (anchors are parent-0). */
+void editor_apply_move(Scene *s, sol_u32 room, float cx, float cz) {
+    SceneObject *o = scene_get(s, room);
+    if (!o) return;
+    o->pos.x = cx;
+    o->pos.z = cz;
+}
+
+/* Resize a room by dragging zone's wall(s) to the ground point (gx,gz), keeping
+   the opposite wall(s) fixed. Writes the new center to the anchor and the new
+   w/d to the shell child's params (h + wall flags preserved). */
+void editor_apply_resize(Scene *s, sol_u32 room, EditZone zone, float gx, float gz) {
+    RoomRect     r  = editor_room_rect(s, room);
+    SceneObject *ro = scene_get(s, room);
+    sol_u32      i;
+    float        ncx = r.cx, ncz = r.cz, nhw = r.hw, nhd = r.hd;
+    int          tx = 0, tz = 0, sx = 0, sz = 0;
+    if (!ro) return;
+    switch (zone) {
+        case EDIT_ZONE_EDGE_XP:     tx = 1; sx =  1; break;
+        case EDIT_ZONE_EDGE_XN:     tx = 1; sx = -1; break;
+        case EDIT_ZONE_EDGE_ZP:     tz = 1; sz =  1; break;
+        case EDIT_ZONE_EDGE_ZN:     tz = 1; sz = -1; break;
+        case EDIT_ZONE_CORNER_XPZP: tx = tz = 1; sx =  1; sz =  1; break;
+        case EDIT_ZONE_CORNER_XPZN: tx = tz = 1; sx =  1; sz = -1; break;
+        case EDIT_ZONE_CORNER_XNZP: tx = tz = 1; sx = -1; sz =  1; break;
+        case EDIT_ZONE_CORNER_XNZN: tx = tz = 1; sx = -1; sz = -1; break;
+        default: return;
+    }
+    if (tx) editor_resize_axis(r.cx, r.hw, sx, gx, EDITOR_MIN_SIZE, &ncx, &nhw);
+    if (tz) editor_resize_axis(r.cz, r.hd, sz, gz, EDITOR_MIN_SIZE, &ncz, &nhd);
+    ro->pos.x = ncx;
+    ro->pos.z = ncz;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        if (o->parent == room && o->mesh_ref && strcmp(o->mesh_ref, "room") == 0) {
+            float p[8];
+            int   k;
+            for (k = 0; k < 8; k++)
+                p[k] = (k < o->mesh_param_count) ? o->mesh_params[k] : 0.0f;
+            if (o->mesh_param_count < 8) {       /* defensive: shells are made with 8 */
+                p[2] = 3.0f; p[3] = 1.0f; p[4] = 1.0f; p[5] = 1.0f; p[6] = 1.0f; p[7] = 0.0f;
+            }
+            p[0] = 2.0f * nhw;
+            p[1] = 2.0f * nhd;
+            scene_mesh_params_set(s, o->handle, p, 8);
+            break;
+        }
+    }
+}
