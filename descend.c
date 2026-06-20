@@ -4,6 +4,7 @@
 #include "mesh.h"       /* ROOM_WALL_* */
 #include "route.h"      /* ROUTE_DOOR_W / ROUTE_DOOR_H */
 #include "sol_math.h"
+#include "material.h"   /* Material, material_default */
 
 #include <string.h>     /* strcmp, strrchr, memset */
 
@@ -67,4 +68,105 @@ int descend_wall_aim(RoomRect r, Ray ray, float door_h, int *wall, float *offset
     *wall = bestw;       /* 0/1/2/3 == ROOM_WALL_N/E/S/W */
     *offset = besto;
     return 1;
+}
+
+#define DESCEND_GAP 4.0f   /* clear gap between the parent wall and the preview room */
+
+/* does a 2*half footprint at center c overlap an existing room close in Y?
+   (mirrors main.c's root_spot_occupied but scene-level + includes previews) */
+static sol_bool descend_spot_occupied(Scene *s, vec3 c, float half) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        const char  *rt;
+        RoomRect     r;
+        float        e;
+        if (o->mesh_ref) continue;
+        rt = scene_meta_get(s, o->handle, "room_type");
+        if (!rt) continue;
+        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0 &&
+            strcmp(rt, "preview") != 0) continue;
+        r = editor_room_rect(s, o->handle);
+        e = (r.hw > r.hd) ? r.hw : r.hd;
+        if ((c.y > r.floor_y ? c.y - r.floor_y : r.floor_y - c.y) >= 3.5f) continue;
+        if (c.x + half < r.cx - e || c.x - half > r.cx + e) continue;
+        if (c.z + half < r.cz - e || c.z - half > r.cz + e) continue;
+        return SOL_TRUE;
+    }
+    return SOL_FALSE;
+}
+
+sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
+                      int wall, float offset) {
+    SceneObject *card = scene_get(s, folder_card);
+    Mesh         empty;
+    RoomRect     pr;
+    vec3         door, outn, center;
+    sol_u32      room, shell, wk;
+    float        p[8];
+    const char  *path, *name, *slash;
+    Material     ghost = material_default();
+    int          guard;
+    if (!card || card->kind != KIND_FOLDER) return 0;
+    if (scene_meta_get(s, folder_card, "planted")) return 0;   /* already a door */
+    if (!card->content) return 0;
+    path = card->content;   /* capture BEFORE any scene_add reallocs s->objects (dangles card) */
+
+    pr   = editor_room_rect(s, parent_room);
+    door = descend_door_point(pr, wall, offset);
+    if      (wall == ROOM_WALL_N) outn = vec3_make(0.0f, 0.0f, -1.0f);
+    else if (wall == ROOM_WALL_S) outn = vec3_make(0.0f, 0.0f,  1.0f);
+    else if (wall == ROOM_WALL_E) outn = vec3_make(1.0f, 0.0f,  0.0f);
+    else                          outn = vec3_make(-1.0f, 0.0f, 0.0f);   /* W */
+    center   = vec3_add(door, vec3_scale(outn, DESCEND_GAP + 5.0f));     /* gap + half preview depth */
+    center.y = pr.floor_y;
+    guard = 0;
+    while (descend_spot_occupied(s, center, 5.5f) && guard < 20) {
+        center.y += 5.0f; guard++;                 /* 1-D Y nudge until clear */
+    }
+
+    memset(&empty, 0, sizeof empty);
+    room  = scene_add(s, 0, empty, center, quat_identity(), vec3_make(1.0f,1.0f,1.0f));
+    slash = strrchr(path, '/');
+    name  = (slash && slash[1]) ? slash + 1 : path;
+    scene_meta_set(s, room, "room_type",   "preview");
+    scene_meta_set(s, room, "source_path", path);
+    scene_meta_set(s, room, "name",        name);
+
+    shell = scene_add(s, room, empty, vec3_make(0.0f,0.0f,0.0f), quat_identity(),
+                      vec3_make(1.0f,1.0f,1.0f));
+    scene_mesh_ref_set(s, shell, "room");
+    p[0]=10.0f; p[1]=10.0f; p[2]=3.0f; p[3]=1.0f; p[4]=1.0f; p[5]=1.0f; p[6]=1.0f; p[7]=0.0f;
+    scene_mesh_params_set(s, shell, p, 8);
+    ghost.base_color = vec3_make(0.35f, 0.42f, 0.55f);   /* dim, bluish — a ghost */
+    ghost.roughness  = 0.95f;
+    scene_material_set(s, shell, ghost);
+
+    wk = scene_add(s, 0, empty, vec3_make(0.0f,0.0f,0.0f), quat_identity(),
+                   vec3_make(1.0f,1.0f,1.0f));
+    scene_mesh_ref_set(s, wk, "walkway");
+    scene_rel_add(s, wk, "connects", parent_room);
+    scene_rel_add(s, wk, "connects", room);
+
+    scene_meta_set(s, folder_card, "planted", "1");   /* the card is a door now */
+    return room;
+}
+
+const char *descend_finalize(Scene *s, sol_u32 preview_room) {
+    const char *rt = scene_meta_get(s, preview_room, "room_type");
+    sol_u32     i;
+    if (!rt || strcmp(rt, "preview") != 0) return NULL;
+    scene_meta_set(s, preview_room, "room_type", "mirror");
+    for (i = 0; i < s->count; i++) {       /* normalize the shell material */
+        SceneObject *o = &s->objects[i];
+        if (o->parent == preview_room && o->mesh_ref &&
+            strcmp(o->mesh_ref, "room") == 0) {
+            Material stone = material_default();
+            stone.base_color = vec3_make(0.55f, 0.53f, 0.50f);
+            stone.roughness  = 0.92f;
+            scene_material_set(s, o->handle, stone);
+            break;
+        }
+    }
+    return scene_meta_get(s, preview_room, "source_path");
 }
