@@ -95,8 +95,8 @@ int main(void) {
         scene_free(&s);
     }
 
-    /* plant: a folder card becomes a door — a preview room + a walkway appear,
-       the card is marked planted, and a second plant is refused */
+    /* plant: opening a folder — a real "mirror" sub-room + a walkway appear,
+       the card is marked opened, and a second plant is refused */
     {
         Scene s; sol_u32 home, fld, pv, i, wk = 0;
         scene_init(&s);

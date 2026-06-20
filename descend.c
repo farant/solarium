@@ -8,7 +8,7 @@
 
 #include <string.h>     /* strcmp, strrchr, memset */
 
-/* a point's room: home/mirror/preview anchor whose footprint contains it */
+/* a point's room: the home/mirror anchor whose footprint contains it */
 sol_u32 descend_room_at(Scene *s, vec3 p) {
     sol_u32 i, best = 0;
     float   bestd = 1e30f;
@@ -20,8 +20,7 @@ sol_u32 descend_room_at(Scene *s, vec3 p) {
         if (o->mesh_ref) continue;                 /* anchors are empties */
         rt = scene_meta_get(s, o->handle, "room_type");
         if (!rt) continue;
-        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0 &&
-            strcmp(rt, "preview") != 0) continue;
+        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
         r = editor_room_rect(s, o->handle);
         if (p.x < r.cx - r.hw || p.x > r.cx + r.hw) continue;
         if (p.z < r.cz - r.hd || p.z > r.cz + r.hd) continue;
@@ -70,10 +69,10 @@ int descend_wall_aim(RoomRect r, Ray ray, float door_h, int *wall, float *offset
     return 1;
 }
 
-#define DESCEND_GAP 4.0f   /* clear gap between the parent wall and the preview room */
+#define DESCEND_GAP 4.0f   /* clear gap between the parent wall and the sub-room */
 
 /* does a 2*half footprint at center c overlap an existing room close in Y?
-   (mirrors main.c's root_spot_occupied but scene-level + includes previews) */
+   (mirrors main.c's root_spot_occupied but scene-level over Scene) */
 static sol_bool descend_spot_occupied(Scene *s, vec3 c, float half) {
     sol_u32 i;
     for (i = 0; i < s->count; i++) {
@@ -84,8 +83,7 @@ static sol_bool descend_spot_occupied(Scene *s, vec3 c, float half) {
         if (o->mesh_ref) continue;
         rt = scene_meta_get(s, o->handle, "room_type");
         if (!rt) continue;
-        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0 &&
-            strcmp(rt, "preview") != 0) continue;
+        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
         r = editor_room_rect(s, o->handle);
         e = (r.hw > r.hd) ? r.hw : r.hd;
         if ((c.y > r.floor_y ? c.y - r.floor_y : r.floor_y - c.y) >= 3.5f) continue;

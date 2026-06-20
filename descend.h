@@ -1,7 +1,7 @@
 /* descend.h — fs-tree Phase 4 "descent": carry a folder tablet, aim it at a
-   wall to plant a door, walk into the empty preview sub-room to finalize it.
-   Headless: scene + geometry only (reuses editor's RoomRect), NO GL and NO
-   filesystem — main.c runs room_mirror_scan after finalize returns a path. */
+   wall, drop it to OPEN the folder as a real sub-room (door + walkway + its
+   contents). Headless: scene + geometry only (reuses editor's RoomRect), NO GL
+   and NO filesystem — main.c populates the new room via room_mirror_scan. */
 #ifndef SOL_DESCEND_H
 #define SOL_DESCEND_H
 
@@ -12,8 +12,8 @@
 
 /* ---- pure geometry (headless, unit-tested) ---- */
 
-/* The room (home/mirror/preview) whose footprint contains p (XZ inside, Y near
-   its floor); 0 if none. For "which room am I in" + walk-in detection. */
+/* The room (home/mirror) whose footprint contains p (XZ inside, Y near its
+   floor); 0 if none. For "which room am I in" (the wall-aim while carrying). */
 sol_u32 descend_room_at(Scene *s, vec3 p);
 
 /* Cast `ray` against the 4 interior wall planes of room rect `r`; on the nearest
