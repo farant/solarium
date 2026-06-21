@@ -10306,6 +10306,29 @@ static void render(AppState *state) {
                 }
             }
         }
+
+        /* bookshelf labels: meta["label"] across the top rail, facing the shelf's
+           front (+Z local), workspace-filtered like everything else. */
+        {
+            sol_u32 bi;
+            for (bi = 0; bi < state->scene.count; bi++) {
+                const SceneObject *o = &state->scene.objects[bi];
+                const char *lbl, *mr = o->mesh_ref;
+                float lpx, nw, x0, h;
+                mat4  m;
+                if (!mr || strcmp(mr, "bookshelf") != 0) continue;
+                if (!scene_object_active(&state->scene, o->handle)) continue;
+                lbl = scene_meta_get(&state->scene, o->handle, "label");
+                if (!lbl || !lbl[0]) continue;
+                h   = mesh_ref_param("bookshelf", o->mesh_params, o->mesh_param_count, "h");
+                lpx = 0.18f / lh;                          /* ~18 cm letters */
+                text_measure(uf, lbl, 1.0f, &nw, (float *)0);
+                x0  = -nw * lpx * 0.5f;                    /* centered on the shelf */
+                m   = mat4_mul(scene_world_matrix(&state->scene, o),
+                               mat4_translate(vec3_make(0.0f, h + 0.02f, 0.16f)));
+                wtext_block(uf, vp, m, lbl, x0, 0.0f, lpx, 0.0f, 0.95f, 0.92f, 0.82f);
+            }
+        }
     }
 
     /* P9 item 2: stained glass — the church_glass objects, translucent, drawn
