@@ -59,6 +59,17 @@ int main(void) {
             CHECK(b.y < a.y - 1e-4f);
         }
     }
+    /* table point: clamps inside the top, sits at the top height */
+    {
+        float p[3]; vec3 q;
+        p[0] = 1.4f; p[1] = 0.9f; p[2] = 0.75f;   /* w d h */
+        q = furniture_table_point(p, 3, vec3_make(0.3f, 0.75f, 0.2f));
+        CHECK(fabs((double)(q.y - 0.75f)) < 1e-4); /* on the top surface (y=h) */
+        CHECK(fabs((double)(q.x - 0.3f)) < 1e-4);  /* in-bounds: unchanged */
+        q = furniture_table_point(p, 3, vec3_make(5.0f, 0.0f, 5.0f));  /* way off */
+        CHECK(q.x <= 0.7f + 1e-4f && q.x >= -0.7f - 1e-4f);            /* clamped to +/-w/2 */
+        CHECK(q.z <= 0.45f + 1e-4f && q.z >= -0.45f - 1e-4f);          /* clamped to +/-d/2 */
+    }
     if (fails == 0) printf("furniture_test: OK\n");
     return fails ? 1 : 0;
 }

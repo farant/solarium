@@ -58,5 +58,19 @@ vec3 furniture_shelf_slot(const float *params, int count, int i) {
     return s;
 }
 
-/* furniture_table_point / furniture_surface_aim land in Tasks 4-5; leave them
-   out until then (their tests arrive with them). */
+vec3 furniture_table_point(const float *params, int count, vec3 local_hit) {
+    float w  = (count > 0) ? params[0] : 1.4f;
+    float d  = (count > 1) ? params[1] : 0.9f;
+    float h  = (count > 2) ? params[2] : 0.75f;
+    float hw = w * 0.5f - 0.05f, hd = d * 0.5f - 0.05f;   /* keep a small inset */
+    vec3  q  = local_hit;
+    if (hw < 0.0f) hw = 0.0f;
+    if (hd < 0.0f) hd = 0.0f;
+    if (q.x >  hw) q.x =  hw;  if (q.x < -hw) q.x = -hw;
+    if (q.z >  hd) q.z =  hd;  if (q.z < -hd) q.z = -hd;
+    q.y = h;                                              /* on the top */
+    return q;
+}
+
+/* furniture_surface_aim lands in Task 5; leave it out until then (its test
+   arrives with it). */
