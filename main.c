@@ -2653,6 +2653,10 @@ typedef struct AppState {
     float       plant_off;      /* descent: offset along that wall */
     sol_bool    plant_aim;      /* descent: a valid wall-aim this frame */
     vec3        carry_origin;   /* descent: a folder card's pre-carry local pos (snaps back on drop) */
+    sol_bool    file_aim;        /* carried tablet is aimed at furniture this frame */
+    sol_u32     file_target;     /* the furniture handle */
+    vec3        file_local;      /* the tablet's resting local pos on it */
+    quat        file_rot;        /* the resting local orientation */
     sol_bool    place_active;     /* place-furniture preview mode */
     int         place_index;      /* catalog index being previewed */
     float       place_yaw;        /* ghost yaw (radians) */
@@ -6639,6 +6643,14 @@ static void cmd_carry_toggle(AppState *st) {
 /* Per-frame: float the carried object in front of the camera. Called right after
    update() (so it runs before components_update reads poses). A carried FOLDER
    tablet instead snaps flat to the wall you're aiming at (descent planting). */
+/* how many objects are parented to `furniture` (its current contents). */
+static int furniture_child_count(AppState *st, sol_u32 furniture) {
+    sol_u32 i; int n = 0;
+    for (i = 0; i < st->scene.count; i++)
+        if (st->scene.objects[i].parent == furniture) n++;
+    return n;
+}
+
 static void carry_update(AppState *st) {
     SceneObject *o;
     vec3         fwd, hold;
@@ -6663,6 +6675,44 @@ static void carry_update(AppState *st) {
                 st->plant_off = off;  st->plant_aim = SOL_TRUE;
                 return;
             }
+        }
+    }
+    st->file_aim = SOL_FALSE;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "card") == 0 && o->kind != KIND_FOLDER) {
+        sol_u32 fi;
+        for (fi = 0; fi < st->scene.count; fi++) {
+            SceneObject *f = &st->scene.objects[fi];
+            vec3  fpos, loc; float fyaw; quat fq;
+            Ray   ray;
+            if (!f->mesh_ref) continue;
+            if (!furniture_is_table(f->mesh_ref) && !furniture_is_shelf(f->mesh_ref)) continue;
+            if (!scene_object_active(&st->scene, f->handle)) continue;
+            fpos = object_world_pos(&st->scene, f->handle);
+            fq   = f->rot;
+            fyaw = 2.0f * (float)atan2((double)fq.y, (double)fq.w);
+            ray.origin = st->camera.pos;
+            ray.dir    = camera_forward(&st->camera);
+            if (!furniture_surface_aim(f->mesh_ref, f->mesh_params, f->mesh_param_count,
+                                       fpos, fyaw, ray, &loc)) continue;
+            st->file_aim    = SOL_TRUE;
+            st->file_target = f->handle;
+            if (furniture_is_shelf(f->mesh_ref)) {
+                int idx = furniture_child_count(st, f->handle);
+                st->file_local = furniture_shelf_slot(f->mesh_params, f->mesh_param_count, idx);
+                st->file_rot   = quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)); /* spine: edge-out */
+            } else {
+                st->file_local = furniture_table_point(f->mesh_params, f->mesh_param_count, loc);
+                st->file_rot   = quat_mul(quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), st->place_yaw),
+                                          quat_from_axis_angle(vec3_make(1.0f,0.0f,0.0f), sol_radians(-90.0f))); /* flat + carry yaw */
+            }
+            /* preview: hover the carried tablet at the resting spot (furniture-local -> world) */
+            {
+                mat4 fm = scene_world_matrix(&st->scene, f);
+                vec3 wp = mat4_mul_point(fm, st->file_local);
+                o->pos = scene_world_to_local(&st->scene, o->parent, wp);
+                o->rot = st->file_rot;   /* show the resting orientation while aimed */
+            }
+            return;
         }
     }
     fwd     = camera_forward(&st->camera);
@@ -8303,6 +8353,8 @@ static void bind_runtime_handles(AppState *st) {
     st->drag_handle     = 0;
     st->current_room    = 0;
     st->portal_debounce = 0;
+    st->file_aim     = SOL_FALSE;
+    st->file_target  = 0;
     st->place_active = SOL_FALSE;
     st->place_index  = 0;
     st->place_yaw    = 0.0f;
@@ -11009,6 +11061,13 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
             else if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) { place_confirm(st); }
         }
         return;
+    }
+
+    /* ',' / '.' rotate a carried tablet (the table-filing yaw control). */
+    if (st->place_active == SOL_FALSE && st->carried != 0 &&
+        (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+        if      (key == GLFW_KEY_COMMA)  st->place_yaw -= sol_radians(15.0f);
+        else if (key == GLFW_KEY_PERIOD) st->place_yaw += sol_radians(15.0f);
     }
 
     /* ':' (Shift+;) opens the palette when nothing else owns the keyboard. */
