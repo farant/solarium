@@ -13,7 +13,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     exit 0
 fi
@@ -131,6 +131,17 @@ if [ "$MODE" = "descendtest" ]; then
         descend.c descend_test.c editor.c scene.c material.c mesh.c flora.c rock.c gothic.c sweep.c nid.c sol_math.c camera.c workspace.c \
         -o descend_test
     echo "built ./descend_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
+# furnituretest: the furniture geometry module (scene-free). Links mesh.c for
+# the mesh-build assertion (Task 2) + sol_math.
+if [ "$MODE" = "furnituretest" ]; then
+    set -x
+    clang -std=c89 -pedantic-errors -Werror -g -fsanitize=address,undefined \
+        furniture.c furniture_test.c mesh.c flora.c rock.c gothic.c sweep.c sol_math.c \
+        -o furniture_test
+    echo "built ./furniture_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
 
@@ -294,7 +305,7 @@ if [ "$MODE" = "metal" ]; then
     clang -fobjc-arc -g -O0 -Wall -Wextra \
         -c rhi_metal.m $(pkg-config --cflags glfw3) -o rhi_metal.o
     clang -std=c11 -g -O0 -Wall -Wextra -DSOL_RHI_METAL \
-        main.c rhi_metal.o mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c \
+        main.c rhi_metal.o mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework Metal -framework QuartzCore -framework Cocoa -framework IOKit -framework AudioToolbox \
         -o solarium-metal
@@ -310,7 +321,7 @@ if [ "$MODE" = "asan" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c \
+        main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit -framework AudioToolbox \
         -o solarium-asan
@@ -325,7 +336,7 @@ else
 fi
 
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c \
+    main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit -framework AudioToolbox \
     -o solarium
