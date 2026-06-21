@@ -2657,6 +2657,7 @@ typedef struct AppState {
     int         place_index;      /* catalog index being previewed */
     float       place_yaw;        /* ghost yaw (radians) */
     Mesh        place_ghost;      /* realized ghost mesh (rebuilt on enter/cycle) */
+    sol_u32     place_label_target; /* handle awaiting a bookshelf-label prompt; 0 = none */
     sol_bool    lmb_was_down;
     sol_bool    editor_del_was;    /* edge-detect Delete/Backspace -> disconnect (editor) */
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
@@ -4408,6 +4409,7 @@ static sol_bool load_palace(AppState *st);     /* likewise */
 static void adopt_legacy_motion(AppState *st); /* P4 item 6: motion becomes data */
 static void note_edit_end(AppState *st);       /* defined with on_key below */
 static void place_confirm(AppState *st);       /* Furniture: Task 8 fills this in */
+static void place_set_label(AppState *st, const char *label); /* Furniture: bookshelf label callback */
 
 /* The codex mint's tiny LCG (item 9): varied-but-PERSISTENT books — the
    drawn parameters land in the parts' mesh attrs, so a minted book keeps
@@ -6797,7 +6799,40 @@ static void place_realize_ghost(AppState *st) {
     mb_free(&mb);
 }
 
-static void place_confirm(AppState *st) { (void)st; }   /* Task 8 fills this in */
+/* palette_prompt callback: store the typed line as the bookshelf's label. */
+static void place_set_label(AppState *st, const char *label) {
+    if (st->place_label_target != 0 && label && label[0])
+        scene_meta_set(&st->scene, st->place_label_target, "label", label);
+    st->place_label_target = 0;
+    scene_save(&st->scene, "scene.stml");
+}
+
+/* drop the previewed furniture as a real object, tagged into the active
+   workspace; a bookshelf then prompts for its label. */
+static void place_confirm(AppState *st) {
+    Mesh     empty;
+    vec3     pos = carry_place_point(st);
+    quat     rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), st->place_yaw);
+    const char *kind = furniture_catalog_name(st->place_index);
+    sol_u32  h;
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, 0, empty, pos, rot, vec3_make(1.0f, 1.0f, 1.0f));
+    scene_mesh_ref_set(&st->scene, h, kind);
+    scene_meta_set(&st->scene, h, "name", kind);
+    scene_meta_set(&st->scene, h, "workspace",
+                   st->scene.active_ws[0] ? st->scene.active_ws : "home");
+    scene_resolve_meshes(&st->scene);
+    apply_kind_materials(&st->scene);
+    st->place_active = SOL_FALSE;
+    mesh_destroy(&st->place_ghost);
+    if (furniture_is_shelf(kind)) {
+        st->place_label_target = h;
+        palette_prompt(&st->palette, "bookshelf label", place_set_label);
+    } else {
+        scene_save(&st->scene, "scene.stml");
+    }
+    printf("placed %s\n", kind);
+}
 
 static void cmd_place_furniture(AppState *st) {
     st->place_active = SOL_TRUE;
@@ -8271,6 +8306,7 @@ static void bind_runtime_handles(AppState *st) {
     st->place_active = SOL_FALSE;
     st->place_index  = 0;
     st->place_yaw    = 0.0f;
+    st->place_label_target = 0;
     memset(&st->place_ghost, 0, sizeof st->place_ghost);
 }
 
