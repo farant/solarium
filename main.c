@@ -5970,6 +5970,8 @@ static void cmd_mint_whiteboard(AppState *st) {
                   quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw), one);
     scene_mesh_ref_set(&st->scene, h, "board");
     scene_meta_set(&st->scene, h, "name", "board");
+    scene_meta_set(&st->scene, h, "workspace",
+                   st->scene.active_ws[0] ? st->scene.active_ws : "home");
     scene_resolve_meshes(&st->scene);
     st->selected_handle = h;
     scene_save(&st->scene, "scene.stml");
@@ -6016,6 +6018,8 @@ static void cmd_mint_codex(AppState *st) {
                                                      sol_radians(-90.0f))),
                        one);
     scene_meta_set(&st->scene, anchor, "name", "codex");
+    scene_meta_set(&st->scene, anchor, "workspace",
+                   st->scene.active_ws[0] ? st->scene.active_ws : "home");
     part = scene_add(&st->scene, anchor, empty,
                      vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
     scene_mesh_ref_set(&st->scene, part, "book_cover");
@@ -7407,6 +7411,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
             scene_kind_set(&st->scene, h, KIND_NOTE);
             scene_meta_set(&st->scene, h, "name", "note");
+            scene_meta_set(&st->scene, h, "workspace",
+                           st->scene.active_ws[0] ? st->scene.active_ws : "home");
             scene_meta_set(&st->scene, h, "text",
                            "press Enter to edit me");
             scene_mesh_ref_set(&st->scene, h, "card");
