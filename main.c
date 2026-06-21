@@ -10314,6 +10314,18 @@ static void render(AppState *state) {
         }
     }
 
+    /* the place-mode ghost: the catalog item previewed translucent at the
+       ground-aim point, spun by place_yaw. Reuses the glass (alpha) path. */
+    if (state->place_active && state->place_ghost.index_count > 0) {
+        vec3     gp = carry_place_point(state);          /* camera-aim ground point */
+        mat4     model = mat4_mul(mat4_translate(gp),
+                            quat_to_mat4(quat_from_axis_angle(
+                                vec3_make(0.0f, 1.0f, 0.0f), state->place_yaw)));
+        Material gm = material_default();
+        gm.base_color = vec3_make(0.55f, 0.62f, 0.78f);  /* cool preview tint */
+        draw_glass(state, state->place_ghost, model, view, proj, eye, gm);
+    }
+
     /* P9 item 3: weathering decals — the church_decals objects, unlit textured
        alpha quads modulating the lit walls (stains darken, moss tints), into
        the HDR buffer (so they bloom + grade). After opaque, depth-tested. */
