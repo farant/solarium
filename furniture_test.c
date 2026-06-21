@@ -70,6 +70,44 @@ int main(void) {
         CHECK(q.x <= 0.7f + 1e-4f && q.x >= -0.7f - 1e-4f);            /* clamped to +/-w/2 */
         CHECK(q.z <= 0.45f + 1e-4f && q.z >= -0.45f - 1e-4f);          /* clamped to +/-d/2 */
     }
+    /* surface-aim: a downward ray onto a table top hits; aiming away misses */
+    {
+        float p[3]; Ray ray; vec3 loc;
+        p[0] = 1.4f; p[1] = 0.9f; p[2] = 0.75f;
+        ray.origin = vec3_make(0.0f, 2.0f, 0.0f);          /* above a table at origin */
+        ray.dir    = vec3_make(0.0f, -1.0f, 0.0f);
+        CHECK(furniture_surface_aim("table", p, 3, vec3_make(0,0,0), 0.0f, ray, &loc));
+        CHECK(fabs((double)(loc.y - 0.75f)) < 1e-3);       /* hit at the top height */
+        ray.dir = vec3_make(0.0f, 1.0f, 0.0f);             /* aim up: miss */
+        CHECK(!furniture_surface_aim("table", p, 3, vec3_make(0,0,0), 0.0f, ray, &loc));
+    }
+    /* surface-aim: a forward ray into a bookshelf's front face hits */
+    {
+        float p[4]; Ray ray; vec3 loc;
+        p[0]=1.0f; p[1]=1.8f; p[2]=0.3f; p[3]=4.0f;
+        ray.origin = vec3_make(0.0f, 0.9f, 2.0f);          /* in front (+Z) of a shelf */
+        ray.dir    = vec3_make(0.0f, 0.0f, -1.0f);
+        CHECK(furniture_surface_aim("bookshelf", p, 4, vec3_make(0,0,0), 0.0f, ray, &loc));
+        ray.origin = vec3_make(0.0f, 0.9f, -2.0f);         /* behind: ray points away */
+        ray.dir    = vec3_make(0.0f, 0.0f, -1.0f);
+        CHECK(!furniture_surface_aim("bookshelf", p, 4, vec3_make(0,0,0), 0.0f, ray, &loc));
+    }
+    /* surface-aim with a ROTATED table/shelf (catches a yaw-inverse bug) */
+    {
+        float pt_[3], ps[4]; Ray ray; vec3 loc;
+        pt_[0] = 1.4f; pt_[1] = 0.9f; pt_[2] = 0.75f;
+        /* table yawed 90deg: a downward off-center ray -> local hit un-rotated correctly.
+           world (0.3,*,0) maps to local (0,*,0.3) at yaw 90. */
+        ray.origin = vec3_make(0.3f, 2.0f, 0.0f);
+        ray.dir    = vec3_make(0.0f, -1.0f, 0.0f);
+        CHECK(furniture_surface_aim("table", pt_, 3, vec3_make(0,0,0), sol_radians(90.0f), ray, &loc));
+        CHECK(fabs((double)(loc.z - 0.3f)) < 1e-3);
+        /* shelf yawed 90deg: its front (+Z local) now faces world +X; aim from +X hits */
+        ps[0]=1.0f; ps[1]=1.8f; ps[2]=0.3f; ps[3]=4.0f;
+        ray.origin = vec3_make(2.0f, 0.9f, 0.0f);
+        ray.dir    = vec3_make(-1.0f, 0.0f, 0.0f);
+        CHECK(furniture_surface_aim("bookshelf", ps, 4, vec3_make(0,0,0), sol_radians(90.0f), ray, &loc));
+    }
     if (fails == 0) printf("furniture_test: OK\n");
     return fails ? 1 : 0;
 }

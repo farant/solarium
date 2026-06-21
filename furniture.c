@@ -72,5 +72,51 @@ vec3 furniture_table_point(const float *params, int count, vec3 local_hit) {
     return q;
 }
 
-/* furniture_surface_aim lands in Task 5; leave it out until then (its test
-   arrives with it). */
+/* rotate a vector by -yaw about +Y, i.e. world->local for a furniture placed
+   with quat_from_axis_angle(+Y, yaw): the matrix [c -s; s c] with c=cos(yaw),
+   s=sin(yaw) is exactly R_y(yaw)^-1 = R_y(-yaw). */
+static vec3 furn_unrotate_y(vec3 v, float yaw) {
+    float c = (float)cos((double)yaw), s = (float)sin((double)yaw);
+    vec3  r;
+    r.x = v.x * c - v.z * s;
+    r.y = v.y;
+    r.z = v.x * s + v.z * c;
+    return r;
+}
+
+sol_bool furniture_surface_aim(const char *mesh_ref, const float *params, int count,
+                               vec3 fpos, float fyaw, Ray ray, vec3 *out_local) {
+    Ray   lr;
+    float t;
+    vec3  pt, pnorm, hit;
+    /* world ray -> furniture local (translate then un-yaw) */
+    lr.origin = furn_unrotate_y(vec3_sub(ray.origin, fpos), fyaw);
+    lr.dir    = furn_unrotate_y(ray.dir, fyaw);
+    if (furniture_is_table(mesh_ref)) {
+        float w = (count > 0) ? params[0] : 1.4f;
+        float d = (count > 1) ? params[1] : 0.9f;
+        float h = (count > 2) ? params[2] : 0.75f;
+        pt    = vec3_make(0.0f, h, 0.0f);
+        pnorm = vec3_make(0.0f, 1.0f, 0.0f);
+        if (!ray_vs_plane(lr, pt, pnorm, &t) || t <= 0.0f) return SOL_FALSE;
+        hit = vec3_add(lr.origin, vec3_scale(lr.dir, t));
+        if (hit.x < -w*0.5f || hit.x > w*0.5f || hit.z < -d*0.5f || hit.z > d*0.5f)
+            return SOL_FALSE;
+        *out_local = hit;
+        return SOL_TRUE;
+    }
+    if (furniture_is_shelf(mesh_ref)) {
+        float w = (count > 0) ? params[0] : 1.0f;
+        float h = (count > 1) ? params[1] : 1.8f;
+        float d = (count > 2) ? params[2] : 0.3f;
+        pt    = vec3_make(0.0f, 0.0f, d * 0.5f);
+        pnorm = vec3_make(0.0f, 0.0f, 1.0f);
+        if (!ray_vs_plane(lr, pt, pnorm, &t) || t <= 0.0f) return SOL_FALSE;
+        hit = vec3_add(lr.origin, vec3_scale(lr.dir, t));
+        if (hit.x < -w*0.5f || hit.x > w*0.5f || hit.y < 0.0f || hit.y > h)
+            return SOL_FALSE;
+        *out_local = hit;
+        return SOL_TRUE;
+    }
+    return SOL_FALSE;
+}
