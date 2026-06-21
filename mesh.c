@@ -817,6 +817,35 @@ void make_arrow(MeshBuilder *b, sol_f32 x0, sol_f32 y0,
 
 static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 static void emit_board(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
+/* a table: a top slab + 4 legs. params: w (width X), d (depth Z), h (height).
+   origin at floor center; the top's upper face (y=h) is the filing surface. */
+static void emit_table(MeshBuilder *b, const float *p) {
+    float w = p[0], d = p[1], h = p[2];
+    float hw = w * 0.5f, hd = d * 0.5f, tt = 0.05f, lt = 0.06f;
+    float top0 = h - tt;
+    aabb_box(b, -hw, hw, top0, h, -hd, hd);                       /* top slab */
+    aabb_box(b, -hw,      -hw + lt, 0.0f, top0, -hd,      -hd + lt); /* legs */
+    aabb_box(b,  hw - lt,  hw,      0.0f, top0, -hd,      -hd + lt);
+    aabb_box(b, -hw,      -hw + lt, 0.0f, top0,  hd - lt,  hd);
+    aabb_box(b,  hw - lt,  hw,      0.0f, top0,  hd - lt,  hd);
+}
+/* a bookshelf: two side panels + a back + `shelves` horizontal boards. params:
+   w (width X), h (height Y), d (depth Z), shelves (board count). origin at floor
+   center; the front opening (+Z) faces the reader. */
+static void emit_bookshelf(MeshBuilder *b, const float *p) {
+    float w = p[0], h = p[1], d = p[2];
+    int   sh = (int)(p[3] + 0.5f), k;
+    float hw = w * 0.5f, hd = d * 0.5f, pt = 0.04f;
+    if (sh < 1) sh = 1;
+    aabb_box(b, -hw, -hw + pt, 0.0f, h, -hd, hd);                 /* left panel  */
+    aabb_box(b,  hw - pt, hw,  0.0f, h, -hd, hd);                 /* right panel */
+    aabb_box(b, -hw, hw, 0.0f, h, -hd, -hd + pt);                 /* back panel  */
+    aabb_box(b, -hw, hw, 0.0f, pt, -hd, hd);                      /* floor board */
+    for (k = 1; k <= sh; k++) {                                   /* shelf boards */
+        float y = (h - pt) * (float)k / (float)(sh + 1);
+        aabb_box(b, -hw, hw, y, y + pt, -hd, hd);
+    }
+}
 static void emit_book_cover(MeshBuilder *b, const float *p) {
     make_book_cover(b, p[0], p[1], p[2], p[3], p[4], p[5],
                     (int)(p[6] + 0.5f), p[7] > 0.5f);
@@ -970,6 +999,10 @@ static const MeshRefEntry REGISTRY[] = {
        bottom-origin, front face toward local +Z. Its OWN ref name is its
        identity: the drag code recognizes a pinboard by mesh_ref "board". */
     { "board", 3, { "w", "h", "t" }, { 1.8f, 1.2f, 0.05f }, emit_board },
+    /* furniture (Furniture & Filing): synthesized table + bookshelf. NON-solid
+       in v1 (no collide_rebuild case), like the whiteboard — walk-through. */
+    { "table", 3, { "w", "d", "h" }, { 1.4f, 0.9f, 0.75f }, emit_table },
+    { "bookshelf", 4, { "w", "h", "d", "shelves" }, { 1.0f, 1.8f, 0.3f, 4.0f }, emit_bookshelf },
     /* the codex (item 9): cover and block are SEPARATE refs so each part
        wears its own material — a book is a small group, like a room.
        Defaults are a sane quarto; the spawner varies within real ranges. */
