@@ -39,6 +39,7 @@
 #include "mixer.h"               /* the pure mixing core the callback shares */
 #include "platform_audio.h"      /* the fifth quarantine: CoreAudio + the ring */
 #include "stml.h"                /* sounds.stml: the ear's hot-reloadable knobs */
+#include "furniture.h"           /* scene-free furniture catalog + meshes (Furniture & Filing) */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -2652,6 +2653,10 @@ typedef struct AppState {
     float       plant_off;      /* descent: offset along that wall */
     sol_bool    plant_aim;      /* descent: a valid wall-aim this frame */
     vec3        carry_origin;   /* descent: a folder card's pre-carry local pos (snaps back on drop) */
+    sol_bool    place_active;     /* place-furniture preview mode */
+    int         place_index;      /* catalog index being previewed */
+    float       place_yaw;        /* ghost yaw (radians) */
+    Mesh        place_ghost;      /* realized ghost mesh (rebuilt on enter/cycle) */
     sol_bool    lmb_was_down;
     sol_bool    editor_del_was;    /* edge-detect Delete/Backspace -> disconnect (editor) */
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
@@ -4402,6 +4407,7 @@ static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
 static void adopt_legacy_motion(AppState *st); /* P4 item 6: motion becomes data */
 static void note_edit_end(AppState *st);       /* defined with on_key below */
+static void place_confirm(AppState *st);       /* Furniture: Task 8 fills this in */
 
 /* The codex mint's tiny LCG (item 9): varied-but-PERSISTENT books — the
    drawn parameters land in the parts' mesh attrs, so a minted book keeps
@@ -6781,6 +6787,26 @@ static void cmd_new_root(AppState *st) {
     palette_prompt(&st->palette, "root path", create_root_from_path);
 }
 
+/* (re)build the translucent ghost mesh for the current catalog item. */
+static void place_realize_ghost(AppState *st) {
+    MeshBuilder mb;
+    mesh_destroy(&st->place_ghost);
+    mb_init(&mb);
+    if (mesh_ref_build(furniture_catalog_name(st->place_index), (const float *)0, 0, &mb))
+        st->place_ghost = mesh_from_builder(&mb);
+    mb_free(&mb);
+}
+
+static void place_confirm(AppState *st) { (void)st; }   /* Task 8 fills this in */
+
+static void cmd_place_furniture(AppState *st) {
+    st->place_active = SOL_TRUE;
+    st->place_index  = 0;
+    st->place_yaw    = 0.0f;
+    place_realize_ghost(st);
+    printf("place mode: [ ] cycle, , . rotate, Enter place, Esc cancel\n");
+}
+
 /* the world position + facing for an outbound gate placed in front of the
    player. The gate faces the player (yaw + PI) so you walk INTO it. */
 static void outbound_gate_placement(AppState *st, vec3 *pos, float *yaw) {
@@ -6931,6 +6957,7 @@ static Command g_commands[] = {
     { "Carry / place selected",      "E", GLFW_KEY_E, cmd_carry_toggle,      can_carry_toggle,      SOL_FALSE },
     { "Mint fox",                    "Y", GLFW_KEY_Y, cmd_mint_fox,          NULL,                  SOL_FALSE },
     { "New root...",                 NULL, 0,          cmd_new_root,          NULL,                  SOL_FALSE },
+    { "Place furniture",             NULL, 0,          cmd_place_furniture,   NULL,                  SOL_FALSE },
     { "Top-down editor",             NULL, 0,          cmd_toggle_editor,     NULL,                  SOL_FALSE },
     { "Disconnect selected",         NULL, 0,          cmd_disconnect,        can_disconnect,        SOL_FALSE }
 };
@@ -7834,8 +7861,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        in the debug panel now (3c) — the window-title hack is retired. */
     {
         float erate = (float)dt * 1.5f;
-        if (glfwGetKey(w, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) st->exposure += erate;
-        if (glfwGetKey(w, GLFW_KEY_LEFT_BRACKET)  == GLFW_PRESS) st->exposure -= erate;
+        if (!st->place_active) {
+            if (glfwGetKey(w, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) st->exposure += erate;
+            if (glfwGetKey(w, GLFW_KEY_LEFT_BRACKET)  == GLFW_PRESS) st->exposure -= erate;
+        }
         if (st->exposure < 0.1f) st->exposure = 0.1f;
         if (st->exposure > 8.0f) st->exposure = 8.0f;
     }
@@ -8239,6 +8268,10 @@ static void bind_runtime_handles(AppState *st) {
     st->drag_handle     = 0;
     st->current_room    = 0;
     st->portal_debounce = 0;
+    st->place_active = SOL_FALSE;
+    st->place_index  = 0;
+    st->place_yaw    = 0.0f;
+    memset(&st->place_ghost, 0, sizeof st->place_ghost);
 }
 
 /* Reconcile every mirror against disk + validate aliases (6c/6d): resolves
@@ -10890,6 +10923,19 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
             else if (key == GLFW_KEY_BACKSPACE) pk = PALETTE_KEY_BACKSPACE;
             if (pk != PALETTE_KEY_NONE)
                 palette_input_key(&st->palette, pk, st, g_commands, G_COMMAND_COUNT);
+        }
+        return;
+    }
+
+    /* Place mode owns the keyboard while previewing furniture. */
+    if (st->place_active) {
+        if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+            if      (key == GLFW_KEY_ESCAPE) { st->place_active = SOL_FALSE; mesh_destroy(&st->place_ghost); }
+            else if (key == GLFW_KEY_LEFT_BRACKET)  { st->place_index = furniture_catalog_cycle(st->place_index, -1); place_realize_ghost(st); }
+            else if (key == GLFW_KEY_RIGHT_BRACKET) { st->place_index = furniture_catalog_cycle(st->place_index,  1); place_realize_ghost(st); }
+            else if (key == GLFW_KEY_COMMA)  { st->place_yaw -= sol_radians(15.0f); }
+            else if (key == GLFW_KEY_PERIOD) { st->place_yaw += sol_radians(15.0f); }
+            else if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) { place_confirm(st); }
         }
         return;
     }
