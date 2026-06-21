@@ -187,6 +187,20 @@ int main(void) {
         scene_free(&s);
     }
 
+    /* a walkway connected between workspace-tagged rooms inherits that workspace */
+    {
+        Scene s; sol_u32 a, b, wk;
+        scene_init(&s);
+        a = add_room(&s, 0.0f,  12.0f, 0.0f, 8.0f, 8.0f);
+        b = add_room(&s, 14.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        scene_meta_set(&s, a, "workspace", "photos");
+        scene_meta_set(&s, b, "workspace", "photos");
+        wk = editor_connect(&s, a, b);
+        CHECK(wk != 0);
+        CHECK(strcmp(scene_meta_get(&s, wk, "workspace"), "photos") == 0);
+        scene_free(&s);
+    }
+
     if (fails == 0) printf("editor_test: OK\n");
     return fails ? 1 : 0;
 }

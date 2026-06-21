@@ -6696,14 +6696,17 @@ static void create_root_from_path(AppState *st, const char *path) {
     vec3       home_pos, pos;
     Material   stone = material_default();
     const char *slash, *name;
+    const char *ws;
 
     if (path == NULL || path[0] == '\0') return;
+    ws = st->scene.active_ws[0] ? st->scene.active_ws : "home";
 
     /* find the home room + count existing mirror rooms (placement spreads east) */
     for (i = 0; i < st->scene.count; i++) {
         sol_u32     h  = st->scene.objects[i].handle;
         const char *rt = scene_meta_get(&st->scene, h, "room_type");
         if (!rt) continue;
+        if (strcmp(workspace_of(&st->scene, h), ws) != 0) continue;   /* this workspace only */
         if      (strcmp(rt, "home")   == 0) home = h;
         else if (strcmp(rt, "mirror") == 0) mirror_count++;
     }
@@ -6733,6 +6736,7 @@ static void create_root_from_path(AppState *st, const char *path) {
     scene_meta_set(&st->scene, root, "room_type",   "mirror");
     scene_meta_set(&st->scene, root, "source_path", path);
     scene_meta_set(&st->scene, root, "name",        name);
+    scene_meta_set(&st->scene, root, "workspace",   ws);
 
     shell = scene_add(&st->scene, root, empty, vec3_make(0.0f, 0.0f, 0.0f),
                       quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
@@ -6753,6 +6757,7 @@ static void create_root_from_path(AppState *st, const char *path) {
         scene_mesh_ref_set(&st->scene, wk, "walkway");
         scene_rel_add(&st->scene, wk, "connects", home);
         scene_rel_add(&st->scene, wk, "connects", root);
+        scene_meta_set(&st->scene, wk, "workspace", ws);
     }
 
     scene_resolve_meshes(&st->scene);

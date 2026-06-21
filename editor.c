@@ -98,6 +98,12 @@ sol_u32 editor_connect(Scene *s, sol_u32 a, sol_u32 b) {
     scene_mesh_ref_set(s, wk, "walkway");
     scene_rel_add(s, wk, "connects", a);
     scene_rel_add(s, wk, "connects", b);
+    {
+        char ws[SOL_WS_NAME_CAP];
+        strncpy(ws, workspace_of(s, a), SOL_WS_NAME_CAP - 1);
+        ws[SOL_WS_NAME_CAP - 1] = '\0';
+        scene_meta_set(s, wk, "workspace", ws);
+    }
     return wk;
 }
 

@@ -142,6 +142,25 @@ int main(void) {
         scene_free(&s);
     }
 
+    /* a sub-room + walkway descended from a workspace-tagged room inherit that workspace */
+    {
+        Scene s; sol_u32 home, fld, pv, i, wk = 0;
+        scene_init(&s);
+        home = add_room(&s, 0.0f, 12.0f, 0.0f, 10.0f, 10.0f);
+        scene_meta_set(&s, home, "workspace", "photos");     /* parent is in 'photos' */
+        fld  = add_folder_card(&s, home, "/tmp/sub");
+        pv   = descend_plant(&s, home, fld, ROOM_WALL_E, 0.0f);
+        CHECK(pv != 0);
+        CHECK(strcmp(scene_meta_get(&s, pv, "workspace"), "photos") == 0);
+        for (i = 0; i < s.count; i++) {
+            SceneObject *o = &s.objects[i];
+            if (o->mesh_ref && strcmp(o->mesh_ref, "walkway") == 0) { wk = o->handle; break; }
+        }
+        CHECK(wk != 0);
+        CHECK(strcmp(scene_meta_get(&s, wk, "workspace"), "photos") == 0);
+        scene_free(&s);
+    }
+
     if (fails == 0) printf("descend_test: OK\n");
     return fails ? 1 : 0;
 }

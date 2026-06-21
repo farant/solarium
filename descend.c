@@ -5,8 +5,9 @@
 #include "route.h"      /* ROUTE_DOOR_W / ROUTE_DOOR_H */
 #include "sol_math.h"
 #include "material.h"   /* Material, material_default */
+#include "workspace.h"  /* workspace_of */
 
-#include <string.h>     /* strcmp, strrchr, memset */
+#include <string.h>     /* strcmp, strrchr, memset, strncpy */
 
 /* a point's room: the home/mirror anchor whose footprint contains it */
 sol_u32 descend_room_at(Scene *s, vec3 p) {
@@ -105,10 +106,13 @@ sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
     const char  *path, *name, *slash;
     Material     stone = material_default();
     int          guard;
+    char         ws[SOL_WS_NAME_CAP];
     if (!card || card->kind != KIND_FOLDER) return 0;
     if (scene_meta_get(s, folder_card, "planted")) return 0;   /* already opened */
     if (!card->content) return 0;
     path = card->content;   /* capture BEFORE any scene_add reallocs s->objects (dangles card) */
+    strncpy(ws, workspace_of(s, parent_room), SOL_WS_NAME_CAP - 1);
+    ws[SOL_WS_NAME_CAP - 1] = '\0';   /* parent's workspace, copied before scene_add reallocs */
 
     pr   = editor_room_rect(s, parent_room);
     door = descend_door_point(pr, wall, offset);
@@ -130,6 +134,7 @@ sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
     scene_meta_set(s, room, "room_type",   "mirror");   /* a real room: routes + scans like a root */
     scene_meta_set(s, room, "source_path", path);
     scene_meta_set(s, room, "name",        name);
+    scene_meta_set(s, room, "workspace",   ws);
 
     shell = scene_add(s, room, empty, vec3_make(0.0f,0.0f,0.0f), quat_identity(),
                       vec3_make(1.0f,1.0f,1.0f));
@@ -145,6 +150,7 @@ sol_u32 descend_plant(Scene *s, sol_u32 parent_room, sol_u32 folder_card,
     scene_mesh_ref_set(s, wk, "walkway");
     scene_rel_add(s, wk, "connects", parent_room);
     scene_rel_add(s, wk, "connects", room);
+    scene_meta_set(s, wk, "workspace", ws);
 
     scene_meta_set(s, folder_card, "planted", "1");   /* opened: refuse a duplicate room */
     return room;
