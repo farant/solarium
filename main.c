@@ -6622,6 +6622,15 @@ static void cmd_carry_toggle(AppState *st) {
                     }
                 }
                 scene_save(&st->scene, "scene.stml");
+            } else if (st->file_aim && st->file_target != 0 &&
+                       scene_get(&st->scene, st->file_target) != 0) {
+                o->parent = st->file_target;          /* re-parent: the furniture owns it now */
+                o->pos    = st->file_local;           /* furniture-local resting pos */
+                o->rot    = st->file_rot;
+                scene_resolve_meshes(&st->scene);
+                apply_kind_materials(&st->scene);
+                scene_save(&st->scene, "scene.stml");
+                printf("filed onto furniture\n");
             } else {
                 vec3 w = carry_place_point(st);
                 o->pos = scene_world_to_local(&st->scene, o->parent, w);
@@ -6630,12 +6639,24 @@ static void cmd_carry_toggle(AppState *st) {
         }
         st->carried   = 0;
         st->plant_aim = SOL_FALSE;
+        st->file_aim  = SOL_FALSE;
     } else {
         sol_u32 t = carry_target(st, st->selected_handle);
         if (t != 0) {
             SceneObject *co = scene_get(&st->scene, t);
             st->carried = t;
-            if (co) st->carry_origin = co->pos;   /* remember its spot, to snap a folder back */
+            if (co) {
+                st->carry_origin = co->pos;   /* remember its spot, to snap a folder back */
+                {
+                    SceneObject *par = scene_get(&st->scene, co->parent);
+                    if (par && par->mesh_ref &&
+                        (furniture_is_table(par->mesh_ref) || furniture_is_shelf(par->mesh_ref))) {
+                        vec3 wp = object_world_pos(&st->scene, t);   /* world pos before detach */
+                        co->parent = 0;                               /* leave the furniture */
+                        co->pos    = wp;
+                    }
+                }
+            }
         }
     }
 }
