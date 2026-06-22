@@ -2690,6 +2690,10 @@ typedef struct AppState {
     vec3        resize_u;          /* the wall's horizontal in-plane axis       */
     sol_u32     resize_room;       /* the board's parent room (wall clamp)      */
     Mesh        resize_handle_mesh;/* small corner quad; built once on first use */
+    sol_u32     picture_aim;       /* image card aimed at a wall/board this frame */
+    sol_u32     picture_target;    /* the room (wall) or board to parent the picture */
+    vec3        picture_local;     /* the picture's local pos under the target */
+    quat        picture_rot;       /* the picture's local rotation */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -6691,6 +6695,22 @@ static void cmd_carry_toggle(AppState *st) {
                     }
                 }
                 scene_save(&st->scene, "scene.stml");
+            } else if (st->picture_aim && st->picture_target != 0 &&
+                       scene_get(&st->scene, st->picture_target) != 0) {
+                const char *path = o->content;       /* heap ptr survives scene_add */
+                Mesh        empty;
+                vec3        one = vec3_make(1.0f, 1.0f, 1.0f);
+                sol_u32     a;
+                memset(&empty, 0, sizeof empty);
+                o->pos = st->carry_origin;            /* the image card STAYS */
+                a = scene_add(&st->scene, st->picture_target, empty,
+                              st->picture_local, st->picture_rot, one);
+                scene_mesh_ref_set(&st->scene, a, "picture");
+                if (path) scene_content_set(&st->scene, a, path);
+                scene_resolve_meshes(&st->scene);     /* builds mesh + loads albedo */
+                apply_kind_materials(&st->scene);     /* skips KIND_PLAIN -> image kept */
+                scene_save(&st->scene, "scene.stml");
+                printf("hung a picture\n");
             } else if (st->file_aim && st->file_target != 0 &&
                        scene_get(&st->scene, st->file_target) != 0) {
                 o->parent = st->file_target;          /* re-parent: the furniture owns it now */
@@ -6706,9 +6726,10 @@ static void cmd_carry_toggle(AppState *st) {
                 scene_save(&st->scene, "scene.stml");
             }
         }
-        st->carried   = 0;
-        st->plant_aim = SOL_FALSE;
-        st->file_aim  = SOL_FALSE;
+        st->carried     = 0;
+        st->plant_aim   = SOL_FALSE;
+        st->file_aim    = SOL_FALSE;
+        st->picture_aim = SOL_FALSE;
     } else {
         sol_u32 t = carry_target(st, st->selected_handle);
         if (t != 0) {
@@ -6857,6 +6878,51 @@ static void carry_update(AppState *st) {
                 st->plant_off = off;  st->plant_aim = SOL_TRUE;
                 return;
             }
+        }
+    }
+    st->picture_aim = 0;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "card") == 0 && o->kind != KIND_FOLDER &&
+        o->content && reader_is_image_path(o->content)) {
+        float   pw   = mesh_ref_param("picture", (const float *)0, 0, "w");
+        float   ph   = mesh_ref_param("picture", (const float *)0, 0, "h");
+        float   pt   = mesh_ref_param("picture", (const float *)0, 0, "t");
+        sol_u32 room = descend_room_at(&st->scene, st->camera.pos);
+        Ray     ray;
+        vec3    bloc;
+        sol_u32 board;
+        ray.origin = st->camera.pos;
+        ray.dir    = camera_forward(&st->camera);
+        if (room != 0) {                               /* aim at a WALL -> mount */
+            RoomRect r = editor_room_rect(&st->scene, room);
+            int   wall;
+            vec3  center;
+            float ceil_y = r.floor_y + room_interior_height(&st->scene, room);
+            if (descend_wall_mount(r, ray, ceil_y, pw * 0.5f, ph * 0.5f, pt,
+                                   &wall, &center)) {
+                static const float wyaw[4] = { 0.0f, -90.0f, 180.0f, 90.0f };
+                vec3 P = vec3_make(center.x, center.y - ph * 0.5f, center.z);
+                st->picture_aim    = 1;
+                st->picture_target = room;
+                st->picture_rot    = quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f),
+                                                          sol_radians(wyaw[wall]));
+                st->picture_local  = scene_world_to_local(&st->scene, room, P);
+                o->pos = scene_world_to_local(&st->scene, o->parent, P);
+                o->rot = st->picture_rot;
+                return;
+            }
+        }
+        board = board_under_ray(st, ray, &bloc);       /* else aim at a WHITEBOARD */
+        if (board != 0) {
+            vec3 lp = board_pin_pos(&st->scene, board, st->carried, bloc, 0.0f, -0.5f * ph);
+            mat4 bm = scene_world_matrix(&st->scene, scene_get(&st->scene, board));
+            vec3 wp = mat4_mul_point(bm, lp);
+            st->picture_aim    = 1;
+            st->picture_target = board;
+            st->picture_rot    = quat_identity();
+            st->picture_local  = lp;
+            o->pos = scene_world_to_local(&st->scene, o->parent, wp);
+            o->rot = scene_world_rotation(&st->scene, board);
+            return;
         }
     }
     st->file_aim = SOL_FALSE;
