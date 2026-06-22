@@ -6791,6 +6791,45 @@ static void board_world_corners(Scene *s, sol_u32 h, vec3 out[4], vec3 *out_u) {
     if (out_u) *out_u = u;
 }
 
+/* On a press: if the crosshair ray passes near a corner handle of the selected
+   mounted board, begin a resize with the OPPOSITE corner anchored. 1 on a grab. */
+static int resize_corner_pick(AppState *st, GLFWwindow *w) {
+    Ray   ray = pick_ray(st, w);
+    vec3  cor[4], u;
+    int   i, best = -1;
+    float bestd = 0.18f;                       /* grab radius (m) */
+    SceneObject *o = scene_get(&st->scene, st->selected_handle);
+    ray.dir = vec3_normalize(ray.dir);
+    board_world_corners(&st->scene, st->selected_handle, cor, &u);
+    for (i = 0; i < 4; i++) {
+        vec3  rel   = vec3_sub(cor[i], ray.origin);
+        float along = vec3_dot(rel, ray.dir);
+        vec3  perp;
+        float d;
+        if (along <= 0.0f) continue;           /* behind the camera */
+        perp = vec3_sub(rel, vec3_scale(ray.dir, along));
+        d    = (float)sqrt((double)vec3_dot(perp, perp));
+        if (d < bestd) { bestd = d; best = i; }
+    }
+    if (best < 0) return 0;
+    st->resize_board  = st->selected_handle;
+    st->resize_anchor = cor[(best + 2) % 4];   /* the opposite corner */
+    st->resize_u      = u;
+    st->resize_room   = o ? o->parent : 0;
+    return 1;
+}
+
+/* room interior height from its "room" shell (default 3.0 if none). */
+static float room_interior_height(Scene *s, sol_u32 room) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *c = &s->objects[i];
+        if (c->parent == room && c->mesh_ref && strcmp(c->mesh_ref, "room") == 0)
+            return mesh_ref_param("room", c->mesh_params, c->mesh_param_count, "h");
+    }
+    return 3.0f;
+}
+
 static void carry_update(AppState *st) {
     SceneObject *o;
     vec3         fwd, hold;
@@ -7385,6 +7424,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 do_pick(st, w, 0.0f, 0.0f);             /* select on press, as before */
                 if (try_connect(st, st->selected_handle)) {
                     /* the press completed a connection — no drag */
+                } else if (st->selected_handle != 0 &&
+                           board_is_mounted(&st->scene, st->selected_handle) &&
+                           resize_corner_pick(st, w)) {
+                    /* grabbed a corner handle — resize, not carry */
                 } else if (st->selected_handle != 0 && st->selected_handle != st->page_handle)
                     drag_begin(st, w, st->selected_handle);
             } else {
@@ -7399,6 +7442,56 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
         }
 
+        if (lmb && st->resize_board != 0) {             /* ---- resizing ---- */
+            SceneObject *o = scene_get(&st->scene, st->resize_board);
+            if (!o || st->resize_room == 0 ||
+                scene_get(&st->scene, st->resize_room) == 0) {
+                st->resize_board = 0;                   /* board/room vanished */
+            } else {
+                Ray      ray = pick_ray(st, w);
+                RoomRect r   = editor_room_rect(&st->scene, st->resize_room);
+                float    yaw = board_yaw(&st->scene, st->resize_board);
+                vec3     n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+                float    bt  = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "t");
+                float    tt;
+                if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
+                    vec3  hit   = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+                    float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
+                    float runH  = (n.z * n.z > 0.25f) ? r.hw : r.hd;
+                    float ceil_y= r.floor_y + room_interior_height(&st->scene, st->resize_room);
+                    vec3  wallc = vec3_sub(vec3_make(r.cx, hit.y, r.cz), vec3_scale(n, perpH));
+                    float du    = vec3_dot(vec3_sub(hit, wallc), st->resize_u);
+                    float hy    = hit.y;
+                    vec3  dragged, origin;
+                    float nw, nh, p3[3];
+                    char  oldkey[160];
+                    sol_bool keyed;
+                    if (du >  runH) du =  runH;          /* clamp along the wall */
+                    if (du < -runH) du = -runH;
+                    if (hy < r.floor_y) hy = r.floor_y;  /* clamp floor..ceil */
+                    if (hy > ceil_y)    hy = ceil_y;
+                    dragged   = vec3_add(vec3_make(wallc.x, hy, wallc.z),
+                                         vec3_scale(st->resize_u, du));
+                    board_resize_corner(st->resize_anchor, dragged, st->resize_u, 0.3f,
+                                        &nw, &nh, &origin);
+                    p3[0] = nw; p3[1] = nh; p3[2] = bt;
+                    /* the "board" mesh is registry-SHARED by params, and
+                       scene_resolve_meshes only builds for objects with no mesh,
+                       so a live resize must RELEASE the old shape (by its old key)
+                       and clear the borrow before re-resolving rebuilds the new
+                       size — never mesh_destroy a shared shape (P4 item 4). */
+                    keyed = mesh_asset_key(o, oldkey);   /* key from the OLD params */
+                    scene_mesh_params_set(&st->scene, st->resize_board, p3, 3);
+                    if (keyed) asset_release(&g_mesh_assets, oldkey);
+                    o = scene_get(&st->scene, st->resize_board);
+                    if (o) {
+                        memset(&o->mesh, 0, sizeof o->mesh);   /* drop the borrow */
+                        o->pos = scene_world_to_local(&st->scene, o->parent, origin);
+                    }
+                    scene_resolve_meshes(&st->scene);
+                }
+            }
+        }
         if (lmb && st->drag_handle != 0) {              /* ---- carrying ---- */
             if (!fp && !st->drag_moved) {               /* orbit: wait out the slop */
                 double ddx = mx - st->press_x, ddy = my - st->press_y;
@@ -7473,7 +7566,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }
 
         if (!lmb && st->lmb_was_down) {                 /* ---- release ---- */
-            if (st->drag_handle != 0 && st->drag_moved) {
+            if (st->resize_board != 0) {                /* finished a resize */
+                scene_save(&st->scene, "scene.stml");
+                st->resize_board = 0;
+            } else if (st->drag_handle != 0 && st->drag_moved) {
                 SceneObject *o = scene_get(&st->scene, st->drag_handle);
                 if (o && o->kind != KIND_PLAIN) {       /* a dragged card is PLACED:
                                                            the tray's claim ends here */
