@@ -2696,6 +2696,8 @@ typedef struct AppState {
     quat        picture_rot;       /* the picture's local rotation */
     sol_u32     carry_prev_parent; /* the carried object's pre-pickup parent (restore on plant) */
     quat        carry_prev_rot;    /* and its pre-pickup local rotation */
+    sol_u32     move_board;        /* picture being slid along its wall; 0 = none */
+    vec3        move_grab;         /* origin - cursor-hit at grab, so it tracks the cursor */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -6863,6 +6865,27 @@ static int resize_corner_pick(AppState *st, GLFWwindow *w) {
     return 1;
 }
 
+/* On a press on a mounted PICTURE's body (no corner grabbed): begin sliding it
+   along its wall. Returns 1 on a grab. */
+static int picture_move_pick(AppState *st, GLFWwindow *w) {
+    Ray   ray = pick_ray(st, w);
+    SceneObject *o = scene_get(&st->scene, st->selected_handle);
+    float yaw, tt;
+    vec3  n, p0, h0;
+    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "picture") != 0) return 0;
+    yaw = board_yaw(&st->scene, st->selected_handle);
+    n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+    p0  = object_world_pos(&st->scene, st->selected_handle);  /* origin (bottom-center) */
+    ray.dir = vec3_normalize(ray.dir);
+    if (!ray_vs_plane(ray, p0, n, &tt) || tt <= 0.0f) return 0;
+    h0  = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+    st->move_board  = st->selected_handle;
+    st->move_grab   = vec3_sub(p0, h0);          /* keep the grab point under the cursor */
+    st->resize_u    = vec3_make((float)cos((double)yaw), 0.0f, -(float)sin((double)yaw));
+    st->resize_room = o->parent;
+    return 1;
+}
+
 /* room interior height from its "room" shell (default 3.0 if none). */
 static float room_interior_height(Scene *s, sol_u32 room) {
     sol_u32 i;
@@ -6903,16 +6926,31 @@ static void carry_update(AppState *st) {
     st->picture_aim = 0;
     if (o->mesh_ref && strcmp(o->mesh_ref, "card") == 0 && o->kind != KIND_FOLDER &&
         o->content && reader_is_image_path(o->content)) {
-        float   pw   = mesh_ref_param("picture", (const float *)0, 0, "w");
-        float   ph   = mesh_ref_param("picture", (const float *)0, 0, "h");
-        float   pt   = mesh_ref_param("picture", (const float *)0, 0, "t");
-        sol_u32 room = descend_room_at(&st->scene, st->camera.pos);
+        float   pw = mesh_ref_param("picture", (const float *)0, 0, "w");
+        float   ph = mesh_ref_param("picture", (const float *)0, 0, "h");
+        float   pt = mesh_ref_param("picture", (const float *)0, 0, "t");
         Ray     ray;
         vec3    bloc;
-        sol_u32 board;
+        sol_u32 board, room;
         ray.origin = st->camera.pos;
         ray.dir    = camera_forward(&st->camera);
-        if (room != 0) {                               /* aim at a WALL -> mount */
+        board = board_under_ray(st, ray, &bloc);       /* a WHITEBOARD in the way wins
+                                                          (the wall test below ignores it,
+                                                          so it would mount behind it) */
+        if (board != 0) {
+            vec3 lp = board_pin_pos(&st->scene, board, st->carried, bloc, 0.0f, -0.5f * ph);
+            mat4 bm = scene_world_matrix(&st->scene, scene_get(&st->scene, board));
+            vec3 wp = mat4_mul_point(bm, lp);
+            st->picture_aim    = 1;
+            st->picture_target = board;
+            st->picture_rot    = quat_identity();
+            st->picture_local  = lp;
+            o->pos = scene_world_to_local(&st->scene, o->parent, wp);
+            o->rot = scene_world_rotation(&st->scene, board);
+            return;
+        }
+        room = descend_room_at(&st->scene, st->camera.pos);
+        if (room != 0) {                               /* else aim at a WALL -> mount */
             RoomRect r = editor_room_rect(&st->scene, room);
             int   wall;
             vec3  center;
@@ -6930,19 +6968,6 @@ static void carry_update(AppState *st) {
                 o->rot = st->picture_rot;
                 return;
             }
-        }
-        board = board_under_ray(st, ray, &bloc);       /* else aim at a WHITEBOARD */
-        if (board != 0) {
-            vec3 lp = board_pin_pos(&st->scene, board, st->carried, bloc, 0.0f, -0.5f * ph);
-            mat4 bm = scene_world_matrix(&st->scene, scene_get(&st->scene, board));
-            vec3 wp = mat4_mul_point(bm, lp);
-            st->picture_aim    = 1;
-            st->picture_target = board;
-            st->picture_rot    = quat_identity();
-            st->picture_local  = lp;
-            o->pos = scene_world_to_local(&st->scene, o->parent, wp);
-            o->rot = scene_world_rotation(&st->scene, board);
-            return;
         }
     }
     st->file_aim = SOL_FALSE;
@@ -7519,6 +7544,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                            board_is_mounted(&st->scene, st->selected_handle) &&
                            resize_corner_pick(st, w)) {
                     /* grabbed a corner handle — resize, not carry */
+                } else if (st->selected_handle != 0 &&
+                           board_is_mounted(&st->scene, st->selected_handle) &&
+                           picture_move_pick(st, w)) {
+                    /* grabbed a picture's body — slide it on the wall */
                 } else if (st->selected_handle != 0 && st->selected_handle != st->page_handle)
                     drag_begin(st, w, st->selected_handle);
             } else {
@@ -7533,6 +7562,44 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
         }
 
+        if (lmb && st->move_board != 0) {               /* ---- sliding a picture ---- */
+            SceneObject *o = scene_get(&st->scene, st->move_board);
+            if (!o || st->resize_room == 0 ||
+                scene_get(&st->scene, st->resize_room) == 0) {
+                st->move_board = 0;
+            } else {
+                Ray      ray = pick_ray(st, w);
+                RoomRect r   = editor_room_rect(&st->scene, st->resize_room);
+                float    yaw = board_yaw(&st->scene, st->move_board);
+                vec3     n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+                vec3     anchor = object_world_pos(&st->scene, st->move_board);
+                float    tt;
+                ray.dir = vec3_normalize(ray.dir);
+                if (ray_vs_plane(ray, anchor, n, &tt) && tt > 0.0f) {
+                    float pw    = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "w");
+                    float ph    = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "h");
+                    float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
+                    float runH  = (n.z * n.z > 0.25f) ? r.hw : r.hd;
+                    float ceil_y= r.floor_y + room_interior_height(&st->scene, st->resize_room);
+                    vec3  hit   = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+                    vec3  P     = vec3_add(hit, st->move_grab);
+                    vec3  wallc = vec3_sub(vec3_make(r.cx, P.y, r.cz), vec3_scale(n, perpH));
+                    float du    = vec3_dot(vec3_sub(P, wallc), st->resize_u);
+                    float lim   = runH - pw * 0.5f;
+                    float py    = P.y;
+                    vec3  np;
+                    if (lim < 0.0f) lim = 0.0f;
+                    if (du >  lim) du =  lim;
+                    if (du < -lim) du = -lim;
+                    if (py < r.floor_y)   py = r.floor_y;
+                    if (py > ceil_y - ph) py = ceil_y - ph;
+                    np.x = wallc.x + st->resize_u.x * du;
+                    np.y = py;
+                    np.z = wallc.z + st->resize_u.z * du;
+                    o->pos = scene_world_to_local(&st->scene, o->parent, np);
+                }
+            }
+        }
         if (lmb && st->resize_board != 0) {             /* ---- resizing ---- */
             SceneObject *o = scene_get(&st->scene, st->resize_board);
             if (!o || st->resize_room == 0 ||
@@ -7671,6 +7738,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             if (st->resize_board != 0) {                /* finished a resize */
                 scene_save(&st->scene, "scene.stml");
                 st->resize_board = 0;
+            } else if (st->move_board != 0) {           /* finished a picture slide */
+                scene_save(&st->scene, "scene.stml");
+                st->move_board = 0;
             } else if (st->drag_handle != 0 && st->drag_moved) {
                 SceneObject *o = scene_get(&st->scene, st->drag_handle);
                 if (o && o->kind != KIND_PLAIN) {       /* a dragged card is PLACED:
