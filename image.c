@@ -83,3 +83,19 @@ void image_hdr_free(HdrImage *img) {
         img->pixels = (float *)0;
     }
 }
+
+void image_fit_box(int src_w, int src_h, float field_w, float field_h,
+                   float *out_w, float *out_h) {
+    float aspect;
+    *out_w = 0.0f;
+    *out_h = 0.0f;
+    if (src_w <= 0 || src_h <= 0 || field_w <= 0.0f || field_h <= 0.0f) return;
+    aspect = (float)src_w / (float)src_h;          /* width per height */
+    if (field_w / field_h > aspect) {              /* field wider than image: height-bound */
+        *out_h = field_h;
+        *out_w = field_h * aspect;
+    } else {                                       /* width-bound */
+        *out_w = field_w;
+        *out_h = field_w / aspect;
+    }
+}

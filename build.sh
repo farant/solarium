@@ -145,6 +145,18 @@ if [ "$MODE" = "furnituretest" ]; then
     exit 0
 fi
 
+# imagetest: the pure aspect-fit math in image.c (image_fit_box). image.c pulls
+# stb, so this rides -std=c11 like skeltest, not c89-pedantic.
+if [ "$MODE" = "imagetest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        image.c image_test.c \
+        -o image_test
+    echo "built ./image_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
 # workspacetest: the workspace module — membership + portal-pair authoring
 # (no GL). Links the scene spine + mesh.c the gates reference.
 if [ "$MODE" = "workspacetest" ]; then

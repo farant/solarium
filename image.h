@@ -26,4 +26,11 @@ void     image_free(Image *img);
 sol_bool image_load_hdr(const char *path, HdrImage *out);   /* Radiance .hdr -> linear float */
 void     image_hdr_free(HdrImage *img);
 
+/* Largest (w,h) in METERS that fits inside (field_w x field_h) at the source
+   image's aspect ratio (letterbox: one axis meets the field, the other is
+   smaller). Any non-positive input yields *out_w = *out_h = 0. Pure math —
+   no stb, no GL. */
+void image_fit_box(int src_w, int src_h, float field_w, float field_h,
+                   float *out_w, float *out_h);
+
 #endif /* IMAGE_H */
