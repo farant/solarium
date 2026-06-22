@@ -7545,9 +7545,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                            resize_corner_pick(st, w)) {
                     /* grabbed a corner handle — resize, not carry */
                 } else if (st->selected_handle != 0 &&
-                           board_is_mounted(&st->scene, st->selected_handle) &&
                            picture_move_pick(st, w)) {
-                    /* grabbed a picture's body — slide it on the wall */
+                    /* grabbed a picture's body — slide it on its wall or board */
                 } else if (st->selected_handle != 0 && st->selected_handle != st->page_handle)
                     drag_begin(st, w, st->selected_handle);
             } else {
@@ -7563,40 +7562,57 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }
 
         if (lmb && st->move_board != 0) {               /* ---- sliding a picture ---- */
-            SceneObject *o = scene_get(&st->scene, st->move_board);
-            if (!o || st->resize_room == 0 ||
-                scene_get(&st->scene, st->resize_room) == 0) {
+            SceneObject *o   = scene_get(&st->scene, st->move_board);
+            SceneObject *par = o ? scene_get(&st->scene, st->resize_room) : (SceneObject *)0;
+            if (!o || !par) {
                 st->move_board = 0;
             } else {
-                Ray      ray = pick_ray(st, w);
-                RoomRect r   = editor_room_rect(&st->scene, st->resize_room);
-                float    yaw = board_yaw(&st->scene, st->move_board);
-                vec3     n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
-                vec3     anchor = object_world_pos(&st->scene, st->move_board);
-                float    tt;
+                Ray   ray = pick_ray(st, w);
+                float yaw = board_yaw(&st->scene, st->move_board);
+                vec3  n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+                vec3  anchor = object_world_pos(&st->scene, st->move_board);
+                float pw  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "w");
+                float ph  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "h");
+                float tt;
                 ray.dir = vec3_normalize(ray.dir);
                 if (ray_vs_plane(ray, anchor, n, &tt) && tt > 0.0f) {
-                    float pw    = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "w");
-                    float ph    = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "h");
-                    float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
-                    float runH  = (n.z * n.z > 0.25f) ? r.hw : r.hd;
-                    float ceil_y= r.floor_y + room_interior_height(&st->scene, st->resize_room);
-                    vec3  hit   = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
-                    vec3  P     = vec3_add(hit, st->move_grab);
-                    vec3  wallc = vec3_sub(vec3_make(r.cx, P.y, r.cz), vec3_scale(n, perpH));
-                    float du    = vec3_dot(vec3_sub(P, wallc), st->resize_u);
-                    float lim   = runH - pw * 0.5f;
-                    float py    = P.y;
-                    vec3  np;
-                    if (lim < 0.0f) lim = 0.0f;
-                    if (du >  lim) du =  lim;
-                    if (du < -lim) du = -lim;
-                    if (py < r.floor_y)   py = r.floor_y;
-                    if (py > ceil_y - ph) py = ceil_y - ph;
-                    np.x = wallc.x + st->resize_u.x * du;
-                    np.y = py;
-                    np.z = wallc.z + st->resize_u.z * du;
-                    o->pos = scene_world_to_local(&st->scene, o->parent, np);
+                    vec3 hit = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+                    vec3 P   = vec3_add(hit, st->move_grab);        /* new world origin */
+                    if (par->mesh_ref && strcmp(par->mesh_ref, "board") == 0) {
+                        /* on a whiteboard: slide in board-local, clamp to the face
+                           (the plane is a constant board-local z, so z stays proud) */
+                        vec3  lp = scene_world_to_local(&st->scene, st->resize_room, P);
+                        float bw = mesh_ref_param("board", par->mesh_params, par->mesh_param_count, "w");
+                        float bh = mesh_ref_param("board", par->mesh_params, par->mesh_param_count, "h");
+                        float lx = bw * 0.5f - pw * 0.5f;
+                        if (lx < 0.0f) lx = 0.0f;
+                        if (lp.x >  lx) lp.x =  lx;
+                        if (lp.x < -lx) lp.x = -lx;
+                        if (lp.y < 0.0f)      lp.y = 0.0f;
+                        if (lp.y > bh - ph)   lp.y = bh - ph;
+                        o->pos = lp;
+                    } else {
+                        /* on a room wall: slide along u + y, clamp, keep proud (t/2) */
+                        RoomRect r  = editor_room_rect(&st->scene, st->resize_room);
+                        float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
+                        float runH  = (n.z * n.z > 0.25f) ? r.hw : r.hd;
+                        float ceil_y= r.floor_y + room_interior_height(&st->scene, st->resize_room);
+                        vec3  wallc = vec3_sub(vec3_make(r.cx, P.y, r.cz), vec3_scale(n, perpH));
+                        float noff  = vec3_dot(vec3_sub(P, wallc), n);   /* the proud t/2 */
+                        float du    = vec3_dot(vec3_sub(P, wallc), st->resize_u);
+                        float lim   = runH - pw * 0.5f;
+                        float py    = P.y;
+                        vec3  np;
+                        if (lim < 0.0f) lim = 0.0f;
+                        if (du >  lim) du =  lim;
+                        if (du < -lim) du = -lim;
+                        if (py < r.floor_y)   py = r.floor_y;
+                        if (py > ceil_y - ph) py = ceil_y - ph;
+                        np.x = wallc.x + st->resize_u.x * du + n.x * noff;
+                        np.y = py;
+                        np.z = wallc.z + st->resize_u.z * du + n.z * noff;
+                        o->pos = scene_world_to_local(&st->scene, o->parent, np);
+                    }
                 }
             }
         }
