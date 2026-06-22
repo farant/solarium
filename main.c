@@ -6765,7 +6765,9 @@ static int shelf_free_slot(AppState *st, sol_u32 furniture, sol_u32 skip,
 static sol_bool board_is_mounted(Scene *s, sol_u32 h) {
     SceneObject *o = scene_get(s, h);
     SceneObject *par;
-    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) return SOL_FALSE;
+    if (!o || !o->mesh_ref ||
+        (strcmp(o->mesh_ref, "board") != 0 && strcmp(o->mesh_ref, "picture") != 0))
+        return SOL_FALSE;
     if (o->parent == 0) return SOL_FALSE;
     par = scene_get(s, o->parent);
     return (sol_bool)(par != 0 && scene_meta_get(s, par->handle, "room_type") != 0);
@@ -6782,9 +6784,10 @@ static float board_yaw(Scene *s, sol_u32 h) {
 /* world corners (out[4]) + the wall horizontal axis (*out_u) of a mounted board. */
 static void board_world_corners(Scene *s, sol_u32 h, vec3 out[4], vec3 *out_u) {
     SceneObject *o   = scene_get(s, h);
+    const char  *mr  = (o && o->mesh_ref) ? o->mesh_ref : "board";
     vec3  p   = object_world_pos(s, h);
-    float w   = o ? mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w") : 1.8f;
-    float ht  = o ? mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h") : 1.2f;
+    float w   = o ? mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "w") : 1.8f;
+    float ht  = o ? mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "h") : 1.2f;
     float yaw = board_yaw(s, h);
     vec3  u   = vec3_make((float)cos((double)yaw), 0.0f, -(float)sin((double)yaw));
     board_corners(p, w, ht, u, out);
@@ -7452,7 +7455,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 RoomRect r   = editor_room_rect(&st->scene, st->resize_room);
                 float    yaw = board_yaw(&st->scene, st->resize_board);
                 vec3     n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
-                float    bt  = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "t");
+                float    bt  = mesh_ref_param(o->mesh_ref ? o->mesh_ref : "board",
+                                              o->mesh_params, o->mesh_param_count, "t");
                 float    tt;
                 if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
                     vec3  hit   = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
