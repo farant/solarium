@@ -196,6 +196,34 @@ int main(void) {
         scene_free(&s);
     }
 
+    /* corner geometry + resize math for a wall-mounted board */
+    {
+        vec3 cor[4], u = vec3_make(1.0f, 0.0f, 0.0f), p = vec3_make(0.0f, 0.0f, 0.0f);
+        float w, h; vec3 o;
+        board_corners(p, 2.0f, 1.5f, u, cor);
+        CHECK(fabs((double)(cor[0].x + 1.0f)) < 1e-4 && fabs((double)cor[0].y) < 1e-4);        /* BL */
+        CHECK(fabs((double)(cor[1].x - 1.0f)) < 1e-4);                                          /* BR */
+        CHECK(fabs((double)(cor[2].x - 1.0f)) < 1e-4 && fabs((double)(cor[2].y - 1.5f)) < 1e-4);/* TR */
+        CHECK(fabs((double)(cor[3].x + 1.0f)) < 1e-4 && fabs((double)(cor[3].y - 1.5f)) < 1e-4);/* TL */
+        /* anchor BL (-1,0,0), drag TR out to (2,2,0): w=3, h=2, origin = bottom-center */
+        board_resize_corner(cor[0], vec3_make(2.0f, 2.0f, 0.0f), u, 0.3f, &w, &h, &o);
+        CHECK(fabs((double)(w - 3.0f)) < 1e-4);
+        CHECK(fabs((double)(h - 2.0f)) < 1e-4);
+        CHECK(fabs((double)(o.x - 0.5f)) < 1e-4);   /* mid of -1..2 */
+        CHECK(fabs((double)o.y) < 1e-4);            /* bottom (drag was above anchor) */
+        /* anchor TR (1,1.5,0), drag down-left to (-2,0,0): origin bottom = lower y */
+        board_resize_corner(vec3_make(1.0f, 1.5f, 0.0f), vec3_make(-2.0f, 0.0f, 0.0f),
+                            u, 0.3f, &w, &h, &o);
+        CHECK(fabs((double)(w - 3.0f)) < 1e-4);
+        CHECK(fabs((double)(h - 1.5f)) < 1e-4);
+        CHECK(fabs((double)(o.x + 0.5f)) < 1e-4);   /* mid of 1..-2 */
+        CHECK(fabs((double)o.y) < 1e-4);            /* bottom = 1.5 - 1.5 */
+        /* tiny drag floors at min_size */
+        board_resize_corner(vec3_make(0.0f,0.0f,0.0f), vec3_make(0.1f,0.1f,0.0f),
+                            u, 0.3f, &w, &h, &o);
+        CHECK(fabs((double)(w - 0.3f)) < 1e-4 && fabs((double)(h - 0.3f)) < 1e-4);
+    }
+
     if (fails == 0) printf("descend_test: OK\n");
     return fails ? 1 : 0;
 }

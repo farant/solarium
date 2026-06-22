@@ -35,6 +35,18 @@ int descend_wall_mount(RoomRect r, Ray ray, float ceil_y,
                        float w_half, float h_half, float t,
                        int *out_wall, vec3 *out_center);
 
+/* The 4 world corners of a wall-mounted board: bottom-center origin `p`, width
+   `w`, height `h`, horizontal wall axis `u` (unit; vertical is world-up). Order:
+   0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left. */
+void board_corners(vec3 p, float w, float h, vec3 u, vec3 out[4]);
+
+/* Resize a board by dragging one corner: `anchor` = the fixed opposite corner,
+   `dragged` = the grabbed corner's new point (on the wall plane), `u` = the wall
+   horizontal axis. Returns new w/h (floored at min_size) + the bottom-center
+   origin. */
+void board_resize_corner(vec3 anchor, vec3 dragged, vec3 u, float min_size,
+                         float *out_w, float *out_h, vec3 *out_origin);
+
 /* ---- scene ops (headless, unit-tested; built in Task 2) ---- */
 
 /* Plant `folder_card`: build a real "mirror" sub-room for its folder outward

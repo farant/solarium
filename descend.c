@@ -115,6 +115,32 @@ int descend_wall_mount(RoomRect r, Ray ray, float ceil_y,
     }
 }
 
+void board_corners(vec3 p, float w, float h, vec3 u, vec3 out[4]) {
+    vec3 half = vec3_scale(u, w * 0.5f);
+    vec3 up   = vec3_make(0.0f, h, 0.0f);
+    out[0] = vec3_sub(p, half);                          /* bottom-left  */
+    out[1] = vec3_add(p, half);                          /* bottom-right */
+    out[2] = vec3_add(vec3_add(p, half), up);            /* top-right    */
+    out[3] = vec3_add(vec3_sub(p, half), up);            /* top-left     */
+}
+
+void board_resize_corner(vec3 anchor, vec3 dragged, vec3 u, float min_size,
+                         float *out_w, float *out_h, vec3 *out_origin) {
+    vec3  d  = vec3_sub(dragged, anchor);
+    float du = vec3_dot(d, u);
+    float dv = dragged.y - anchor.y;
+    float su = (du < 0.0f) ? -1.0f : 1.0f;
+    float sv = (dv < 0.0f) ? -1.0f : 1.0f;
+    float w  = (du < 0.0f) ? -du : du;
+    float h  = (dv < 0.0f) ? -dv : dv;
+    vec3  p;
+    if (w < min_size) w = min_size;
+    if (h < min_size) h = min_size;
+    p   = vec3_add(anchor, vec3_scale(u, su * w * 0.5f));
+    p.y = (sv >= 0.0f) ? anchor.y : anchor.y - h;
+    *out_w = w; *out_h = h; *out_origin = p;
+}
+
 #define DESCEND_GAP 4.0f   /* clear gap between the parent wall and the sub-room */
 
 /* does a 2*half footprint at center c overlap an existing room close in Y?
