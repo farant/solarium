@@ -1262,6 +1262,26 @@ void rhi_present(void) {
     }
 }
 
+/* see rhi.h — commit + DRAIN offscreen work (the IBL re-bake) that ran outside
+   the frame loop, so its passes don't "adopt" the next frame's pool + in-flight
+   slot. The bake's first rhi_begin_cubemap_face calls frame_begin (pushing the
+   pool, taking a slot, opening g_cmdbuf) but never presents; this closes it
+   synchronously and resets the state so the next real frame starts clean. */
+void rhi_flush(void) {
+    if (g_encoder) { [g_encoder endEncoding]; g_encoder = nil; }
+    g_pass_alive = SOL_FALSE;
+    if (!g_frame_began) return;              /* nothing began — nothing to drain */
+    if (g_cmdbuf) {
+        [g_cmdbuf commit];
+        [g_cmdbuf waitUntilCompleted];       /* the bake's GPU work is done on return */
+    }
+    dispatch_semaphore_signal(g_inflight);   /* balance frame_begin's wait (no present did) */
+    g_cmdbuf = nil;
+    objc_autoreleasePoolPop(g_frame_pool);
+    g_frame_pool  = NULL;
+    g_frame_began = SOL_FALSE;
+}
+
 /* ---- resource teardown ---- */
 void rhi_destroy_buffer(RhiBuffer buffer) {
     sol_u32 idx;

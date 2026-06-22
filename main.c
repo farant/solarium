@@ -8164,6 +8164,8 @@ static void hdr_reload(AppState *st, const char *path) {
     build_env_cubemap(st);
     build_irradiance_map(st);
     build_prefilter_map(st);
+    rhi_flush();    /* the re-bake ran OUTSIDE the frame loop: commit + drain it
+                       so it doesn't corrupt the next frame's pool (Metal abort) */
     printf("environment hot-reloaded: %s\n", path);
 }
 

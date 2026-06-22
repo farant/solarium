@@ -750,6 +750,11 @@ void rhi_present(void) {
     glfwSwapBuffers(g_window);
 }
 
+/* GL has no per-frame autorelease pool and bakes synchronously into FBOs, so
+   the offscreen IBL re-bake needs no draining here — see rhi.h. */
+void rhi_flush(void) {
+}
+
 /* GPU timers (P8 item 1): macOS GL is a translation layer over Metal
    ("4.1 Metal - 88.1") whose ARB_timer_query is a no-op stub — both
    glQueryCounter(GL_TIMESTAMP) and GL_TIME_ELAPSED return 0 with no error

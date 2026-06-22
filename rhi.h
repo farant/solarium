@@ -182,6 +182,15 @@ RhiTexture rhi_render_target_depth_texture(RhiRenderTarget rt);
 
 void rhi_present(void);
 
+/* Commit + DRAIN any open command buffer and reset frame state, WITHOUT a
+   swapchain present. For offscreen work that runs OUTSIDE the frame loop (the
+   IBL re-bake on a `-toggle / abbey HDR hot-reload): without this, the bake's
+   passes "adopt" the next frame's autorelease pool + in-flight slot, and on the
+   Metal backend that cross-frame adoption corrupts the pool LIFO (a fatal
+   "prematurely-freed autorelease pool" abort). No-op where there's nothing to
+   drain (the GL backend bakes synchronously into FBOs, no pools). */
+void rhi_flush(void);
+
 /* ---- GPU timers (P8 item 1) ---- the GPU twin of main.c's CPU yardstick.
    The backend owns the timing and a deferred read so nothing stalls; the RHI
    stays ignorant of what a pass MEANS — it sees opaque numbered slots, and
