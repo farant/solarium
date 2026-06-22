@@ -2721,6 +2721,10 @@ typedef struct AppState {
     int         reader_spread;     /* current page-pair, 0-based */
     const Font *reader_font;       /* mono for code, sans for prose */
     float       reader_px2m;       /* body text scale, meters per font px */
+    sol_bool    reader_is_image;       /* this book shows an image, not text */
+    Mesh        reader_image_quad;     /* the aspect-fitted right-page quad */
+    RhiTexture  reader_image_tex;      /* decoded image; .id==0 if none */
+    int         reader_image_w, reader_image_h;  /* source pixel dims */
     sol_bool    arrow_l_was, arrow_r_was;     /* page-turn edges */
     /* the turning leaf (piece 5): an inextensible paper arc swept by the
        hinge angle, bowing opposite the travel (the lag) — strongest
@@ -5481,6 +5485,27 @@ static sol_bool reader_wants_mono(const AppState *st, const char *path) {
     return SOL_FALSE;
 }
 
+/* png/jpg/jpeg open AS a picture on the page, not as typeset text. */
+static sol_bool reader_is_image_path(const char *path) {
+    static const char *img[] = { "png", "jpg", "jpeg", (const char *)0 };
+    const char *dot, *base;
+    char        ext[8];
+    int         i;
+    if (!path) return SOL_FALSE;
+    base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    dot  = strrchr(base, '.');
+    if (!dot || dot == base) return SOL_FALSE;
+    for (i = 0; dot[i + 1] != '\0' && i < (int)sizeof ext - 1; i++) {
+        char c = dot[i + 1];                       /* lowercase for the compare */
+        ext[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    ext[i] = '\0';
+    for (i = 0; img[i] != (const char *)0; i++)
+        if (strcmp(ext, img[i]) == 0) return SOL_TRUE;
+    return SOL_FALSE;
+}
+
 static void reader_free_text(AppState *st) {
     free(st->reader_text);
     free(st->reader_line_off);
@@ -5489,6 +5514,15 @@ static void reader_free_text(AppState *st) {
     st->reader_line_count = 0;
     st->reader_text_len   = 0;
     st->reader_spread     = 0;
+}
+
+static void reader_free_image(AppState *st) {
+    if (st->reader_image_tex.id) rhi_destroy_texture(st->reader_image_tex);
+    st->reader_image_tex.id = 0;
+    mesh_destroy(&st->reader_image_quad);
+    st->reader_image_w = 0;
+    st->reader_image_h = 0;
+    st->reader_is_image = SOL_FALSE;
 }
 
 /* Load + typeset the source's content (piece 4): read (capped — a partial
@@ -5504,6 +5538,7 @@ static void reader_load_content(AppState *st, const char *path) {
     char *raw, *clean;
 
     reader_free_text(st);
+    reader_free_image(st);
     st->reader_font = reader_wants_mono(st, path) ? st->mono_font : st->ui_font;
     if (!st->reader_font) return;
 
@@ -5513,6 +5548,34 @@ static void reader_load_content(AppState *st, const char *path) {
     xf = wb * BOOK_GUTTER_FRAC;
     field_w = wb - xf - 2.0f * mg;
     field_h = 2.0f * zh - 2.0f * mg;
+    /* IMAGE BRANCH: a picture file opens AS a picture — decode it, size the
+       page quad to its aspect, and skip typesetting. Any decode/upload failure
+       falls through to the text path below (which renders a graceful message). */
+    if (reader_is_image_path(path)) {
+        Image img;
+        if (image_load(path, &img)) {
+            st->reader_image_tex = rhi_create_texture(img.pixels, img.w, img.h,
+                                                      RHI_TEX_SRGB8);
+            st->reader_image_w = img.w;
+            st->reader_image_h = img.h;
+            image_free(&img);
+            if (st->reader_image_tex.id) {
+                float       qw, qh;
+                MeshBuilder mb;
+                image_fit_box(st->reader_image_w, st->reader_image_h,
+                              field_w, field_h, &qw, &qh);
+                mb_init(&mb);
+                make_page(&mb, qw, qh);
+                st->reader_image_quad = mesh_from_builder(&mb);
+                mb_free(&mb);
+                st->reader_is_image = SOL_TRUE;
+                return;                            /* image ready; no typeset */
+            }
+            st->reader_image_w = 0;                /* upload failed: drop dims */
+            st->reader_image_h = 0;
+        }
+        /* image_load failed -> fall through to the text fallback below */
+    }
     st->reader_px2m = (bp[1] * 0.022f) / font_line_height(st->reader_font);
     st->reader_lines_per_page = (int)(field_h /
         (font_line_height(st->reader_font) * st->reader_px2m));
@@ -5700,6 +5763,7 @@ static void reader_update(AppState *st, float dt) {
             mesh_destroy(&st->reader_block);
             mesh_destroy(&st->reader_leaf);
             reader_free_text(st);
+            reader_free_image(st);
         }
     }
 }
