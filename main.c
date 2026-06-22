@@ -10296,7 +10296,39 @@ static void render(AppState *state) {
             page = mat4_mul(bm, mat4_mul(mat4_translate(vec3_make(0.0f, fy, 0.0f)),
                        quat_to_mat4(quat_from_axis_angle(
                            vec3_make(1.0f, 0.0f, 0.0f), sol_radians(-90.0f)))));
-            if (state->reader_text) {
+            if (state->reader_is_image && state->reader_image_tex.id) {
+                /* the image on the RIGHT page (fitted), filename on the LEFT */
+                float field_w_left = wb - xf - 2.0f * mg;
+                if (state->reader_image_quad.index_count > 0) {
+                    float    cx = (xf + wb) * 0.5f;        /* right-page center x */
+                    mat4     im = mat4_mul(page,
+                                  mat4_translate(vec3_make(cx, 0.0f, 0.0008f)));
+                    Material pm = material_default();
+                    pm.base_color = vec3_make(1.0f, 1.0f, 1.0f);  /* show as-is */
+                    pm.roughness  = 0.95f;
+                    pm.albedo_tex = state->reader_image_tex;
+                    draw_mesh(state, state->reader_image_quad, im,
+                              view, proj, eye, 0.0f, pm);
+                }
+                {   /* the filename, shrunk to the left page width */
+                    SceneObject *src  = scene_get(&state->scene,
+                                                  state->reader_source);
+                    const char  *path = (src && src->content) ? src->content
+                                                              : (const char *)0;
+                    const char  *nm;
+                    char         lbuf[16];
+                    float        cpx, nw;
+                    if (path) { nm = strrchr(path, '/'); nm = nm ? nm + 1 : path; }
+                    else        nm = object_label(&state->scene,
+                                                  state->reader_source, lbuf);
+                    cpx = (bp[1] * 0.020f) / lh;
+                    text_measure(uf, nm, 1.0f, &nw, (float *)0);
+                    if (nw * cpx > field_w_left && nw > 0.0f)
+                        cpx = field_w_left / nw;
+                    wtext_block(uf, vp, page, nm, -wb + mg, zh - mg, cpx, 0.0f,
+                                0.13f, 0.10f, 0.08f);
+                }
+            } else if (state->reader_text) {
                 int L      = state->reader_lines_per_page;
                 int pages  = (state->reader_line_count + L - 1) / L;
                 int pl       = state->reader_spread * 2;
