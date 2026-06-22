@@ -6713,10 +6713,13 @@ static void cmd_carry_toggle(AppState *st) {
                 st->carry_origin = co->pos;   /* remember its spot, to snap a folder back */
                 {
                     SceneObject *par = scene_get(&st->scene, co->parent);
-                    if (par && par->mesh_ref &&
-                        (furniture_is_table(par->mesh_ref) || furniture_is_shelf(par->mesh_ref))) {
+                    sol_bool on_furn = (sol_bool)(par && par->mesh_ref &&
+                        (furniture_is_table(par->mesh_ref) || furniture_is_shelf(par->mesh_ref)));
+                    sol_bool mounted = (sol_bool)(co->parent != 0 && co->mesh_ref &&
+                        strcmp(co->mesh_ref, "board") == 0);
+                    if (on_furn || mounted) {
                         vec3 wp = object_world_pos(&st->scene, t);   /* world pos before detach */
-                        co->parent = 0;                               /* leave the furniture */
+                        co->parent = 0;                               /* leave the wall/furniture */
                         co->pos    = wp;
                     }
                 }
@@ -6816,6 +6819,44 @@ static void carry_update(AppState *st) {
                 o->rot = st->file_rot;   /* show the resting orientation while aimed */
             }
             return;
+        }
+    }
+    if (o->mesh_ref && strcmp(o->mesh_ref, "board") == 0) {
+        sol_u32 room = descend_room_at(&st->scene, st->camera.pos);
+        if (room != 0) {
+            RoomRect r = editor_room_rect(&st->scene, room);
+            Ray     ray;
+            int     wall;
+            vec3    center;
+            float   bw, bh, bt, rh;
+            sol_u32 ci;
+            bw = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w");
+            bh = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h");
+            bt = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "t");
+            rh = 3.0f;                                  /* room interior height (default) */
+            for (ci = 0; ci < st->scene.count; ci++) {
+                SceneObject *c = &st->scene.objects[ci];
+                if (c->parent == room && c->mesh_ref &&
+                    strcmp(c->mesh_ref, "room") == 0) {
+                    rh = mesh_ref_param("room", c->mesh_params, c->mesh_param_count, "h");
+                    break;
+                }
+            }
+            ray.origin = st->camera.pos;
+            ray.dir    = camera_forward(&st->camera);
+            if (descend_wall_mount(r, ray, r.floor_y + rh, bw * 0.5f, bh * 0.5f, bt,
+                                   &wall, &center)) {
+                static const float wall_yaw[4] = { 0.0f, -90.0f, 180.0f, 90.0f };
+                vec3 P = vec3_make(center.x, center.y - bh * 0.5f, center.z);
+                st->file_aim    = SOL_TRUE;
+                st->file_target = room;
+                st->file_rot    = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                                       sol_radians(wall_yaw[wall]));
+                st->file_local  = scene_world_to_local(&st->scene, room, P);
+                o->pos = scene_world_to_local(&st->scene, o->parent, P);
+                o->rot = st->file_rot;
+                return;
+            }
         }
     }
     fwd     = camera_forward(&st->camera);
