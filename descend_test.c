@@ -161,6 +161,41 @@ int main(void) {
         scene_free(&s);
     }
 
+    /* wall-mount: a flat board (1.8 x 1.2 x 0.05) flush on the aimed wall */
+    {
+        Scene s; RoomRect r; Ray ray; int wall; vec3 c; int ok;
+        sol_u32 room;
+        float wh = 0.9f, hh = 0.6f, t = 0.05f, ceil_y;
+        scene_init(&s);
+        room   = add_room(&s, 0.0f, 0.0f, 0.0f, 8.0f, 8.0f);  /* 8x8, floor y=0, h=3 */
+        r      = editor_room_rect(&s, room);
+        ceil_y = r.floor_y + 3.0f;
+        /* centered horizontal aim at the NORTH wall (z = cz - hd = -4) */
+        ray.origin = vec3_make(0.0f, 1.5f, 0.0f);
+        ray.dir    = vec3_make(0.0f, 0.0f, -1.0f);
+        ok = descend_wall_mount(r, ray, ceil_y, wh, hh, t, &wall, &c);
+        CHECK(ok);
+        CHECK(wall == ROOM_WALL_N);
+        CHECK(fabs((double)(c.z - (-4.0f + t * 0.5f))) < 1e-4);  /* flush + pushed out */
+        CHECK(fabs((double)c.x) < 1e-4);                          /* centered along wall */
+        CHECK(fabs((double)(c.y - 1.5f)) < 1e-4);                 /* at the aim height */
+        /* aim HIGH on the north wall: center clamps to ceil_y - hh */
+        ray.dir = vec3_make(0.0f, 1.3f, -4.0f);   /* hits (0, 2.8, -4) */
+        ok = descend_wall_mount(r, ray, ceil_y, wh, hh, t, &wall, &c);
+        CHECK(ok);
+        CHECK(fabs((double)(c.y - (ceil_y - hh))) < 1e-4);
+        /* aim into the +x CORNER of the north wall: clamps to hw - wh */
+        ray.dir = vec3_make(3.5f, 0.0f, -4.0f);   /* hits (3.5, 1.5, -4) */
+        ok = descend_wall_mount(r, ray, ceil_y, wh, hh, t, &wall, &c);
+        CHECK(ok);
+        CHECK(fabs((double)(c.x - (4.0f - wh))) < 1e-4);
+        /* a board WIDER than the wall is refused */
+        ray.dir = vec3_make(0.0f, 0.0f, -1.0f);
+        ok = descend_wall_mount(r, ray, ceil_y, 5.0f, hh, t, &wall, &c);
+        CHECK(!ok);
+        scene_free(&s);
+    }
+
     if (fails == 0) printf("descend_test: OK\n");
     return fails ? 1 : 0;
 }

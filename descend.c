@@ -70,6 +70,51 @@ int descend_wall_aim(RoomRect r, Ray ray, float door_h, int *wall, float *offset
     return 1;
 }
 
+int descend_wall_mount(RoomRect r, Ray ray, float ceil_y,
+                       float w_half, float h_half, float t,
+                       int *out_wall, vec3 *out_center) {
+    struct { vec3 pt, n; float half; int runx; } w[4];
+    int   bestw = -1, k;
+    float bestt = 1e30f;
+    vec3  besthit;
+    besthit.x = 0.0f; besthit.y = 0.0f; besthit.z = 0.0f;
+    w[0].pt = vec3_make(r.cx, r.floor_y, r.cz - r.hd); w[0].n = vec3_make(0.0f,0.0f, 1.0f); w[0].half = r.hw; w[0].runx = 1; /* N */
+    w[1].pt = vec3_make(r.cx + r.hw, r.floor_y, r.cz); w[1].n = vec3_make(-1.0f,0.0f,0.0f); w[1].half = r.hd; w[1].runx = 0; /* E */
+    w[2].pt = vec3_make(r.cx, r.floor_y, r.cz + r.hd); w[2].n = vec3_make(0.0f,0.0f,-1.0f); w[2].half = r.hw; w[2].runx = 1; /* S */
+    w[3].pt = vec3_make(r.cx - r.hw, r.floor_y, r.cz); w[3].n = vec3_make( 1.0f,0.0f,0.0f); w[3].half = r.hd; w[3].runx = 0; /* W */
+    for (k = 0; k < 4; k++) {
+        float t0;
+        vec3  hit;
+        if (!ray_vs_plane(ray, w[k].pt, w[k].n, &t0)) continue;
+        if (t0 <= 0.05f || t0 >= bestt) continue;
+        hit = vec3_add(ray.origin, vec3_scale(ray.dir, t0));
+        if (hit.y < r.floor_y - 0.1f || hit.y > ceil_y + 0.1f) continue;
+        bestt = t0; bestw = k; besthit = hit;
+    }
+    if (bestw < 0) return 0;
+    {
+        float lim = w[bestw].half - w_half;          /* along-wall room for the board */
+        float ylo = r.floor_y + h_half, yhi = ceil_y - h_half;
+        float run, cy;
+        vec3  c;
+        if (lim < 0.0f || yhi < ylo) return 0;       /* board bigger than the wall */
+        run = w[bestw].runx ? (besthit.x - r.cx) : (besthit.z - r.cz);
+        if (run < -lim) run = -lim;
+        if (run >  lim) run =  lim;
+        cy = besthit.y;
+        if (cy < ylo) cy = ylo;
+        if (cy > yhi) cy = yhi;
+        if (w[bestw].runx) { c.x = r.cx + run; c.z = w[bestw].pt.z; }
+        else               { c.z = r.cz + run; c.x = w[bestw].pt.x; }
+        c.x += w[bestw].n.x * (t * 0.5f);            /* push out so the back is flush */
+        c.z += w[bestw].n.z * (t * 0.5f);
+        c.y  = cy;
+        *out_wall   = bestw;
+        *out_center = c;
+        return 1;
+    }
+}
+
 #define DESCEND_GAP 4.0f   /* clear gap between the parent wall and the sub-room */
 
 /* does a 2*half footprint at center c overlap an existing room close in Y?

@@ -25,6 +25,16 @@ int  descend_wall_aim(RoomRect r, Ray ray, float door_h, int *wall, float *offse
 /* World point on wall `wall` at `offset` along it (y = the room's floor). */
 vec3 descend_door_point(RoomRect r, int wall, float offset);
 
+/* MOUNT a flat board (half-width w_half, half-height h_half, thickness t) flush
+   on the wall `ray` aims at. The height-UNCONSTRAINED sibling of descend_wall_aim:
+   accepts any hit between floor and ceil_y, clamps the center so the board stays
+   fully on the wall, and pushes it off the surface by t/2 (back flush). Returns 1
+   with *out_wall (ROOM_WALL_*) and the world-space *out_center; 0 if no wall is
+   hit or the board is bigger than the wall. */
+int descend_wall_mount(RoomRect r, Ray ray, float ceil_y,
+                       float w_half, float h_half, float t,
+                       int *out_wall, vec3 *out_center);
+
 /* ---- scene ops (headless, unit-tested; built in Task 2) ---- */
 
 /* Plant `folder_card`: build a real "mirror" sub-room for its folder outward
