@@ -58,6 +58,13 @@ vec3 furniture_shelf_slot(const float *params, int count, int i) {
     return s;
 }
 
+int furniture_shelf_capacity(const float *params, int count) {
+    float w  = (count > 0) ? params[0] : 1.0f;
+    int   sh = (count > 3) ? (int)(params[3] + 0.5f) : 4;
+    if (sh < 1) sh = 1;
+    return furn_shelf_cols(w) * sh;
+}
+
 vec3 furniture_table_point(const float *params, int count, vec3 local_hit) {
     float w  = (count > 0) ? params[0] : 1.4f;
     float d  = (count > 1) ? params[1] : 0.9f;

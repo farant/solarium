@@ -6664,12 +6664,29 @@ static void cmd_carry_toggle(AppState *st) {
 /* Per-frame: float the carried object in front of the camera. Called right after
    update() (so it runs before components_update reads poses). A carried FOLDER
    tablet instead snaps flat to the wall you're aiming at (descent planting). */
-/* how many objects are parented to `furniture` (its current contents). */
-static int furniture_child_count(AppState *st, sol_u32 furniture) {
-    sol_u32 i; int n = 0;
-    for (i = 0; i < st->scene.count; i++)
-        if (st->scene.objects[i].parent == furniture) n++;
-    return n;
+/* the LOWEST shelf slot that no current spine occupies, so a tablet filed after
+   one was removed FILLS the gap instead of landing on an occupied slot. Matches
+   each child's local pos to a slot position (filed cards rest exactly on theirs);
+   `skip` is excluded (the tablet being re-filed). Returns capacity if the shelf
+   is full — wraps, as before. */
+static int shelf_free_slot(AppState *st, sol_u32 furniture, sol_u32 skip,
+                           const float *params, int pcount) {
+    int cap = furniture_shelf_capacity(params, pcount);
+    int i;
+    for (i = 0; i < cap; i++) {
+        vec3    sp = furniture_shelf_slot(params, pcount, i);
+        sol_u32 k;
+        int     taken = 0;
+        for (k = 0; k < st->scene.count; k++) {
+            SceneObject *c = &st->scene.objects[k];
+            float dx, dy, dz;
+            if (c->parent != furniture || c->handle == skip) continue;
+            dx = c->pos.x - sp.x; dy = c->pos.y - sp.y; dz = c->pos.z - sp.z;
+            if (dx * dx + dy * dy + dz * dz < 0.025f * 0.025f) { taken = 1; break; }
+        }
+        if (!taken) return i;
+    }
+    return cap;
 }
 
 static void carry_update(AppState *st) {
@@ -6718,7 +6735,8 @@ static void carry_update(AppState *st) {
             st->file_aim    = SOL_TRUE;
             st->file_target = f->handle;
             if (furniture_is_shelf(f->mesh_ref)) {
-                int idx = furniture_child_count(st, f->handle);
+                int idx = shelf_free_slot(st, f->handle, st->carried,
+                                          f->mesh_params, f->mesh_param_count);
                 st->file_local = furniture_shelf_slot(f->mesh_params, f->mesh_param_count, idx);
                 st->file_rot   = quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)); /* spine: edge-out */
             } else {

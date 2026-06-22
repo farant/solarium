@@ -19,6 +19,11 @@ sol_bool    furniture_is_shelf(const char *mesh_ref);
    then the next shelf down). `params` = the bookshelf mesh_params. */
 vec3 furniture_shelf_slot(const float *params, int count, int i);
 
+/* how many distinct spine slots a bookshelf holds (cols * shelves) before
+   furniture_shelf_slot wraps and re-uses positions. Caller scans 0..capacity-1
+   to find the lowest free slot when filing. */
+int  furniture_shelf_capacity(const float *params, int count);
+
 /* a tablet's LOCAL resting position on a table top given a LOCAL hit point on
    the top surface (clamped inside the top; y = top height). */
 vec3 furniture_table_point(const float *params, int count, vec3 local_hit);
