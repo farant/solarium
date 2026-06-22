@@ -82,9 +82,16 @@ int room_mirror_scan(Scene *s, sol_u32 room, const char *dirpath) {
         strcat(full, "/");
         strcat(full, l.entries[i].name);
 
-        for (j = 0; j < s->count; j++) {             /* match by path identity */
+        for (j = 0; j < s->count; j++) {             /* match by path identity:
+               the content PATH is the identity (it is unique to THIS dir), so a
+               card filed onto furniture — re-parented off the room — still
+               matches. Without this it gets re-created as a floor duplicate.
+               Kind-gated to mirror cards so a workspace ALIAS to the same path
+               doesn't suppress the room's own card. */
             SceneObject *o = &s->objects[j];
-            if (o->parent == room && o->content && strcmp(o->content, full) == 0) {
+            if (o->content && strcmp(o->content, full) == 0 &&
+                (o->kind == KIND_FILE || o->kind == KIND_FOLDER ||
+                 o->kind == KIND_TOMBSTONE)) {
                 if (o->kind == KIND_TOMBSTONE) {     /* RESURRECTION: the file is
                        back (or a rename was undone) — the card returns to life
                        IN ITS PLACE, notes and all. Object permanence. */
