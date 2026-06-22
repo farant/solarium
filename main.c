@@ -10297,6 +10297,37 @@ static void render(AppState *state) {
             }
             margin = 0.025f;
             usable = cw - 2.0f * margin;
+            /* a tablet filed onto a bookshelf reads like a book SPINE: the name
+               runs DOWN the visible edge (the card's -X face, turned toward you
+               by the spine's +90 yaw), letters rotated to read top-to-bottom.
+               The flat front/back label is skipped for these (a spine card). */
+            {
+                SceneObject *par = (o->parent != 0)
+                                 ? scene_get(&state->scene, o->parent) : (SceneObject *)0;
+                if (par && par->mesh_ref && strcmp(par->mesh_ref, "bookshelf") == 0) {
+                    quat  q = quat_mul(
+                                quat_from_axis_angle(vec3_make(1.0f, 0.0f, 0.0f), sol_radians(90.0f)),
+                                quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), sol_radians(-90.0f)));
+                    float spx = 0.020f / lh;                 /* small spine letters */
+                    mat4  spine;
+                    nm = object_label(&state->scene, o->handle, lbuf);
+                    text_measure(uf, nm, 1.0f, &name_w, (float *)0);
+                    if (name_w * spx > ch - 0.05f && name_w > 0.0f)
+                        spx = (ch - 0.05f) / name_w;         /* fit the spine height */
+                    /* letters run UP the thin (z) edge from the origin; seat the
+                       origin at -lineHeight/2 so the column is CENTERED on the
+                       spine's thickness rather than hugging the -z (left) edge. */
+                    spine = mat4_mul(
+                                mat4_mul(scene_world_matrix(&state->scene, o),
+                                         mat4_translate(vec3_make(-cw * 0.5f - 0.001f,
+                                                                  ch - 0.02f,
+                                                                  -spx * lh * 0.5f))),
+                                quat_to_mat4(q));
+                    wtext_block(uf, vp, spine, nm, 0.0f, 0.0f, spx, 0.0f,
+                                ink_r, ink_g, ink_b);
+                    continue;                                /* spines: no flat label */
+                }
+            }
             /* the label: the card's name across the top, shrunk to fit */
             nm = object_label(&state->scene, o->handle, lbuf);
             px2m = 0.038f / lh;                             /* ~3.8cm line */
