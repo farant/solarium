@@ -122,6 +122,42 @@ int main(void) {
         CHECK(!touches);
         scene_free(&s);
     }
+    /* an INACTIVE room OVERLAPPING the active home room must not DEFLECT a door
+       (the solarium-overlaps-home case). The straight home->east leg grazes the
+       overlapping ghost; only the workspace filter keeps it out of collect_rooms,
+       so the door stays on the east wall. Filtered: straight. */
+    {
+        Scene s; Route r; sol_u32 home, east, ghost, wk;
+        scene_init(&s);
+        home  = add_room(&s, 0.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        east  = add_room(&s, 20.0f, 12.0f, 0.0f, 10.0f, 10.0f);
+        ghost = add_room(&s, 0.0f, 12.0f, 0.0f, 8.0f, 8.0f);  /* overlaps home */
+        scene_meta_set(&s, ghost, "workspace", "other");
+        strcpy(s.active_ws, "home");                          /* ghost hidden */
+        wk = add_walkway(&s, home, east);
+        CHECK(route_for_walkway(&s, wk, &r));
+        CHECK(r.valid);
+        CHECK(r.straight);
+        CHECK((r.wall_lo == ROOM_WALL_E && r.wall_hi == ROOM_WALL_W) ||
+              (r.wall_lo == ROOM_WALL_W && r.wall_hi == ROOM_WALL_E));
+        scene_free(&s);
+    }
+    /* the same scene UNFILTERED (active_ws ""): the ghost is now a bystander and
+       DEFLECTS the door off the straight path. This is the load-time bug — the
+       fix is to set active_ws before route/collide rebuild, not after. */
+    {
+        Scene s; Route r; sol_u32 home, east, ghost, wk;
+        scene_init(&s);
+        home  = add_room(&s, 0.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        east  = add_room(&s, 20.0f, 12.0f, 0.0f, 10.0f, 10.0f);
+        ghost = add_room(&s, 0.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        scene_meta_set(&s, ghost, "workspace", "other");      /* but no filter set */
+        wk = add_walkway(&s, home, east);
+        CHECK(route_for_walkway(&s, wk, &r));
+        CHECK(r.valid);
+        CHECK(!r.straight);          /* deflected by the overlapping bystander */
+        scene_free(&s);
+    }
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;
 }

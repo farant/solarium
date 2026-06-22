@@ -8511,6 +8511,15 @@ static sol_bool load_palace(AppState *st) {
     strcpy(keep_ws, st->scene.active_ws[0] ? st->scene.active_ws : "home");
     old       = st->scene;
     st->scene = fresh;
+    /* RESTORE THE FILTER BEFORE ANY DERIVE: the freshly-loaded scene's active_ws
+       is "" (never serialized), so the swap above leaves us unfiltered. The
+       derives below READ active_ws — connections_rebuild routes/doors only the
+       active rooms, collide_rebuild walls only them. Left unfiltered, both fire
+       across EVERY workspace at once: overlapping home rooms from two workspaces
+       stack their colliders (a solid wall lands across another's doorway) and the
+       route solver treats a hidden workspace's room as a bystander, deflecting a
+       door onto the wrong wall. Set the filter here, not at the tail. */
+    strcpy(st->scene.active_ws, keep_ws);
     scene_reimport_glbs(st);
     scene_resolve_meshes(&st->scene);             /* ACQUIRE (the new) */
     scene_release_meshes(&old);                   /* RELEASE (the old) */
@@ -8532,8 +8541,7 @@ static sol_bool load_palace(AppState *st) {
         scene_save(&st->scene, "scene.stml");
         printf("reconciled on load: %d change(s)\n", changes);
     }
-    strcpy(st->scene.active_ws, keep_ws);   /* a reload keeps your workspace */
-    return SOL_TRUE;
+    return SOL_TRUE;   /* active_ws already restored above, before the derives */
 }
 
 /* Build a FRESH scene: one floating "home" room you spawn into — the hub the
