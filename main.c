@@ -10342,14 +10342,17 @@ static void render(AppState *state) {
                     text_measure(uf, nm, 1.0f, &name_w, (float *)0);
                     if (name_w * spx > ch - 0.05f && name_w > 0.0f)
                         spx = (ch - 0.05f) / name_w;         /* fit the spine height */
-                    /* letters run UP the thin (z) edge from the origin; seat the
-                       origin at -lineHeight/2 so the column is CENTERED on the
-                       spine's thickness rather than hugging the -z (left) edge. */
+                    /* The text's "up" (toward top_y) maps to the card's +z, i.e.
+                       across the spine's thickness; the line hangs DOWN from
+                       top_y, so its band sits a full line-height BELOW the
+                       origin. Seat the origin at +lineHeight/2 so that band is
+                       centered on the spine's thickness (z=0) instead of running
+                       alongside it with only the top edge on the spine. */
                     spine = mat4_mul(
                                 mat4_mul(scene_world_matrix(&state->scene, o),
                                          mat4_translate(vec3_make(-cw * 0.5f - 0.001f,
                                                                   ch - 0.02f,
-                                                                  -spx * lh * 0.5f))),
+                                                                  spx * lh * 0.5f))),
                                 quat_to_mat4(q));
                     wtext_block(uf, vp, spine, nm, 0.0f, 0.0f, spx, 0.0f,
                                 ink_r, ink_g, ink_b);
@@ -10439,8 +10442,10 @@ static void render(AppState *state) {
             }
         }
 
-        /* bookshelf labels: meta["label"] across the top rail, facing the shelf's
-           front (+Z local), workspace-filtered like everything else. */
+        /* bookshelf labels: meta["label"] floating ABOVE the shelf, facing the
+           shelf's front (+Z local), workspace-filtered like everything else.
+           Seated ~2 line-heights above the top rail so books/tablets on the top
+           shelf don't occlude it. Blue ink for contrast against the warm stone. */
         {
             sol_u32 bi;
             for (bi = 0; bi < state->scene.count; bi++) {
@@ -10457,8 +10462,10 @@ static void render(AppState *state) {
                 text_measure(uf, lbl, 1.0f, &nw, (float *)0);
                 x0  = -nw * lpx * 0.5f;                    /* centered on the shelf */
                 m   = mat4_mul(scene_world_matrix(&state->scene, o),
-                               mat4_translate(vec3_make(0.0f, h + 0.02f, 0.16f)));
-                wtext_block(uf, vp, m, lbl, x0, 0.0f, lpx, 0.0f, 0.95f, 0.92f, 0.82f);
+                               mat4_translate(vec3_make(0.0f,
+                                   h + 0.02f + 2.0f * lpx * lh, /* float 2 lines clear */
+                                   0.16f)));
+                wtext_block(uf, vp, m, lbl, x0, 0.0f, lpx, 0.0f, 0.225f, 0.325f, 0.5f);
             }
         }
     }
