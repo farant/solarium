@@ -125,7 +125,7 @@ void board_corners(vec3 p, float w, float h, vec3 u, vec3 out[4]) {
 }
 
 void board_resize_corner(vec3 anchor, vec3 dragged, vec3 u, float min_size,
-                         float *out_w, float *out_h, vec3 *out_origin) {
+                         float aspect, float *out_w, float *out_h, vec3 *out_origin) {
     vec3  d  = vec3_sub(dragged, anchor);
     float du = vec3_dot(d, u);
     float dv = dragged.y - anchor.y;
@@ -136,6 +136,12 @@ void board_resize_corner(vec3 anchor, vec3 dragged, vec3 u, float min_size,
     vec3  p;
     if (w < min_size) w = min_size;
     if (h < min_size) h = min_size;
+    if (aspect > 0.0f) {                          /* lock w:h = aspect */
+        if (w / aspect >= h) h = w / aspect;      /* the wider drag drives */
+        else                 w = h * aspect;
+        if (w < min_size) { w = min_size; h = w / aspect; }
+        if (h < min_size) { h = min_size; w = h * aspect; }
+    }
     p   = vec3_add(anchor, vec3_scale(u, su * w * 0.5f));
     p.y = (sv >= 0.0f) ? anchor.y : anchor.y - h;
     *out_w = w; *out_h = h; *out_origin = p;

@@ -2694,6 +2694,8 @@ typedef struct AppState {
     sol_u32     picture_target;    /* the room (wall) or board to parent the picture */
     vec3        picture_local;     /* the picture's local pos under the target */
     quat        picture_rot;       /* the picture's local rotation */
+    sol_u32     carry_prev_parent; /* the carried object's pre-pickup parent (restore on plant) */
+    quat        carry_prev_rot;    /* and its pre-pickup local rotation */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -6699,14 +6701,29 @@ static void cmd_carry_toggle(AppState *st) {
                        scene_get(&st->scene, st->picture_target) != 0) {
                 const char *path = o->content;       /* heap ptr survives scene_add */
                 Mesh        empty;
-                vec3        one = vec3_make(1.0f, 1.0f, 1.0f);
+                vec3        one    = vec3_make(1.0f, 1.0f, 1.0f);
+                vec3        plocal = st->picture_local;
+                float       pw = 1.2f, ph = 0.9f;
+                float       defh = mesh_ref_param("picture", (const float *)0, 0, "h");
                 sol_u32     a;
+                Image       img;
                 memset(&empty, 0, sizeof empty);
-                o->pos = st->carry_origin;            /* the image card STAYS */
+                if (path && image_load(path, &img)) { /* size the frame to the image's aspect */
+                    image_fit_box(img.w, img.h, 1.6f, 1.2f, &pw, &ph);
+                    image_free(&img);
+                }
+                plocal.y += (defh - ph) * 0.5f;       /* keep the previewed CENTER as h changes */
+                o->parent = st->carry_prev_parent;    /* the image card RETURNS to where it was */
+                o->pos    = st->carry_origin;          /*   (e.g. back onto its shelf) */
+                o->rot    = st->carry_prev_rot;
                 a = scene_add(&st->scene, st->picture_target, empty,
-                              st->picture_local, st->picture_rot, one);
+                              plocal, st->picture_rot, one);
                 scene_mesh_ref_set(&st->scene, a, "picture");
                 if (path) scene_content_set(&st->scene, a, path);
+                {
+                    float pp[3]; pp[0] = pw; pp[1] = ph; pp[2] = 0.03f;
+                    scene_mesh_params_set(&st->scene, a, pp, 3);
+                }
                 scene_resolve_meshes(&st->scene);     /* builds mesh + loads albedo */
                 apply_kind_materials(&st->scene);     /* skips KIND_PLAIN -> image kept */
                 scene_save(&st->scene, "scene.stml");
@@ -6736,13 +6753,16 @@ static void cmd_carry_toggle(AppState *st) {
             SceneObject *co = scene_get(&st->scene, t);
             st->carried = t;
             if (co) {
-                st->carry_origin = co->pos;   /* remember its spot, to snap a folder back */
+                st->carry_origin      = co->pos;   /* remember its spot, to snap it back */
+                st->carry_prev_parent = co->parent; /* and its parent (e.g. a shelf) + rot */
+                st->carry_prev_rot    = co->rot;
                 {
                     SceneObject *par = scene_get(&st->scene, co->parent);
                     sol_bool on_furn = (sol_bool)(par && par->mesh_ref &&
                         (furniture_is_table(par->mesh_ref) || furniture_is_shelf(par->mesh_ref)));
                     sol_bool mounted = (sol_bool)(co->parent != 0 && co->mesh_ref &&
-                        strcmp(co->mesh_ref, "board") == 0);
+                        (strcmp(co->mesh_ref, "board") == 0 ||
+                         strcmp(co->mesh_ref, "picture") == 0));
                     if (on_furn || mounted) {
                         vec3 wp = object_world_pos(&st->scene, t);   /* world pos before detach */
                         co->parent = 0;                               /* leave the wall/furniture */
@@ -6964,7 +6984,9 @@ static void carry_update(AppState *st) {
             return;
         }
     }
-    if (o->mesh_ref && strcmp(o->mesh_ref, "board") == 0) {
+    if (o->mesh_ref && (strcmp(o->mesh_ref, "board") == 0 ||
+                        strcmp(o->mesh_ref, "picture") == 0)) {
+        const char *mr   = o->mesh_ref;            /* re-mount a board OR a picture */
         sol_u32 room = descend_room_at(&st->scene, st->camera.pos);
         if (room != 0) {
             RoomRect r = editor_room_rect(&st->scene, room);
@@ -6973,9 +6995,9 @@ static void carry_update(AppState *st) {
             vec3    center;
             float   bw, bh, bt, rh;
             sol_u32 ci;
-            bw = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w");
-            bh = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h");
-            bt = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "t");
+            bw = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "w");
+            bh = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "h");
+            bt = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "t");
             rh = 3.0f;                                  /* room interior height (default) */
             for (ci = 0; ci < st->scene.count; ci++) {
                 SceneObject *c = &st->scene.objects[ci];
@@ -7542,8 +7564,18 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     if (hy > ceil_y)    hy = ceil_y;
                     dragged   = vec3_add(vec3_make(wallc.x, hy, wallc.z),
                                          vec3_scale(st->resize_u, du));
-                    board_resize_corner(st->resize_anchor, dragged, st->resize_u, 0.3f,
-                                        &nw, &nh, &origin);
+                    {   /* pictures lock to their image aspect; whiteboards stay free */
+                        float aspect = 0.0f;
+                        if (o->mesh_ref && strcmp(o->mesh_ref, "picture") == 0) {
+                            float cw = mesh_ref_param("picture", o->mesh_params,
+                                                      o->mesh_param_count, "w");
+                            float ch = mesh_ref_param("picture", o->mesh_params,
+                                                      o->mesh_param_count, "h");
+                            if (ch > 0.0f) aspect = cw / ch;
+                        }
+                        board_resize_corner(st->resize_anchor, dragged, st->resize_u,
+                                            0.3f, aspect, &nw, &nh, &origin);
+                    }
                     p3[0] = nw; p3[1] = nh; p3[2] = bt;
                     /* the "board" mesh is registry-SHARED by params, and
                        scene_resolve_meshes only builds for objects with no mesh,

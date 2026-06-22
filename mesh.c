@@ -338,6 +338,22 @@ void make_card(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t) {
     face_y(b, -hw, hw, 0.0f, -ht, ht, -1);    /* bottom */
 }
 
+/* A picture surface: a bottom-origin quad (y in [0,h]) facing +Z with NORMALIZED
+   0..1 UVs, so an image albedo shows ONCE across the face. make_card's faces use
+   meter-range UVs (for tileable cards), which would TILE a picture. `t` is
+   unused (a flat quad) but kept in the schema so resize writes w,h,t. */
+void make_picture(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t) {
+    sol_f32 hw = w * 0.5f;
+    sol_u32 v0, v1, v2, v3;
+    (void)t;
+    v0 = mb_push_vertex(b, -hw, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f);  /* BL */
+    v1 = mb_push_vertex(b,  hw, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f);  /* BR */
+    v2 = mb_push_vertex(b,  hw, h,    0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f);  /* TR */
+    v3 = mb_push_vertex(b, -hw, h,    0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f);  /* TL */
+    mb_push_triangle(b, v0, v1, v2);
+    mb_push_triangle(b, v0, v2, v3);
+}
+
 /* A walkable slab — the second EMBODIMENT of a room-graph edge (a path
    between distant rooms; the shared doorway wall is the first). Length runs
    along X, width along Z, the walking surface at y=0 (the slab hangs below,
@@ -816,6 +832,7 @@ void make_arrow(MeshBuilder *b, sol_f32 x0, sol_f32 y0,
 }
 
 static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
+static void emit_picture(MeshBuilder *b, const float *p) { make_picture(b, p[0], p[1], p[2]); }
 static void emit_board(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 /* a table: a top slab + 4 legs. params: w (width X), d (depth Z), h (height).
    origin at floor center; the top's upper face (y=h) is the filing surface. */
@@ -995,7 +1012,7 @@ static const MeshRefEntry REGISTRY[] = {
        no "gate" case), so you walk through the trigger. */
     { "gate", 4, { "w", "h", "t", "post" }, { 1.6f, 2.4f, 0.18f, 0.16f }, emit_gate },
     { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
-    { "picture", 3, { "w", "h", "t" }, { 1.2f, 0.9f, 0.03f }, emit_card },
+    { "picture", 3, { "w", "h", "t" }, { 1.2f, 0.9f, 0.03f }, emit_picture },
     /* board: a card grown to furniture scale (item 8) — same slab geometry,
        bottom-origin, front face toward local +Z. Its OWN ref name is its
        identity: the drag code recognizes a pinboard by mesh_ref "board". */

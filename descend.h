@@ -42,10 +42,11 @@ void board_corners(vec3 p, float w, float h, vec3 u, vec3 out[4]);
 
 /* Resize a board by dragging one corner: `anchor` = the fixed opposite corner,
    `dragged` = the grabbed corner's new point (on the wall plane), `u` = the wall
-   horizontal axis. Returns new w/h (floored at min_size) + the bottom-center
-   origin. */
+   horizontal axis. `aspect` > 0 LOCKS the result to width:height = aspect (the
+   drag's dominant axis drives the other — for pictures, so the image never
+   stretches); 0 = free. Returns new w/h (floored at min_size) + bottom-center origin. */
 void board_resize_corner(vec3 anchor, vec3 dragged, vec3 u, float min_size,
-                         float *out_w, float *out_h, vec3 *out_origin);
+                         float aspect, float *out_w, float *out_h, vec3 *out_origin);
 
 /* ---- scene ops (headless, unit-tested; built in Task 2) ---- */
 
