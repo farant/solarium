@@ -1002,7 +1002,7 @@ static const MeshRefEntry REGISTRY[] = {
     /* furniture (Furniture & Filing): synthesized table + bookshelf. NON-solid
        in v1 (no collide_rebuild case), like the whiteboard — walk-through. */
     { "table", 3, { "w", "d", "h" }, { 1.4f, 0.9f, 0.75f }, emit_table },
-    { "bookshelf", 4, { "w", "h", "d", "shelves" }, { 1.0f, 1.8f, 0.3f, 4.0f }, emit_bookshelf },
+    { "bookshelf", 4, { "w", "h", "d", "shelves" }, { 1.0f, 1.8f, 0.3f, 2.0f }, emit_bookshelf },
     /* the codex (item 9): cover and block are SEPARATE refs so each part
        wears its own material — a book is a small group, like a room.
        Defaults are a sane quarto; the spawner varies within real ranges. */
