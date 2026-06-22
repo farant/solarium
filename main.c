@@ -2685,6 +2685,11 @@ typedef struct AppState {
     sol_u32     drag_board;        /* board hosting the carry; 0 = ground mode */
     float       drag_board_ox;     /* grab offset in board-local XY            */
     float       drag_board_oy;
+    sol_u32     resize_board;      /* wall-board being corner-resized; 0 = none */
+    vec3        resize_anchor;     /* the fixed (opposite) corner, world        */
+    vec3        resize_u;          /* the wall's horizontal in-plane axis       */
+    sol_u32     resize_room;       /* the board's parent room (wall clamp)      */
+    Mesh        resize_handle_mesh;/* small corner quad; built once on first use */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -6756,6 +6761,36 @@ static int shelf_free_slot(AppState *st, sol_u32 furniture, sol_u32 skip,
     return cap;
 }
 
+/* a board mounted on a wall = mesh "board" whose parent carries room_type. */
+static sol_bool board_is_mounted(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    SceneObject *par;
+    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) return SOL_FALSE;
+    if (o->parent == 0) return SOL_FALSE;
+    par = scene_get(s, o->parent);
+    return (sol_bool)(par != 0 && scene_meta_get(s, par->handle, "room_type") != 0);
+}
+
+/* yaw of a mounted board (its facing). */
+static float board_yaw(Scene *s, sol_u32 h) {
+    quat q;
+    if (!scene_get(s, h)) return 0.0f;
+    q = scene_world_rotation(s, h);   /* takes a handle, not a SceneObject* */
+    return 2.0f * (float)atan2((double)q.y, (double)q.w);
+}
+
+/* world corners (out[4]) + the wall horizontal axis (*out_u) of a mounted board. */
+static void board_world_corners(Scene *s, sol_u32 h, vec3 out[4], vec3 *out_u) {
+    SceneObject *o   = scene_get(s, h);
+    vec3  p   = object_world_pos(s, h);
+    float w   = o ? mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w") : 1.8f;
+    float ht  = o ? mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h") : 1.2f;
+    float yaw = board_yaw(s, h);
+    vec3  u   = vec3_make((float)cos((double)yaw), 0.0f, -(float)sin((double)yaw));
+    board_corners(p, w, ht, u, out);
+    if (out_u) *out_u = u;
+}
+
 static void carry_update(AppState *st) {
     SceneObject *o;
     vec3         fwd, hold;
@@ -10603,6 +10638,33 @@ static void render(AppState *state) {
                                    h + 0.02f + 2.0f * lpx * lh, /* float 2 lines clear */
                                    0.16f)));
                 wtext_block(uf, vp, m, lbl, x0, 0.0f, lpx, 0.0f, 0.225f, 0.325f, 0.5f);
+            }
+        }
+
+        /* resize handles (whiteboard resize): a selected wall-mounted board
+           shows a small glowing quad at each of its 4 corners. */
+        if (state->selected_handle != 0 &&
+            board_is_mounted(&state->scene, state->selected_handle)) {
+            vec3     cor[4], u, n;
+            float    yaw = board_yaw(&state->scene, state->selected_handle);
+            Material hm  = material_default();
+            int      hk;
+            if (state->resize_handle_mesh.index_count == 0) {
+                MeshBuilder mb;
+                mb_init(&mb);
+                make_page(&mb, 0.12f, 0.12f);
+                state->resize_handle_mesh = mesh_from_builder(&mb);
+                mb_free(&mb);
+            }
+            board_world_corners(&state->scene, state->selected_handle, cor, &u);
+            n  = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+            hm.base_color = vec3_make(1.0f, 0.85f, 0.2f);
+            hm.emissive   = vec3_make(1.2f, 0.9f, 0.2f);   /* glow: reads on any wall */
+            for (hk = 0; hk < 4; hk++) {
+                mat4 m = mat4_mul(
+                    mat4_translate(vec3_add(cor[hk], vec3_scale(n, 0.01f))),
+                    quat_to_mat4(quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), yaw)));
+                draw_mesh(state, state->resize_handle_mesh, m, view, proj, eye, 0.0f, hm);
             }
         }
     }
