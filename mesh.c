@@ -995,6 +995,7 @@ static const MeshRefEntry REGISTRY[] = {
        no "gate" case), so you walk through the trigger. */
     { "gate", 4, { "w", "h", "t", "post" }, { 1.6f, 2.4f, 0.18f, 0.16f }, emit_gate },
     { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
+    { "picture", 3, { "w", "h", "t" }, { 1.2f, 0.9f, 0.03f }, emit_card },
     /* board: a card grown to furniture scale (item 8) — same slab geometry,
        bottom-origin, front face toward local +Z. Its OWN ref name is its
        identity: the drag code recognizes a pinboard by mesh_ref "board". */

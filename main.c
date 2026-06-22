@@ -8545,6 +8545,17 @@ static void scene_resolve_meshes(Scene *s) {
         o->material.mr_tex     = ts.orm;           /* ORM packed: G=rough B=metal */
         o->material.ao_tex     = ts.orm;           /* R=occlusion, the shared-map idiom */
     }
+
+    /* picture albedo (images on walls): a "picture" object shows its image
+       file through the lit-albedo path; decode it once via the texture registry
+       (sRGB, hot-reload, shared). KIND_PLAIN, so apply_kind_materials never
+       clobbers this. */
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        if (o->mesh_ref && strcmp(o->mesh_ref, "picture") == 0 &&
+            o->content && o->content[0] && !o->material.albedo_tex.id)
+            o->material.albedo_tex = load_texture(o->content);
+    }
 }
 
 /* Cosmetic until 6e serializes materials: a card's color DERIVES from its
