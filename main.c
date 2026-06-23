@@ -5910,6 +5910,41 @@ static mat4 reader_page_matrix(const AppState *st, float *out_wb, float *out_zh,
     return page;
 }
 
+/* load the open synth book's patch: start from the "blip" preset, then apply
+   the curated-knob overrides stored in meta["synth"] (space-separated floats in
+   curated-knob order). Absent/short meta -> the bare preset. */
+static void synth_book_load(AppState *st, sol_u32 root) {
+    const float *pre = synth_preset("blip");
+    const char  *m;
+    int          i, k = app_synth_knob_count();
+    for (i = 0; i < SYNTH_PARAMS; i++)
+        st->synth_params[i] = pre ? pre[i] : 0.0f;
+    m = scene_meta_get(&st->scene, root, "synth");
+    if (m) {
+        /* the format string and v[] are sized to app_synth_knob_count()==4; update both if curated knobs are added */
+        float v[8];
+        int   got = sscanf(m, "%f %f %f %f", &v[0], &v[1], &v[2], &v[3]);
+        if (got == k)
+            for (i = 0; i < k; i++)
+                st->synth_params[app_synth_knob_param(i)] = v[i];
+    }
+    /* Knuth multiplicative-hash constant: mixes root -> a per-book rng seed */
+    st->synth_rng = 0x9E3779B9u ^ (sol_u32)root;
+}
+
+/* serialize the curated knobs back into meta["synth"] and save the scene. */
+static void synth_book_save(AppState *st, sol_u32 root) {
+    char buf[128];
+    int  i, n = 0, k = app_synth_knob_count();
+    for (i = 0; i < k; i++) {
+        if (n >= (int)sizeof buf) break;
+        n += snprintf(buf + n, sizeof buf - (size_t)n, (i ? " %.4f" : "%.4f"),
+                      (double)st->synth_params[app_synth_knob_param(i)]);
+    }
+    scene_meta_set(&st->scene, root, "synth", buf);
+    scene_save(&st->scene, "scene.stml");
+}
+
 /* Open `handle` as a book. A codex rises as ITSELF (its own build and
    leather, read from the cover child's params — the open refs share the
    closed schema's prefix); a FILE/ALIAS card rises as the default codex:
@@ -6001,6 +6036,14 @@ static void reader_open(AppState *st, sol_u32 handle) {
         st->reader_editable = SOL_FALSE;
         reader_load_content(st, o->content);   /* a file/alias card: read-only */
     }
+    {
+        const char *app = scene_meta_get(s, root, "app");
+        st->reader_app = (app && strcmp(app, "synth") == 0) ? 1 : 0;
+        if (st->reader_app) {
+            st->reader_editable = SOL_FALSE;   /* an app book types nothing */
+            synth_book_load(st, root);
+        }
+    }
     st->reader_page   = 0;
     st->reader_spread = 0;
     printf("reading '%s' — Esc or click to put it back; left/right turn pages\n",
@@ -6013,6 +6056,11 @@ static void reader_build_leaf(AppState *st, float alpha, float lag);  /* below *
 static void reader_close(AppState *st) {
     if (st->reader_state == READER_IDLE || st->reader_state == READER_RETURNING)
         return;
+    if (st->reader_app) {
+        synth_book_save(st, st->reader_source);
+        reader_free_pages(st);   /* pages were loaded as a codex, but reader_editable=FALSE skips the normal free */
+        st->reader_app = 0;
+    }
     if (st->reader_editable) {
         reader_save_pages(st);
         scene_save(&st->scene, "scene.stml");
