@@ -5755,6 +5755,83 @@ static void reader_pack_pages(AppState *st) {
     st->reader_line_count = total_lines;
 }
 
+static sol_bool reader_is_editing(AppState *st) {
+    return (sol_bool)(st->reader_editable && st->reader_state == READER_OPEN);
+}
+
+/* would the current page wrap to more than L lines? (capacity guard) */
+static int reader_page_full(AppState *st, const char *text) {
+    char wbuf[8192];
+    int  lines = text_wrap(st->reader_font, text, st->reader_px2m,
+                           reader_field_w(st), wbuf, (int)sizeof wbuf);
+    return lines > st->reader_lines_per_page;
+}
+
+static void reader_page_append(AppState *st, const char *enc, int n) {
+    char  *pg, *grown;
+    size_t len;
+    if (!st->reader_pages || st->reader_page >= st->reader_page_count) return;
+    pg  = st->reader_pages[st->reader_page];
+    len = pg ? strlen(pg) : 0;
+    grown = (char *)malloc(len + (size_t)n + 1);
+    if (!grown) return;
+    if (pg) memcpy(grown, pg, len);
+    memcpy(grown + len, enc, (size_t)n);
+    grown[len + n] = '\0';
+    if (reader_page_full(st, grown)) { free(grown); return; }  /* page is full */
+    free(pg);
+    st->reader_pages[st->reader_page] = grown;
+    reader_pack_pages(st);
+}
+
+static void reader_page_backspace(AppState *st) {
+    char  *pg;
+    size_t len;
+    if (!st->reader_pages || st->reader_page >= st->reader_page_count) return;
+    pg  = st->reader_pages[st->reader_page];
+    len = pg ? strlen(pg) : 0;
+    if (len == 0) return;
+    len--;
+    while (len > 0 && ((unsigned char)pg[len] & 0xC0u) == 0x80u) len--;
+    pg[len] = '\0';
+    reader_pack_pages(st);
+}
+
+static void reader_page_newline(AppState *st) {
+    char nl = '\n';
+    reader_page_append(st, &nl, 1);            /* respects capacity */
+}
+
+/* single-page navigation while editing: move the caret one page; flipping past
+   the last page appends a blank page; play the leaf turn only when the SPREAD
+   changes (so left<->right within a spread just moves the caret). */
+static void reader_edit_flip(AppState *st, int dir) {
+    int old_spread = st->reader_spread;
+    if (st->reader_turning != 0) return;       /* one leaf in flight */
+    if (dir > 0) {
+        if (st->reader_page + 1 >= st->reader_page_count) {
+            char **grown = (char **)realloc(st->reader_pages,
+                sizeof(char *) * (size_t)(st->reader_page_count + 1));
+            if (!grown) return;
+            st->reader_pages = grown;
+            st->reader_pages[st->reader_page_count] = reader_strdup("");
+            st->reader_page_count++;
+        }
+        st->reader_page++;
+    } else {
+        if (st->reader_page == 0) return;
+        st->reader_page--;
+    }
+    st->reader_spread = st->reader_page / 2;
+    if (st->reader_spread != old_spread) {
+        st->reader_turn_old = old_spread;
+        st->reader_turning  = (st->reader_spread > old_spread) ? 1 : -1;
+        st->reader_turn_t   = 0.0f;
+        play_oneshot(g_snd_whoosh, g_snd_whoosh_frames, 0.30f, 0.0f);
+    }
+    reader_pack_pages(st);
+}
+
 /* Open `handle` as a book. A codex rises as ITSELF (its own build and
    leather, read from the cover child's params — the open refs share the
    closed schema's prefix); a FILE/ALIAS card rises as the default codex:
@@ -7587,7 +7664,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        below goes quiet, so 'w' writes a letter instead of walking. A click
        blurs (saving) without also picking — the standard text-field deal:
        the first click leaves the field, the next one acts. */
-    if (st->edit_handle != 0 || st->palette.open) {
+    if (st->edit_handle != 0 || st->palette.open || reader_is_editing(st)) {
         in->forward = in->back = in->left = in->right = SOL_FALSE;
         in->up = in->down = SOL_FALSE;
         in->look_dx = 0.0f;
@@ -7598,6 +7675,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         if (st->edit_handle != 0) {     /* note blur is edit-only */
             sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
             if (lmb && !st->lmb_was_down) note_edit_end(st);
+            st->lmb_was_down = lmb;
+        } else if (reader_is_editing(st)) {  /* click closes the book (saves) */
+            sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (lmb && !st->lmb_was_down) reader_close(st);
             st->lmb_was_down = lmb;
         }
         st->mouse_last_x = mx;       /* keep tracking: no look-jump on blur */
@@ -11906,6 +11987,11 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     int       n;
     if (!st) return;
     if (st->palette.open) { palette_input_char(&st->palette, cp); return; }
+    if (reader_is_editing(st)) {
+        n = utf8_encode(cp, enc);
+        if (n > 0) reader_page_append(st, enc, n);
+        return;
+    }
     if (st->edit_handle == 0) return;
     n = utf8_encode(cp, enc);
     if (n <= 0 || st->edit_len + n >= EDIT_BUF_CAP) return;
@@ -11968,6 +12054,15 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         return;
     }
 
+    if (reader_is_editing(st)) {
+        if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
+        if (key == GLFW_KEY_ESCAPE) { if (action == GLFW_PRESS) reader_close(st); }
+        else if (key == GLFW_KEY_BACKSPACE) reader_page_backspace(st);
+        else if (key == GLFW_KEY_ENTER)     reader_page_newline(st);
+        else if (key == GLFW_KEY_RIGHT)     reader_edit_flip(st, +1);
+        else if (key == GLFW_KEY_LEFT)      reader_edit_flip(st, -1);
+        return;
+    }
     if (st->edit_handle != 0) {
         if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
