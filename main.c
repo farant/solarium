@@ -6876,7 +6876,10 @@ static sol_u32 carry_target(AppState *st, sol_u32 hit) {
         if (target == st->floor_handle) return 0;
         if (scene_meta_get(&st->scene, target, "room_type")) return 0;
         o = scene_get(&st->scene, target);
-        if (!o || o->parent != 0) return 0;
+        if (!o) return 0;
+        if (codex_cover_child(&st->scene, target) != 0) return target;  /* a book
+                                          carries even when shelved (like cards) */
+        if (o->parent != 0) return 0;
         return target;
     }
 }
