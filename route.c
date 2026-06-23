@@ -11,10 +11,17 @@ static vec3 obj_pos(Scene *s, sol_u32 h) {
     return vec3_make(0.0f, 0.0f, 0.0f);
 }
 
-/* a room's interior half-extents (its "room" shell child's w/d, halved) */
+/* a routable endpoint's half-extents. A room: its "room" shell child's w/d. An
+   island (mesh_ref "terrain"): its OWN w/d params (the island IS its footprint). */
 static void room_half(Scene *s, sol_u32 room, float *hw, float *hd) {
+    SceneObject *ro = scene_get(s, room);
     sol_u32 i;
     *hw = 4.0f; *hd = 4.0f;
+    if (ro && ro->mesh_ref && strcmp(ro->mesh_ref, "terrain") == 0) {
+        *hw = 0.5f * mesh_ref_param("terrain", ro->mesh_params, ro->mesh_param_count, "w");
+        *hd = 0.5f * mesh_ref_param("terrain", ro->mesh_params, ro->mesh_param_count, "d");
+        return;
+    }
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         if (o->parent == room && o->mesh_ref && strcmp(o->mesh_ref, "room") == 0) {
@@ -38,7 +45,8 @@ static int collect_rooms(Scene *s, RoomInfo *ri, int max) {
         SceneObject *o  = &s->objects[i];
         const char  *rt = scene_meta_get(s, o->handle, "room_type");
         if (!rt) continue;
-        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        if (strcmp(rt, "home")    != 0 && strcmp(rt, "mirror") != 0 &&
+            strcmp(rt, "terrain") != 0 && strcmp(rt, "land")   != 0) continue;
         if (!scene_object_active(s, o->handle)) continue;   /* hidden workspace */
         ri[n].handle = o->handle;
         ri[n].pos    = obj_pos(s, o->handle);

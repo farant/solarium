@@ -37,6 +37,20 @@ static sol_u32 add_walkway(Scene *s, sol_u32 a, sol_u32 b) {
     return w;
 }
 
+/* add a terrain island (single object: mesh_ref "terrain", own w/d params). */
+static sol_u32 add_island(Scene *s, float x, float y, float z, float w, float d) {
+    Mesh    empty;
+    sol_u32 h;
+    float   p[5];
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(s, 0, empty, vec3_make(x, y, z), quat_identity(), vec3_make(1,1,1));
+    scene_mesh_ref_set(s, h, "terrain");
+    scene_meta_set(s, h, "room_type", "terrain");
+    p[0] = w; p[1] = d; p[2] = 56.0f; p[3] = 2.0f; p[4] = 1.0f;
+    scene_mesh_params_set(s, h, p, 5);
+    return h;
+}
+
 int main(void) {
     /* due-east: straight, A opens E, B opens W, 0 bends */
     {
@@ -156,6 +170,20 @@ int main(void) {
         CHECK(route_for_walkway(&s, wk, &r));
         CHECK(r.valid);
         CHECK(!r.straight);          /* deflected by the overlapping bystander */
+        scene_free(&s);
+    }
+    /* a walkway routes between a room and a terrain island (island endpoint
+       resolves to its own footprint; the route is valid). */
+    {
+        Scene s; Route r; sol_u32 home, isle, wk;
+        scene_init(&s);
+        home = add_room(&s,   0.0f, 12.0f, 0.0f, 8.0f, 8.0f);
+        isle = add_island(&s, 30.0f, 12.0f, 0.0f, 20.0f, 16.0f);  /* hw=10, hd=8 */
+        wk   = add_walkway(&s, home, isle);
+        CHECK(route_for_walkway(&s, wk, &r));
+        CHECK(r.valid);
+        CHECK(r.room_lo == home || r.room_hi == home);
+        CHECK(r.room_lo == isle || r.room_hi == isle);
         scene_free(&s);
     }
     if (fails == 0) printf("route_test: OK\n");
