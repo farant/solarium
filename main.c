@@ -6449,6 +6449,21 @@ static void cmd_mint_codex(AppState *st) {
            p[7] > 0.5f ? ", clasped" : "");
 }
 
+/* A synth book (TODO5): an ordinary codex tagged as an app. Reuses the whole
+   codex mint (cover + page block + workspace tag), then stamps meta["app"] so
+   the reader routes it to the widget UI. Unknown apps degrade to plain books. */
+static void cmd_mint_synth(AppState *st) {
+    sol_u32 h;
+    cmd_mint_codex(st);                 /* mints a codex, sets selected_handle, saves */
+    h = st->selected_handle;
+    if (h != 0) {
+        scene_meta_set(&st->scene, h, "name", "synth book");
+        scene_meta_set(&st->scene, h, "app", "synth");
+        scene_save(&st->scene, "scene.stml");
+        printf("synth book minted - read it (look at it, press R) to open the synth\n");
+    }
+}
+
 /* tag a freshly minted root into the current workspace (absent => the base
    "home", matching every other prop mint) so scenery lands in the world you
    are standing in, not the default one. */
@@ -8057,6 +8072,7 @@ static Command g_commands[] = {
     { "Reload scene",                "L", GLFW_KEY_L, cmd_reload_scene,      NULL,                  SOL_FALSE },
     { "Spawn whiteboard",            "B", GLFW_KEY_B, cmd_mint_whiteboard,   NULL,                  SOL_FALSE },
     { "Mint codex (book)",           "V", GLFW_KEY_V, cmd_mint_codex,        NULL,                  SOL_FALSE },
+    { "Mint synth book",             NULL, 0,          cmd_mint_synth,        NULL,                  SOL_FALSE },
     { "Mint island",                 "H", GLFW_KEY_H, cmd_mint_island,       NULL,                  SOL_FALSE },
     { "Mint church",                 "U", GLFW_KEY_U, cmd_mint_church,       can_mint_church,       SOL_FALSE },
     { "Mint lantern",                "O", GLFW_KEY_O, cmd_mint_lantern,      NULL,                  SOL_FALSE },
