@@ -108,6 +108,28 @@ int main(void) {
         ray.dir    = vec3_make(-1.0f, 0.0f, 0.0f);
         CHECK(furniture_surface_aim("bookshelf", ps, 4, vec3_make(0,0,0), sol_radians(90.0f), ray, &loc));
     }
+    /* variable-width layout: widths pack left-to-right, wrap a full row, row_y descends */
+    {
+        float p[4]; float ws[5], xs[5]; int rows[5]; int used;
+        p[0] = 1.0f; p[1] = 1.8f; p[2] = 0.3f; p[3] = 2.0f;   /* w h d sh */
+        /* three thin items fit one row, in order, left-to-right */
+        ws[0] = 0.1f; ws[1] = 0.2f; ws[2] = 0.1f;
+        used = furniture_shelf_layout(p, 4, ws, 3, xs, rows);
+        CHECK(rows[0] == 0 && rows[1] == 0 && rows[2] == 0);   /* same (top) row */
+        CHECK(xs[0] < xs[1] && xs[1] < xs[2]);                 /* left to right */
+        CHECK(used == 1);
+        /* gap-aware spacing: centre-to-centre = half each width + the gap */
+        CHECK(fabs((double)((xs[1]-xs[0]) - (0.1f*0.5f + 0.012f + 0.2f*0.5f))) < 1e-4);
+        /* a row that overflows wraps to the next (lower) row.
+           usable = 1.0 - 2*0.06 = 0.88; 0.4 + gap + 0.4 = 0.812 fits two, not three */
+        ws[0] = 0.4f; ws[1] = 0.4f; ws[2] = 0.4f;
+        used = furniture_shelf_layout(p, 4, ws, 3, xs, rows);
+        CHECK(rows[0] == 0 && rows[1] == 0);                   /* two fit the top row */
+        CHECK(rows[2] == 1);                                   /* third wraps down */
+        CHECK(used == 2);
+        /* row_y: the top board (0) sits above the floor board (sh) */
+        CHECK(furniture_shelf_row_y(p, 4, 0) > furniture_shelf_row_y(p, 4, 2));
+    }
     if (fails == 0) printf("furniture_test: OK\n");
     return fails ? 1 : 0;
 }

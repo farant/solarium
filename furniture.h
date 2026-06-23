@@ -24,6 +24,19 @@ vec3 furniture_shelf_slot(const float *params, int count, int i);
    to find the lowest free slot when filing. */
 int  furniture_shelf_capacity(const float *params, int count);
 
+/* Pack n items of along-shelf widths widths[0..n) left-to-right across the
+   bookshelf, each followed by a small gap, wrapping to the next row (0 = top
+   board ... sh = floor board) when an item won't fit the remaining row width.
+   Fills out_x[i] (LOCAL x of the item's CENTRE) and out_row[i]. An item wider
+   than a whole row still gets placed (its own row). Returns the rows used. */
+int   furniture_shelf_layout(const float *params, int count,
+                             const float *widths, int n,
+                             float *out_x, int *out_row);
+
+/* the LOCAL y of a shelf row's board top (row 0 = top ... sh = floor), so a
+   filed item's base can sit on it. */
+float furniture_shelf_row_y(const float *params, int count, int row);
+
 /* a tablet's LOCAL resting position on a table top given a LOCAL hit point on
    the top surface (clamped inside the top; y = top height). */
 vec3 furniture_table_point(const float *params, int count, vec3 local_hit);

@@ -29,6 +29,7 @@ sol_bool furniture_is_shelf(const char *mesh_ref) {
 #define FURN_SPINE_PITCH  0.06f
 #define FURN_SHELF_MARGIN 0.06f
 #define FURN_PANEL_T      0.04f
+#define FURN_SHELF_GAP    0.012f   /* the breathing room between packed spines */
 
 /* columns that fit across a shelf of width w */
 static int furn_shelf_cols(float w) {
@@ -64,6 +65,39 @@ int furniture_shelf_capacity(const float *params, int count) {
     int   sh = (count > 3) ? (int)(params[3] + 0.5f) : 2;
     if (sh < 1) sh = 1;
     return furn_shelf_cols(w) * (sh + 1);   /* the sh boards + the floor board */
+}
+
+int furniture_shelf_layout(const float *params, int count,
+                           const float *widths, int n,
+                           float *out_x, int *out_row) {
+    float w      = (count > 0) ? params[0] : 1.0f;
+    int   sh     = (count > 3) ? (int)(params[3] + 0.5f) : 2;
+    float usable = w - 2.0f * FURN_SHELF_MARGIN;
+    float left   = -w * 0.5f + FURN_SHELF_MARGIN;
+    float cursor = 0.0f;                    /* distance from `left` along the row */
+    int   row = 0, rows, i;
+    if (sh < 1) sh = 1;
+    rows = sh + 1;
+    for (i = 0; i < n; i++) {
+        float bw = (widths[i] > 0.0f) ? widths[i] : 0.0f;
+        if (cursor > 0.0f && cursor + bw > usable) {   /* won't fit: next row */
+            cursor = 0.0f;
+            if (row < rows - 1) row++;                 /* clamp; overflow piles on last */
+        }
+        out_x[i]   = left + cursor + bw * 0.5f;
+        out_row[i] = row;
+        cursor += bw + FURN_SHELF_GAP;
+    }
+    return (n > 0) ? row + 1 : 0;
+}
+
+float furniture_shelf_row_y(const float *params, int count, int row) {
+    float h  = (count > 1) ? params[1] : 1.8f;
+    int   sh = (count > 3) ? (int)(params[3] + 0.5f) : 2;
+    if (sh < 1) sh = 1;
+    if (row < 0)  row = 0;
+    if (row > sh) row = sh;
+    return (h - FURN_PANEL_T) * (float)(sh - row) / (float)(sh + 1) + FURN_PANEL_T;
 }
 
 vec3 furniture_table_point(const float *params, int count, vec3 local_hit) {
