@@ -11996,7 +11996,38 @@ static void render(AppState *state) {
             page = reader_page_matrix(state, &wb, &zh, &xf, &mg);
             bm   = mat4_from_trs(state->reader_pos, state->reader_rot,
                                  vec3_make(1.0f, 1.0f, 1.0f));
-            if (state->reader_is_image && state->reader_image_tex.id) {
+            if (state->reader_app) {
+                /* walk the synth UI draw-list (Task 6 filled widget_ctx) onto
+                   the page: RECT -> a flat-colour quad via draw_mesh (existing
+                   lit pipeline, no new shader), TEXT -> wtext. A per-command z
+                   step (higher ci = prouder) preserves emission/paint order so
+                   a slider handle sits above its track, without z-fighting the
+                   page surface. */
+                int ci;
+                for (ci = 0; ci < state->widget_ctx.cmd_count; ci++) {
+                    const WidgetCmd *cmd = &state->widget_ctx.cmds[ci];
+                    float z = 0.0006f + (float)ci * 0.00004f;
+                    if (cmd->type == WIDGET_CMD_RECT) {
+                        vec3     ctr = vec3_make(cmd->x + cmd->w * 0.5f,
+                                                 cmd->y - cmd->h * 0.5f, z);
+                        mat4     m   = mat4_mul(page,
+                                       mat4_from_trs(ctr, quat_identity(),
+                                           vec3_make(cmd->w, cmd->h, 1.0f)));
+                        Material wm  = material_default();
+                        wm.base_color = vec3_make(cmd->r, cmd->g, cmd->b);
+                        wm.roughness  = 0.85f;
+                        if (state->widget_quad.index_count > 0)
+                            draw_mesh(state, state->widget_quad, m,
+                                      view, proj, eye, 0.0f, wm);
+                    } else {
+                        mat4  tm   = mat4_mul(page,
+                                     mat4_translate(vec3_make(0.0f, 0.0f, z)));
+                        float px2m = (lh > 0.0f) ? cmd->h / lh : cmd->h;
+                        wtext_block(uf, vp, tm, cmd->text, cmd->x, cmd->y,
+                                    px2m, 0.0f, cmd->r, cmd->g, cmd->b);
+                    }
+                }
+            } else if (state->reader_is_image && state->reader_image_tex.id) {
                 /* the image on the RIGHT page (fitted), filename on the LEFT */
                 float field_w_left = wb - xf - 2.0f * mg;
                 if (state->reader_image_quad.index_count > 0) {
