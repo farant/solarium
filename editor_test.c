@@ -26,6 +26,32 @@ static sol_u32 add_room(Scene *s, float x, float y, float z, float w, float d) {
     return parent;
 }
 
+/* a terrain island: a single object that IS its own footprint. */
+static sol_u32 add_island(Scene *s, float x, float y, float z, float w, float d) {
+    Mesh    empty;
+    sol_u32 h;
+    float   p[5];
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(s, 0, empty, vec3_make(x, y, z), quat_identity(), vec3_make(1,1,1));
+    scene_mesh_ref_set(s, h, "terrain");
+    scene_meta_set(s, h, "room_type", "terrain");
+    p[0] = w; p[1] = d; p[2] = 56.0f; p[3] = 2.0f; p[4] = 1.0f;
+    scene_mesh_params_set(s, h, p, 5);
+    return h;
+}
+
+/* a church anchor plot-linked to an island (an abbey's building). */
+static sol_u32 add_church_on(Scene *s, sol_u32 island, float x, float y, float z) {
+    Mesh    empty;
+    sol_u32 h;
+    SceneObject *io = scene_get(s, island);
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(s, 0, empty, vec3_make(x, y, z), quat_identity(), vec3_make(1,1,1));
+    scene_meta_set(s, h, "room_type", "church");
+    if (io && io->nid) scene_meta_set(s, h, "plot", io->nid);
+    return h;
+}
+
 int main(void) {
     /* room_rect reads center+floor from the anchor and w/d from the shell */
     {
@@ -223,6 +249,47 @@ int main(void) {
         CHECK(fabs((double)(r.hw - 6.0f)) < 1e-3);               /* half-width -> 6 */
         CHECK(fabs((double)((r.cx + mo->pos.x) - 8.0f)) < 1e-3); /* rode the +X wall */
         CHECK(fabs((double)((r.cx + fo->pos.x) + 4.0f)) < 1e-3); /* stayed on the fixed -X wall */
+        scene_free(&s);
+    }
+
+    /* an island IS its own footprint (rect from its own w/d params). */
+    {
+        Scene s; sol_u32 isle; RoomRect r;
+        scene_init(&s);
+        isle = add_island(&s, 2.0f, 5.0f, -3.0f, 30.0f, 20.0f);
+        r = editor_room_rect(&s, isle);
+        CHECK(fabs((double)(r.cx - 2.0f)) < 1e-4);
+        CHECK(fabs((double)(r.cz + 3.0f)) < 1e-4);
+        CHECK(fabs((double)(r.floor_y - 5.0f)) < 1e-4);
+        CHECK(fabs((double)(r.hw - 15.0f)) < 1e-4);
+        CHECK(fabs((double)(r.hd - 10.0f)) < 1e-4);
+        scene_free(&s);
+    }
+    /* resizable: a plain island yes; an island with a church (abbey) no; a room yes. */
+    {
+        Scene s; sol_u32 plain, abbey_hill, room;
+        scene_init(&s);
+        plain      = add_island(&s,  0.0f, 0.0f,   0.0f, 20.0f, 20.0f);
+        abbey_hill = add_island(&s, 80.0f, 0.0f,   0.0f, 30.0f, 30.0f);
+        add_church_on(&s, abbey_hill, 80.0f, 2.0f, 0.0f);
+        room       = add_room(&s,   -80.0f, 0.0f,  0.0f, 8.0f, 8.0f);
+        CHECK(editor_resizable(&s, plain)      == SOL_TRUE);
+        CHECK(editor_resizable(&s, abbey_hill) == SOL_FALSE);
+        CHECK(editor_resizable(&s, room)       == SOL_TRUE);
+        scene_free(&s);
+    }
+    /* abbey group-move: dragging the hill shifts its church by the same delta. */
+    {
+        Scene s; sol_u32 hill, church; SceneObject *co; vec3 c0;
+        scene_init(&s);
+        hill   = add_island(&s, 0.0f, 0.0f, 0.0f, 30.0f, 30.0f);
+        church = add_church_on(&s, hill, 1.0f, 2.0f, -2.0f);
+        co = scene_get(&s, church); c0 = co->pos;
+        editor_apply_move(&s, hill, 10.0f, 4.0f);   /* hill 0,0 -> 10,4 (delta 10,4) */
+        co = scene_get(&s, church);
+        CHECK(fabs((double)(co->pos.x - (c0.x + 10.0f))) < 1e-3);
+        CHECK(fabs((double)(co->pos.z - (c0.z + 4.0f)))  < 1e-3);
+        CHECK(fabs((double)(co->pos.y - c0.y)) < 1e-3);   /* y unchanged */
         scene_free(&s);
     }
 

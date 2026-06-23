@@ -16,17 +16,46 @@ RoomRect editor_room_rect(Scene *s, sol_u32 room) {
     float        w = 10.0f, d = 10.0f;
     r.cx = r.cz = r.floor_y = 0.0f; r.hw = r.hd = 5.0f;
     if (!ro) return r;
-    for (i = 0; i < s->count; i++) {
-        SceneObject *o = &s->objects[i];
-        if (o->parent == room && o->mesh_ref && strcmp(o->mesh_ref, "room") == 0) {
-            w = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "w");
-            d = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "d");
-            break;
+    if (ro->mesh_ref && strcmp(ro->mesh_ref, "terrain") == 0) {  /* island = own footprint */
+        w = mesh_ref_param("terrain", ro->mesh_params, ro->mesh_param_count, "w");
+        d = mesh_ref_param("terrain", ro->mesh_params, ro->mesh_param_count, "d");
+    } else {
+        for (i = 0; i < s->count; i++) {
+            SceneObject *o = &s->objects[i];
+            if (o->parent == room && o->mesh_ref && strcmp(o->mesh_ref, "room") == 0) {
+                w = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "w");
+                d = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "d");
+                break;
+            }
         }
     }
     r.cx = ro->pos.x; r.cz = ro->pos.z; r.floor_y = ro->pos.y;
     r.hw = 0.5f * w;  r.hd = 0.5f * d;
     return r;
+}
+
+/* Resizable footprints: a room (has a "room" shell child) and a terrain island
+   that carries NO church (an abbey hill is movable + connectable but not
+   resizable — its church stone is baked from church_plan). */
+sol_bool editor_resizable(Scene *s, sol_u32 room) {
+    SceneObject *o = scene_get(s, room);
+    sol_u32      i;
+    if (!o) return SOL_FALSE;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "terrain") == 0) {
+        if (o->nid) {
+            for (i = 0; i < s->count; i++) {
+                const char *rt = scene_meta_get(s, s->objects[i].handle, "room_type");
+                const char *pl = scene_meta_get(s, s->objects[i].handle, "plot");
+                if (rt && strcmp(rt, "church") == 0 && pl && strcmp(pl, o->nid) == 0)
+                    return SOL_FALSE;     /* an abbey: not resizable */
+            }
+        }
+        return SOL_TRUE;
+    }
+    for (i = 0; i < s->count; i++)        /* a room: has a "room" shell child */
+        if (s->objects[i].parent == room && s->objects[i].mesh_ref &&
+            strcmp(s->objects[i].mesh_ref, "room") == 0) return SOL_TRUE;
+    return SOL_FALSE;
 }
 
 /* Classify a ground point against a footprint, with a grab band (world units)
@@ -114,12 +143,29 @@ void editor_disconnect(Scene *s, sol_u32 walkway) {
         scene_remove(s, walkway);
 }
 
-/* Move a room: write its anchor's world XZ (anchors are parent-0). */
+/* Move a room/island: write its anchor's world XZ. If the moved object is a
+   terrain island, every church plot-linked to it rides along by the same delta
+   (the abbey moves as a unit) — scene structure unchanged. */
 void editor_apply_move(Scene *s, sol_u32 room, float cx, float cz) {
     SceneObject *o = scene_get(s, room);
+    float        dx, dz;
     if (!o) return;
+    dx = cx - o->pos.x;
+    dz = cz - o->pos.z;
     o->pos.x = cx;
     o->pos.z = cz;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "terrain") == 0 && o->nid) {
+        sol_u32 i;
+        for (i = 0; i < s->count; i++) {
+            SceneObject *c  = &s->objects[i];
+            const char  *rt = scene_meta_get(s, c->handle, "room_type");
+            const char  *pl = scene_meta_get(s, c->handle, "plot");
+            if (rt && strcmp(rt, "church") == 0 && pl && strcmp(pl, o->nid) == 0) {
+                c->pos.x += dx;
+                c->pos.z += dz;
+            }
+        }
+    }
 }
 
 /* Resize a room by dragging zone's wall(s) to the ground point (gx,gz), keeping
@@ -205,8 +251,11 @@ static sol_u32 editor_room_under(Scene *s, const Camera *c, float nx, float ny,
         vec3         gp;
         EditZone     z;
         float        dx, dz, dd;
-        if (o->mesh_ref) continue;                      /* anchors are empties */
-        if (!scene_meta_get(s, o->handle, "room_type")) continue;
+        if (o->mesh_ref && strcmp(o->mesh_ref, "terrain") != 0) continue;  /* rooms (empty) + islands */
+        {   /* a church rides its hill: grabbing an abbey lands on the terrain */
+            const char *rt = scene_meta_get(s, o->handle, "room_type");
+            if (!rt || strcmp(rt, "church") == 0) continue;
+        }
         if (!scene_object_active(s, o->handle)) continue;   /* hidden workspace */
         r = editor_room_rect(s, o->handle);
         if (!editor_ground_at(c, nx, ny, aspect, r.floor_y, &gp)) continue;

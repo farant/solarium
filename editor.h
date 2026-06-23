@@ -56,6 +56,7 @@ void     editor_resize_axis(float center, float half, int sign,
                             float face_world, float min_size,
                             float *new_center, float *new_half);
 sol_bool editor_can_connect(Scene *s, sol_u32 a, sol_u32 b);
+sol_bool editor_resizable(Scene *s, sol_u32 room);   /* room or church-less island */
 
 /* ---- scene ops (headless, unit-tested) ---- */
 sol_u32  editor_connect(Scene *s, sol_u32 a, sol_u32 b);   /* new walkway, 0 if invalid */
