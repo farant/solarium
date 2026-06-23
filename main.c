@@ -6980,7 +6980,16 @@ static void cmd_carry_toggle(AppState *st) {
                 scene_save(&st->scene, "scene.stml");
                 printf("filed onto furniture\n");
             } else {
-                vec3 w = carry_place_point(st);
+                vec3    w = carry_place_point(st);
+                sol_u32 ccov = codex_cover_child(&st->scene, st->carried);
+                if (ccov != 0) {            /* a codex stands on its base: its
+                                               anchor origin is the book's CENTRE,
+                                               so lift by half its height */
+                    SceneObject *cco = scene_get(&st->scene, ccov);
+                    if (cco)
+                        w.y += 0.5f * mesh_ref_param("book_cover", cco->mesh_params,
+                                                     cco->mesh_param_count, "h");
+                }
                 o->pos = scene_world_to_local(&st->scene, o->parent, w);
                 scene_save(&st->scene, "scene.stml");
             }
