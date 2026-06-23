@@ -293,6 +293,29 @@ int main(void) {
         scene_free(&s);
     }
 
+    /* resize a plain island: its own w/d params grow, and a hero child
+       re-positions proportionally (and gets re-grounded to the new terrain). */
+    {
+        Scene s; sol_u32 isle, tree; Mesh empty; SceneObject *io, *to;
+        float lx0;
+        memset(&empty, 0, sizeof empty);
+        scene_init(&s);
+        isle = add_island(&s, 0.0f, 0.0f, 0.0f, 20.0f, 20.0f);   /* hw=10, hd=10 */
+        /* a hero child at local (4,*,0) = +0.4 of half-width, like wild dressing */
+        tree = scene_add(&s, isle, empty, vec3_make(4.0f, 0.0f, 0.0f),
+                         quat_identity(), vec3_make(1,1,1));
+        scene_mesh_ref_set(&s, tree, "oak");
+        to = scene_get(&s, tree); lx0 = to->pos.x;
+        /* drag the +X edge out to x=20: -X wall fixed at -10, so new hw=15, cx=5 */
+        editor_apply_resize(&s, isle, EDIT_ZONE_EDGE_XP, 20.0f, 0.0f);
+        io = scene_get(&s, isle);
+        CHECK(fabs((double)(mesh_ref_param("terrain", io->mesh_params,
+                            io->mesh_param_count, "w") - 30.0f)) < 1e-2);  /* w 20 -> 30 */
+        to = scene_get(&s, tree);
+        CHECK(fabs((double)(to->pos.x - lx0 * 1.5f)) < 1e-2);   /* local x scaled by 15/10 */
+        scene_free(&s);
+    }
+
     if (fails == 0) printf("editor_test: OK\n");
     return fails ? 1 : 0;
 }

@@ -193,6 +193,29 @@ void editor_apply_resize(Scene *s, sol_u32 room, EditZone zone, float gx, float 
     if (tz) editor_resize_axis(r.cz, r.hd, sz, gz, EDITOR_MIN_SIZE, &ncz, &nhd);
     ro->pos.x = ncx;
     ro->pos.z = ncz;
+    if (ro->mesh_ref && strcmp(ro->mesh_ref, "terrain") == 0) {
+        /* write the island's OWN w/d; re-ground its hero dressing: scale each
+           child's local x/z by the per-axis ratio, re-snap y to the new terrain. */
+        float rx = (r.hw > 1e-4f) ? nhw / r.hw : 1.0f;
+        float rz = (r.hd > 1e-4f) ? nhd / r.hd : 1.0f;
+        float p[MESH_REF_MAX_PARAMS];
+        int   k, np = ro->mesh_param_count;
+        if (np < 2) np = 2;
+        if (np > MESH_REF_MAX_PARAMS) np = MESH_REF_MAX_PARAMS;
+        for (k = 0; k < np; k++)
+            p[k] = (k < ro->mesh_param_count) ? ro->mesh_params[k] : 0.0f;
+        p[0] = 2.0f * nhw;
+        p[1] = 2.0f * nhd;
+        scene_mesh_params_set(s, room, p, np);
+        for (i = 0; i < s->count; i++) {
+            SceneObject *c = &s->objects[i];
+            if (c->parent != room) continue;
+            c->pos.x *= rx;
+            c->pos.z *= rz;
+            c->pos.y  = terrain_height(p, np, c->pos.x, c->pos.z);
+        }
+        return;
+    }
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         if (o->parent == room && o->mesh_ref && strcmp(o->mesh_ref, "room") == 0) {
@@ -303,7 +326,7 @@ void editor_press(Editor *e, Scene *s, const Camera *c,
         }
         e->room        = room;
         e->selected_wk = 0;
-        if (z == EDIT_ZONE_BODY) {
+        if (z == EDIT_ZONE_BODY || !editor_resizable(s, room)) {
             e->action   = EDIT_MOVE;
             e->grab_off = vec3_make(r.cx - gp.x, 0.0f, r.cz - gp.z);
         } else {
