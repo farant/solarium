@@ -136,6 +136,30 @@ int main(void) {
         CHECK(b.vertex_count > 0 && b.index_count > 0);
         mb_free(&b);
     }
+    /* scene_object_stowed: true under an anchor tagged meta["inventory"]. */
+    {
+        Scene s;
+        sol_u32 bag, card, room, shelf_card;
+        Mesh    empty;
+        vec3    z = vec3_make(0.0f, 0.0f, 0.0f);
+        quat    q = quat_identity();
+        vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+        memset(&empty, 0, sizeof empty);
+        scene_init(&s);
+        bag  = scene_add(&s, 0, empty, z, q, one);
+        scene_meta_set(&s, bag, "inventory", "1");
+        card = scene_add(&s, bag, empty, z, q, one);          /* in the bag */
+        room = scene_add(&s, 0, empty, z, q, one);            /* loose in the world */
+        shelf_card = scene_add(&s, room, empty, z, q, one);   /* parented, not stowed */
+        CHECK(scene_object_stowed(&s, card) == SOL_TRUE);
+        CHECK(scene_object_stowed(&s, bag)  == SOL_TRUE);     /* the anchor itself counts */
+        CHECK(scene_object_stowed(&s, room) == SOL_FALSE);
+        CHECK(scene_object_stowed(&s, shelf_card) == SOL_FALSE);
+        /* and the fold-in: a stowed object is never "active" */
+        CHECK(scene_object_active(&s, card) == SOL_FALSE);
+        CHECK(scene_object_active(&s, room) == SOL_TRUE);
+        scene_free(&s);
+    }
     if (fails == 0) printf("workspace_test: OK\n");
     return fails ? 1 : 0;
 }

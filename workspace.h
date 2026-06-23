@@ -11,8 +11,13 @@
    meta["workspace"]; absent before parent 0 => "home". Never NULL. */
 const char *workspace_of(Scene *s, sol_u32 handle);
 
-/* Visible/live under the current filter? s->active_ws == "" => always true. */
+/* Visible/live under the current filter? s->active_ws == "" => always true.
+   A stowed object (in the inventory bag) is NEVER active. */
 sol_bool    scene_object_active(Scene *s, sol_u32 handle);
+
+/* true if `handle` (or any ancestor) is an inventory anchor (meta["inventory"]):
+   the object sits in the bag and is filtered out of every scene reader. */
+sol_bool    scene_object_stowed(Scene *s, sol_u32 handle);
 
 /* a WorkspaceAnchor: a parent-0 empty carrying meta["workspace_name"]. The
    identity + display handle of a workspace, and what "Portal to..." lists. */

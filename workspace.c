@@ -19,7 +19,21 @@ const char *workspace_of(Scene *s, sol_u32 handle) {
     return "home";
 }
 
+sol_bool scene_object_stowed(Scene *s, sol_u32 handle) {
+    sol_u32 h = handle;
+    int     guard = 0;                 /* parent-chain runaway bound */
+    while (h != 0 && guard++ < 64) {
+        SceneObject *o;
+        if (scene_meta_get(s, h, "inventory")) return SOL_TRUE;
+        o = scene_get(s, h);
+        if (!o) break;
+        h = o->parent;
+    }
+    return SOL_FALSE;
+}
+
 sol_bool scene_object_active(Scene *s, sol_u32 handle) {
+    if (scene_object_stowed(s, handle)) return SOL_FALSE;   /* in the bag */
     if (s->active_ws[0] == '\0') return SOL_TRUE;     /* unfiltered */
     return (sol_bool)(strcmp(workspace_of(s, handle), s->active_ws) == 0);
 }
