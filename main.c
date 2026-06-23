@@ -7958,6 +7958,44 @@ static void cmd_inventory_open(AppState *st) {
     st->inv_open = SOL_TRUE;
 }
 
+/* palette (top-down): drop a FREE room — a "mirror" room with NO source_path,
+   so it is inert to the filesystem (no scan/sync) yet a first-class editor
+   footprint (move/resize/connect). Lands on the floor plane under the screen
+   centre, then drag it into place. */
+static void cmd_add_room(AppState *st) {
+    float       aspect = (st->fb_height > 0) ? (float)st->fb_width / (float)st->fb_height : 1.0f;
+    Ray         r   = camera_ray(&st->camera, 0.0f, 0.0f, aspect);
+    float       t, fy = HOME_FLOOR_Y;
+    vec3        pos, zero = vec3_make(0.0f, 0.0f, 0.0f), one = vec3_make(1.0f, 1.0f, 1.0f);
+    quat        qid = quat_identity();
+    Mesh        empty;
+    sol_u32     room, shell;
+    float       p[8];
+    const char *ws = st->scene.active_ws[0] ? st->scene.active_ws : "home";
+    if (ray_vs_plane(r, vec3_make(0.0f, fy, 0.0f), vec3_make(0.0f, 1.0f, 0.0f), &t) && t > 0.0f)
+        pos = vec3_add(r.origin, vec3_scale(r.dir, t));
+    else
+        pos = vec3_add(st->camera.pos, vec3_scale(camera_forward(&st->camera), 6.0f));
+    pos.y = fy;
+    memset(&empty, 0, sizeof empty);
+    room = scene_add(&st->scene, 0, empty, pos, qid, one);
+    scene_meta_set(&st->scene, room, "room_type", "mirror");  /* mirrors nothing = a free room */
+    scene_meta_set(&st->scene, room, "name", "room");
+    scene_meta_set(&st->scene, room, "workspace", ws);
+    shell = scene_add(&st->scene, room, empty, zero, qid, one);  /* room invalidated; use handles */
+    scene_mesh_ref_set(&st->scene, shell, "room");
+    p[0] = 8.0f; p[1] = 8.0f; p[2] = 3.0f; p[3] = 1.0f;
+    p[4] = 1.0f; p[5] = 1.0f; p[6] = 1.0f; p[7] = 0.0f;
+    scene_mesh_params_set(&st->scene, shell, p, 8);
+    scene_resolve_meshes(&st->scene);
+    apply_kind_materials(&st->scene);
+    connections_rebuild(st);
+    collide_rebuild(&st->colliders, &st->scene);
+    bvh_refresh(st);
+    scene_save(&st->scene, "scene.stml");
+    printf("added a free room\n");
+}
+
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
@@ -7989,7 +8027,8 @@ static Command g_commands[] = {
     { "New root...",                 NULL, 0,          cmd_new_root,          NULL,                  SOL_FALSE },
     { "Place furniture",             NULL, 0,          cmd_place_furniture,   NULL,                  SOL_FALSE },
     { "Top-down editor",             NULL, 0,          cmd_toggle_editor,     NULL,                  SOL_FALSE },
-    { "Disconnect selected",         NULL, 0,          cmd_disconnect,        can_disconnect,        SOL_FALSE }
+    { "Disconnect selected",         NULL, 0,          cmd_disconnect,        can_disconnect,        SOL_FALSE },
+    { "Add room",                    NULL, 0,          cmd_add_room,          NULL,                  SOL_FALSE }
 };
 
 #define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
@@ -8015,19 +8054,22 @@ static void gather_subtree(Scene *s, sol_u32 root, sol_u32 *out, int *n, int cap
     }
 }
 
-/* Editor: delete a terrain island and everything tied to it — its dressing
-   subtree, every church plot-linked to it (abbey) + their subtrees, and every
-   walkway connecting to it — then re-derive the fields and save. */
-static void editor_delete_island(AppState *st, sol_u32 island) {
+/* Editor: delete a footprint (a terrain island OR a free room) and everything
+   tied to it — its subtree, every walkway connecting to it, and (for a terrain
+   island) every plot-linked church + its subtree — then rebuild and save. A
+   terrain delete also re-derives the world-baked FIELD data. */
+static void editor_delete_footprint(AppState *st, sol_u32 footprint) {
     sol_u32      victims[512];
     int          nv = 0, vi;
     char         nidbuf[64];   /* a nid is 26 chars; 64 is plenty */
     sol_u32      i, j;
-    SceneObject *io = scene_get(&st->scene, island);
+    SceneObject *io = scene_get(&st->scene, footprint);
+    sol_bool     is_terrain = (sol_bool)(io && io->mesh_ref &&
+                                         strcmp(io->mesh_ref, "terrain") == 0);
     nidbuf[0] = '\0';
     if (io && io->nid) { strncpy(nidbuf, io->nid, sizeof nidbuf - 1); nidbuf[sizeof nidbuf - 1] = '\0'; }
-    gather_subtree(&st->scene, island, victims, &nv, 512);
-    if (nidbuf[0]) {                       /* plot-linked churches + their subtrees */
+    gather_subtree(&st->scene, footprint, victims, &nv, 512);
+    if (is_terrain && nidbuf[0]) {         /* an abbey: plot-linked churches + subtrees */
         for (i = 0; i < st->scene.count; i++) {
             sol_u32     h  = st->scene.objects[i].handle;
             const char *rt = scene_meta_get(&st->scene, h, "room_type");
@@ -8036,12 +8078,12 @@ static void editor_delete_island(AppState *st, sol_u32 island) {
                 gather_subtree(&st->scene, h, victims, &nv, 512);
         }
     }
-    for (i = 0; i < st->scene.count; i++) {     /* walkways connecting to the island */
+    for (i = 0; i < st->scene.count; i++) {     /* walkways connecting to it */
         SceneObject *o = &st->scene.objects[i];
         if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
         for (j = 0; j < o->rel_count; j++) {
             if (strcmp(o->relations[j].type, "connects") == 0 &&
-                o->relations[j].target == island) {
+                o->relations[j].target == footprint) {
                 if (nv < 512) victims[nv++] = o->handle;
                 break;
             }
@@ -8051,14 +8093,12 @@ static void editor_delete_island(AppState *st, sol_u32 island) {
     st->selected_handle    = 0;
     st->editor.room        = 0;
     st->editor.selected_wk = 0;
-    meadow_rebuild(st);
-    forest_rebuild(st);
-    ornament_rebuild(st);
+    if (is_terrain) { meadow_rebuild(st); forest_rebuild(st); ornament_rebuild(st); }
     connections_rebuild(st);
     collide_rebuild(&st->colliders, &st->scene);
     bvh_refresh(st);
     scene_save(&st->scene, "scene.stml");
-    printf("deleted an island\n");
+    printf("deleted %s\n", is_terrain ? "an island" : "a room");
 }
 
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
@@ -8657,8 +8697,14 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 editor_delete_selected(&st->editor, &st->scene);
             } else {
                 SceneObject *so = scene_get(&st->scene, st->selected_handle);
-                if (so && so->mesh_ref && strcmp(so->mesh_ref, "terrain") == 0)
-                    editor_delete_island(st, st->selected_handle);
+                if (so && so->mesh_ref && strcmp(so->mesh_ref, "terrain") == 0) {
+                    editor_delete_footprint(st, st->selected_handle);   /* island/abbey */
+                } else if (so && !so->mesh_ref) {                       /* a FREE room only */
+                    const char *rt = scene_meta_get(&st->scene, st->selected_handle, "room_type");
+                    const char *sp = scene_meta_get(&st->scene, st->selected_handle, "source_path");
+                    if (rt && strcmp(rt, "mirror") == 0 && (!sp || sp[0] == '\0'))
+                        editor_delete_footprint(st, st->selected_handle);
+                }
             }
         }
         st->editor_del_was = del_now;
