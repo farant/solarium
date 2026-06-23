@@ -224,6 +224,17 @@ if [ "$MODE" = "synthtest" ]; then
     exit 0
 fi
 
+# appsynthtest: the synth book's page layout (scene/GL-free C89). Links the
+# widget core + the synth schema it introspects.
+if [ "$MODE" = "appsynthtest" ]; then
+    set -x
+    clang -std=c89 -pedantic-errors -Werror -g -fsanitize=address,undefined \
+        app_synth.c widget.c synth.c app_synth_test.c \
+        -o app_synth_test
+    echo "built ./app_synth_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
 # Build + run the headless skeletal-animation test under the sanitizers.
 # Links glb.c for the skin/clip parsing; the two GPU seams glb.c references
 # (texture create, mesh upload) are stubbed inside the test — skeleton
