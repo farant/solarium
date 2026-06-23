@@ -5945,6 +5945,96 @@ static void synth_book_save(AppState *st, sol_u32 root) {
     scene_save(&st->scene, "scene.stml");
 }
 
+/* a pick ray through the OS cursor (app-book mode frees the cursor; the normal
+   pick_ray only reads the cursor in ORBIT, so the app book needs its own). */
+static Ray cursor_ray(AppState *st, GLFWwindow *w) {
+    int    ww, wh;
+    float  aspect, nx, ny;
+    double mx, my;
+    glfwGetWindowSize(w, &ww, &wh);
+    aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
+    glfwGetCursorPos(w, &mx, &my);
+    nx = (ww > 0) ? 2.0f * (float)mx / (float)ww - 1.0f : 0.0f;
+    ny = (wh > 0) ? 1.0f - 2.0f * (float)my / (float)wh : 0.0f;
+    return camera_ray(&st->camera, nx, ny, aspect);
+}
+
+/* cursor -> the open page's z=0 plane -> page-local 2D meters. `in` (the return)
+   is true when the hit lands within the book's page rect [-wb,wb] x [-zh,zh]. */
+static sol_bool page_under_cursor(AppState *st, GLFWwindow *w, mat4 page,
+                                  float wb, float zh, float *px, float *py) {
+    Ray   r;
+    vec3  o, zp, n, hit, loc;
+    float t;
+    mat4  inv;
+    r   = cursor_ray(st, w);
+    o   = mat4_mul_point(page, vec3_make(0.0f, 0.0f, 0.0f));
+    zp  = mat4_mul_point(page, vec3_make(0.0f, 0.0f, 1.0f));
+    n   = vec3_normalize(vec3_sub(zp, o));
+    if (!ray_vs_plane(r, o, n, &t)) return SOL_FALSE;
+    hit = vec3_add(r.origin, vec3_scale(r.dir, t));
+    inv = mat4_inverse(page);
+    loc = mat4_mul_point(inv, hit);
+    *px = loc.x;
+    *py = loc.y;
+    return (sol_bool)(loc.x >= -wb && loc.x <= wb &&
+                      loc.y >= -zh && loc.y <= zh);
+}
+
+/* an app book is OPEN and routes to the widget UI. */
+static sol_bool reader_is_app(const AppState *st) {
+    return (sol_bool)(st->reader_app != 0 && st->reader_state == READER_OPEN);
+}
+
+static void widget_quad_build(AppState *st) {
+    MeshBuilder mb;
+    mb_init(&mb);
+    make_page(&mb, 1.0f, 1.0f);          /* centered unit XY quad, z=0 */
+    st->widget_quad = mesh_from_builder(&mb);
+    mb_free(&mb);
+}
+
+/* a fixed audition seed (deterministic) + a comfortable preview level */
+#define SYNTH_PLAY_SEED 1u
+#define SYNTH_PLAY_GAIN 0.6f
+
+static void synth_book_play(AppState *st) {
+    /* play_oneshot REFERENCES the buffer (it does not copy — see the sound-bank
+       lifetime note), so each play needs a buffer that outlives its voice. There
+       are (MIX_VOICES - VOICE_ONESHOT_BASE) oneshot voices; a ring that size
+       guarantees a slot's previous voice has been recycled before we reuse it. */
+    static float buf[MIX_VOICES - VOICE_ONESHOT_BASE][SYNTH_RATE];
+    static int   slot = 0;
+    int          n;
+    n = synth_render(st->synth_params, SYNTH_PLAY_SEED, buf[slot], SYNTH_RATE);
+    if (n > 0) play_oneshot(buf[slot], n, SYNTH_PLAY_GAIN, 0.0f);
+    slot = (slot + 1) % (MIX_VOICES - VOICE_ONESHOT_BASE);
+}
+
+/* run the widget UI for the open synth book: hit-test the cursor against the
+   page, lay out the page, service Sound/Roll. The emitted draw-list lives in
+   st->widget_ctx for the render pass (Task 7) to walk. */
+static void synth_book_input(AppState *st, GLFWwindow *w, sol_bool lmb) {
+    mat4        page;
+    float       wb, zh, xf, mg, px = 0.0f, py = 0.0f;
+    sol_bool    in;
+    SynthAction act;
+    if (st->widget_quad.index_count == 0) widget_quad_build(st);
+    page = reader_page_matrix(st, &wb, &zh, &xf, &mg);
+    in   = page_under_cursor(st, w, page, wb, zh, &px, &py);
+    widget_begin(&st->widget_ctx, px, py, in, lmb);
+    act = app_synth_page(&st->widget_ctx, st->synth_params,
+                         xf + mg, zh - mg,
+                         (wb - mg) - (xf + mg), 2.0f * (zh - mg));
+    widget_end(&st->widget_ctx);
+    if (act == SYNTH_ACT_PLAY) {
+        synth_book_play(st);
+    } else if (act == SYNTH_ACT_ROLL) {
+        app_synth_roll(st->synth_params, &st->synth_rng);
+        synth_book_play(st);
+    }
+}
+
 /* Open `handle` as a book. A codex rises as ITSELF (its own build and
    leather, read from the cover child's params — the open refs share the
    closed schema's prefix); a FILE/ALIAS card rises as the default codex:
@@ -6042,6 +6132,7 @@ static void reader_open(AppState *st, sol_u32 handle) {
         if (st->reader_app) {
             st->reader_editable = SOL_FALSE;   /* an app book types nothing */
             synth_book_load(st, root);
+            memset(&st->widget_ctx, 0, sizeof st->widget_ctx);   /* no stale active_id across sessions */
         }
     }
     st->reader_page   = 0;
@@ -8227,13 +8318,29 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     }
     st->inv_was_open = st->inv_open;
 
+    /* the synth book frees the cursor for pointing at page widgets (mirrors the
+       inventory toggle); first-person look re-locks on close. */
+    {
+        sol_bool app_now = reader_is_app(st);
+        if (app_now && !st->reader_app_was) {
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            st->mouse_skip = 2;
+        } else if (!app_now && st->reader_app_was &&
+                   !st->inv_open && !st->editor.active) {
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            st->mouse_skip = 2;
+        }
+        st->reader_app_was = app_now;
+    }
+
     /* FOCUS (item 8 piece 5): while a note is open for typing, the keyboard
        is TEXT — chars route to the note (on_char/on_key) and every button
        below goes quiet, so 'w' writes a letter instead of walking. A click
        blurs (saving) without also picking — the standard text-field deal:
        the first click leaves the field, the next one acts. The inventory
        screen joins this gate: it suppresses movement and click-takes items. */
-    if (st->edit_handle != 0 || st->palette.open || reader_is_editing(st) || st->inv_open) {
+    if (st->edit_handle != 0 || st->palette.open || reader_is_editing(st) ||
+        st->inv_open || reader_is_app(st)) {
         in->forward = in->back = in->left = in->right = SOL_FALSE;
         in->up = in->down = SOL_FALSE;
         in->look_dx = 0.0f;
@@ -8277,6 +8384,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     }
                 }
             }
+            st->lmb_was_down = lmb;
+        } else if (reader_is_app(st)) {     /* the synth book's widget UI */
+            sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            synth_book_input(st, w, lmb);
             st->lmb_was_down = lmb;
         }
         st->mouse_last_x = mx;       /* keep tracking: no look-jump on blur */
