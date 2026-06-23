@@ -2961,7 +2961,12 @@ static float room_ambient(Scene *s, sol_u32 anchor) {
 static sol_u32 group_root(Scene *s, sol_u32 handle) {
     SceneObject *o = scene_get(s, handle);
     while (o && o->parent != 0) {
+        SceneObject *par = scene_get(s, o->parent);
         if (scene_meta_get(s, o->parent, "room_type")) break;  /* the room boundary */
+        if (par && par->mesh_ref &&
+            (furniture_is_shelf(par->mesh_ref) || furniture_is_table(par->mesh_ref)))
+            break;                              /* furniture: a FILED item (book/card)
+                                                   is its own group, only placed on it */
         handle = o->parent;
         o = scene_get(s, handle);
     }
@@ -7249,7 +7254,11 @@ static void carry_update(AppState *st) {
        table standing in front of a wall should win the aim. descend_wall_mount
        (below) can't see furniture, so checking the wall first would mount on the
        wall behind the shelf — the same reason the whiteboard is checked first. */
-    if (o->mesh_ref && strcmp(o->mesh_ref, "card") == 0 && o->kind != KIND_FOLDER) {
+    {
+        sol_bool carry_is_card  = (sol_bool)(o->mesh_ref &&
+            strcmp(o->mesh_ref, "card") == 0 && o->kind != KIND_FOLDER);
+        sol_bool carry_is_codex = (sol_bool)(codex_cover_child(&st->scene, st->carried) != 0);
+        if (carry_is_card || carry_is_codex) {
         sol_u32 fi;
         for (fi = 0; fi < st->scene.count; fi++) {
             SceneObject *f = &st->scene.objects[fi];
@@ -7267,7 +7276,31 @@ static void carry_update(AppState *st) {
                                        fpos, fyaw, ray, &loc)) continue;
             st->file_aim    = SOL_TRUE;
             st->file_target = f->handle;
-            if (furniture_is_shelf(f->mesh_ref)) {
+            if (carry_is_codex) {
+                float bh = mesh_ref_param("book_cover", (const float *)0, 0, "h");
+                sol_u32 ccov = codex_cover_child(&st->scene, st->carried);
+                if (ccov != 0) {
+                    SceneObject *cco = scene_get(&st->scene, ccov);
+                    if (cco) bh = mesh_ref_param("book_cover", cco->mesh_params,
+                                                 cco->mesh_param_count, "h");
+                }
+                /* upright, spine toward the room — FURNITURE-LOCAL (the parent's
+                   yaw is applied by the shelf transform, so no fyaw here, exactly
+                   like the card's plain Y(90) above). */
+                st->file_rot = quat_mul(
+                    quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)),
+                    quat_from_axis_angle(vec3_make(1.0f,0.0f,0.0f), sol_radians(-90.0f)));
+                if (furniture_is_shelf(f->mesh_ref)) {
+                    int idx = shelf_free_slot(st, f->handle, st->carried,
+                                              f->mesh_params, f->mesh_param_count);
+                    st->file_local = furniture_shelf_slot(f->mesh_params,
+                                              f->mesh_param_count, idx);
+                    st->file_local.y += bh * 0.5f;   /* base rests on the board */
+                } else {
+                    st->file_local = furniture_table_point(f->mesh_params,
+                                              f->mesh_param_count, loc);
+                }
+            } else if (furniture_is_shelf(f->mesh_ref)) {
                 int idx = shelf_free_slot(st, f->handle, st->carried,
                                           f->mesh_params, f->mesh_param_count);
                 st->file_local = furniture_shelf_slot(f->mesh_params, f->mesh_param_count, idx);
@@ -7279,12 +7312,17 @@ static void carry_update(AppState *st) {
             }
             /* preview: hover the carried tablet at the resting spot (furniture-local -> world) */
             {
-                mat4 fm = scene_world_matrix(&st->scene, f);
-                vec3 wp = mat4_mul_point(fm, st->file_local);
+                mat4 fm  = scene_world_matrix(&st->scene, f);
+                vec3 wp  = mat4_mul_point(fm, st->file_local);
+                quat fwr = scene_world_rotation(&st->scene, f->handle);
+                quat wr  = quat_mul(fwr, st->file_rot);   /* the dropped WORLD rot */
                 o->pos = scene_world_to_local(&st->scene, o->parent, wp);
-                o->rot = st->file_rot;   /* show the resting orientation while aimed */
+                o->rot = (o->parent != 0)
+                       ? quat_mul(quat_conjugate(scene_world_rotation(&st->scene, o->parent)), wr)
+                       : wr;   /* compose the shelf yaw — match the drop, not file_rot-as-world */
             }
             return;
+        }
         }
     }
     /* image card not resting on furniture: mount it as a picture — on a
