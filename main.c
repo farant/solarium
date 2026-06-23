@@ -2546,6 +2546,7 @@ typedef struct AppState {
     RhiRenderTarget brdf_lut_rt;       /* BRDF integration LUT, 2D RG (C2) */
     RhiPipeline     brdf_lut_pipeline;
     sol_bool    bs_was_down;    /* edge-detect tombstone dismissal (Backspace) */
+    sol_bool    textsize_was_down; /* edge-detect +/- note text sizing */
     sol_bool    g_was_down;     /* edge-detect gather-to-workspace (P3 item 6d) */
     sol_bool    night;          /* P8 item 9: the day/night lever's state (` toggles) */
     /* the yardstick (P4 item 2): smoothed CPU-side timings + draw counts.
@@ -8486,6 +8487,32 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
         }
         st->bs_was_down = bs_now;
+    }
+
+    /* +/- resize the SELECTED note's body text. read_input has already returned
+       above if a note is being edited or the palette is open, so these keys are
+       free here. =/+ grows, -/_ shrinks; numpad +/- too. */
+    {
+        sol_bool plus_now  = (sol_bool)(glfwGetKey(w, GLFW_KEY_EQUAL) == GLFW_PRESS ||
+                                        glfwGetKey(w, GLFW_KEY_KP_ADD) == GLFW_PRESS);
+        sol_bool minus_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_MINUS) == GLFW_PRESS ||
+                                        glfwGetKey(w, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS);
+        sol_bool ts_now    = (sol_bool)(plus_now || minus_now);
+        if (ts_now && !st->textsize_was_down && st->selected_handle != 0) {
+            SceneObject *o = scene_get(&st->scene, st->selected_handle);
+            if (o && o->kind == KIND_NOTE) {
+                float ts = note_text_size(&st->scene, st->selected_handle);
+                char  tb[32];
+                ts += plus_now ? 0.004f : -0.004f;
+                if (ts < 0.015f) ts = 0.015f;
+                if (ts > 0.060f) ts = 0.060f;
+                snprintf(tb, sizeof tb, "%.4f", (double)ts);
+                scene_meta_set(&st->scene, st->selected_handle, "text_size", tb);
+                note_autosize(st, st->selected_handle);
+                scene_save(&st->scene, "scene.stml");
+            }
+        }
+        st->textsize_was_down = ts_now;
     }
 
     /* exposure scrub: '[' down, ']' up (held; dt-scaled). The readout lives
