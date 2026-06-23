@@ -6903,7 +6903,9 @@ static void carry_update(AppState *st) {
     if (st->carried == 0) return;
     o = scene_get(&st->scene, st->carried);
     if (!o) { st->carried = 0; return; }                   /* it vanished */
-    st->plant_aim = SOL_FALSE;
+    st->plant_aim   = SOL_FALSE;   /* reset all three aim flags up-front so an */
+    st->picture_aim = 0;           /* early return from ANY block below can't   */
+    st->file_aim    = SOL_FALSE;   /* leave a stale flag the drop path acts on  */
     if (o->kind == KIND_FOLDER) {
         sol_u32 room = descend_room_at(&st->scene, st->camera.pos);
         if (room != 0) {
@@ -6923,7 +6925,50 @@ static void carry_update(AppState *st) {
             }
         }
     }
-    st->picture_aim = 0;
+    /* Filing onto furniture is tried BEFORE wall/whiteboard mounting: a shelf or
+       table standing in front of a wall should win the aim. descend_wall_mount
+       (below) can't see furniture, so checking the wall first would mount on the
+       wall behind the shelf — the same reason the whiteboard is checked first. */
+    if (o->mesh_ref && strcmp(o->mesh_ref, "card") == 0 && o->kind != KIND_FOLDER) {
+        sol_u32 fi;
+        for (fi = 0; fi < st->scene.count; fi++) {
+            SceneObject *f = &st->scene.objects[fi];
+            vec3  fpos, loc; float fyaw; quat fq;
+            Ray   ray;
+            if (!f->mesh_ref) continue;
+            if (!furniture_is_table(f->mesh_ref) && !furniture_is_shelf(f->mesh_ref)) continue;
+            if (!scene_object_active(&st->scene, f->handle)) continue;
+            fpos = object_world_pos(&st->scene, f->handle);
+            fq   = f->rot;
+            fyaw = 2.0f * (float)atan2((double)fq.y, (double)fq.w);
+            ray.origin = st->camera.pos;
+            ray.dir    = camera_forward(&st->camera);
+            if (!furniture_surface_aim(f->mesh_ref, f->mesh_params, f->mesh_param_count,
+                                       fpos, fyaw, ray, &loc)) continue;
+            st->file_aim    = SOL_TRUE;
+            st->file_target = f->handle;
+            if (furniture_is_shelf(f->mesh_ref)) {
+                int idx = shelf_free_slot(st, f->handle, st->carried,
+                                          f->mesh_params, f->mesh_param_count);
+                st->file_local = furniture_shelf_slot(f->mesh_params, f->mesh_param_count, idx);
+                st->file_rot   = quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)); /* spine: edge-out */
+            } else {
+                st->file_local = furniture_table_point(f->mesh_params, f->mesh_param_count, loc);
+                st->file_rot   = quat_mul(quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), st->place_yaw),
+                                          quat_from_axis_angle(vec3_make(1.0f,0.0f,0.0f), sol_radians(-90.0f))); /* flat + carry yaw */
+            }
+            /* preview: hover the carried tablet at the resting spot (furniture-local -> world) */
+            {
+                mat4 fm = scene_world_matrix(&st->scene, f);
+                vec3 wp = mat4_mul_point(fm, st->file_local);
+                o->pos = scene_world_to_local(&st->scene, o->parent, wp);
+                o->rot = st->file_rot;   /* show the resting orientation while aimed */
+            }
+            return;
+        }
+    }
+    /* image card not resting on furniture: mount it as a picture — on a
+       whiteboard under the aim, else on the wall behind. */
     if (o->mesh_ref && strcmp(o->mesh_ref, "card") == 0 && o->kind != KIND_FOLDER &&
         o->content && reader_is_image_path(o->content)) {
         float   pw = mesh_ref_param("picture", (const float *)0, 0, "w");
@@ -6968,45 +7013,6 @@ static void carry_update(AppState *st) {
                 o->rot = st->picture_rot;
                 return;
             }
-        }
-    }
-    st->file_aim = SOL_FALSE;
-    if (o->mesh_ref && strcmp(o->mesh_ref, "card") == 0 && o->kind != KIND_FOLDER) {
-        sol_u32 fi;
-        for (fi = 0; fi < st->scene.count; fi++) {
-            SceneObject *f = &st->scene.objects[fi];
-            vec3  fpos, loc; float fyaw; quat fq;
-            Ray   ray;
-            if (!f->mesh_ref) continue;
-            if (!furniture_is_table(f->mesh_ref) && !furniture_is_shelf(f->mesh_ref)) continue;
-            if (!scene_object_active(&st->scene, f->handle)) continue;
-            fpos = object_world_pos(&st->scene, f->handle);
-            fq   = f->rot;
-            fyaw = 2.0f * (float)atan2((double)fq.y, (double)fq.w);
-            ray.origin = st->camera.pos;
-            ray.dir    = camera_forward(&st->camera);
-            if (!furniture_surface_aim(f->mesh_ref, f->mesh_params, f->mesh_param_count,
-                                       fpos, fyaw, ray, &loc)) continue;
-            st->file_aim    = SOL_TRUE;
-            st->file_target = f->handle;
-            if (furniture_is_shelf(f->mesh_ref)) {
-                int idx = shelf_free_slot(st, f->handle, st->carried,
-                                          f->mesh_params, f->mesh_param_count);
-                st->file_local = furniture_shelf_slot(f->mesh_params, f->mesh_param_count, idx);
-                st->file_rot   = quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)); /* spine: edge-out */
-            } else {
-                st->file_local = furniture_table_point(f->mesh_params, f->mesh_param_count, loc);
-                st->file_rot   = quat_mul(quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), st->place_yaw),
-                                          quat_from_axis_angle(vec3_make(1.0f,0.0f,0.0f), sol_radians(-90.0f))); /* flat + carry yaw */
-            }
-            /* preview: hover the carried tablet at the resting spot (furniture-local -> world) */
-            {
-                mat4 fm = scene_world_matrix(&st->scene, f);
-                vec3 wp = mat4_mul_point(fm, st->file_local);
-                o->pos = scene_world_to_local(&st->scene, o->parent, wp);
-                o->rot = st->file_rot;   /* show the resting orientation while aimed */
-            }
-            return;
         }
     }
     if (o->mesh_ref && (strcmp(o->mesh_ref, "board") == 0 ||
