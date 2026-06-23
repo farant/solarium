@@ -6904,7 +6904,7 @@ static float note_text_size(Scene *s, sol_u32 h) {
     const char *v = scene_meta_get(s, h, "text_size");
     float ts = v ? (float)atof(v) : 0.028f;
     if (ts < 0.015f) ts = 0.015f;
-    if (ts > 0.060f) ts = 0.060f;
+    if (ts > 0.180f) ts = 0.180f;
     return ts;
 }
 
@@ -8558,7 +8558,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 char  tb[32];
                 ts += plus_now ? 0.004f : -0.004f;
                 if (ts < 0.015f) ts = 0.015f;
-                if (ts > 0.060f) ts = 0.060f;
+                if (ts > 0.180f) ts = 0.180f;
                 snprintf(tb, sizeof tb, "%.4f", (double)ts);
                 scene_meta_set(&st->scene, st->selected_handle, "text_size", tb);
                 note_autosize(st, st->selected_handle);
