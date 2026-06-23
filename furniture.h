@@ -15,15 +15,6 @@ int         furniture_catalog_cycle(int i, int dir);/* +/-1, wraps */
 sol_bool    furniture_is_table(const char *mesh_ref);
 sol_bool    furniture_is_shelf(const char *mesh_ref);
 
-/* the i-th spine's LOCAL position on a bookshelf (fills a shelf left-to-right,
-   then the next shelf down). `params` = the bookshelf mesh_params. */
-vec3 furniture_shelf_slot(const float *params, int count, int i);
-
-/* how many distinct spine slots a bookshelf holds (cols * shelves) before
-   furniture_shelf_slot wraps and re-uses positions. Caller scans 0..capacity-1
-   to find the lowest free slot when filing. */
-int  furniture_shelf_capacity(const float *params, int count);
-
 /* Pack n items of along-shelf widths widths[0..n) left-to-right across the
    bookshelf, each followed by a small gap, wrapping to the next row (0 = top
    board ... sh = floor board) when an item won't fit the remaining row width.
