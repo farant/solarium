@@ -2671,6 +2671,8 @@ typedef struct AppState {
     sol_u32     place_label_target; /* handle awaiting a bookshelf-label prompt; 0 = none */
     sol_bool    lmb_was_down;
     sol_bool    editor_del_was;    /* edge-detect Delete/Backspace -> disconnect (editor) */
+    char        editor_resize_key[160];  /* a resized island's mesh registry key, captured at press */
+    sol_bool    editor_resize_keyed;     /* a terrain resize is in flight (rebuild its mesh on commit) */
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
     /* drag-to-place (P3 item 4) */
     sol_u32     floor_handle;      /* room structure: never draggable (§1.2 is
@@ -7986,6 +7988,73 @@ static Command g_commands[] = {
 
 #define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
 
+/* add `root` and every descendant (whose parent chain reaches root) to out[]. */
+static void gather_subtree(Scene *s, sol_u32 root, sol_u32 *out, int *n, int cap) {
+    sol_u32 i;
+    if (*n < cap) out[(*n)++] = root;
+    for (i = 0; i < s->count && *n < cap; i++) {
+        sol_u32  h = s->objects[i].handle, p;
+        int      guard = 0;
+        sol_bool desc = SOL_FALSE;
+        if (h == root) continue;
+        p = s->objects[i].parent;
+        while (p != 0 && guard++ < 256) {
+            SceneObject *o;
+            if (p == root) { desc = SOL_TRUE; break; }
+            o = scene_get(s, p);
+            if (!o) break;
+            p = o->parent;
+        }
+        if (desc && *n < cap) out[(*n)++] = h;
+    }
+}
+
+/* Editor: delete a terrain island and everything tied to it — its dressing
+   subtree, every church plot-linked to it (abbey) + their subtrees, and every
+   walkway connecting to it — then re-derive the fields and save. */
+static void editor_delete_island(AppState *st, sol_u32 island) {
+    sol_u32      victims[512];
+    int          nv = 0, vi;
+    char         nidbuf[64];   /* a nid is 26 chars; 64 is plenty */
+    sol_u32      i, j;
+    SceneObject *io = scene_get(&st->scene, island);
+    nidbuf[0] = '\0';
+    if (io && io->nid) { strncpy(nidbuf, io->nid, sizeof nidbuf - 1); nidbuf[sizeof nidbuf - 1] = '\0'; }
+    gather_subtree(&st->scene, island, victims, &nv, 512);
+    if (nidbuf[0]) {                       /* plot-linked churches + their subtrees */
+        for (i = 0; i < st->scene.count; i++) {
+            sol_u32     h  = st->scene.objects[i].handle;
+            const char *rt = scene_meta_get(&st->scene, h, "room_type");
+            const char *pl = scene_meta_get(&st->scene, h, "plot");
+            if (rt && strcmp(rt, "church") == 0 && pl && strcmp(pl, nidbuf) == 0)
+                gather_subtree(&st->scene, h, victims, &nv, 512);
+        }
+    }
+    for (i = 0; i < st->scene.count; i++) {     /* walkways connecting to the island */
+        SceneObject *o = &st->scene.objects[i];
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
+        for (j = 0; j < o->rel_count; j++) {
+            if (strcmp(o->relations[j].type, "connects") == 0 &&
+                o->relations[j].target == island) {
+                if (nv < 512) victims[nv++] = o->handle;
+                break;
+            }
+        }
+    }
+    for (vi = 0; vi < nv; vi++) scene_remove(&st->scene, victims[vi]);
+    st->selected_handle    = 0;
+    st->editor.room        = 0;
+    st->editor.selected_wk = 0;
+    meadow_rebuild(st);
+    forest_rebuild(st);
+    ornament_rebuild(st);
+    connections_rebuild(st);
+    collide_rebuild(&st->colliders, &st->scene);
+    bvh_refresh(st);
+    scene_save(&st->scene, "scene.stml");
+    printf("deleted an island\n");
+}
+
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
     sol_bool tab_now, dragging, fp;
@@ -8171,6 +8240,14 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     st->selected_handle    = st->editor.selected_wk;
                 } else {
                     st->selected_handle = st->editor.room;       /* highlight the room */
+                    /* a terrain RESIZE rebuilds the registry mesh on commit;
+                       capture the OLD key now, before drag rewrites the params. */
+                    st->editor_resize_keyed = SOL_FALSE;
+                    if (st->editor.action == EDIT_RESIZE) {
+                        SceneObject *ro = scene_get(&st->scene, st->editor.room);
+                        if (ro && ro->mesh_ref && strcmp(ro->mesh_ref, "terrain") == 0)
+                            st->editor_resize_keyed = mesh_asset_key(ro, st->editor_resize_key);
+                    }
                 }
             } else if (lmb && st->lmb_was_down) {
                 editor_drag(&st->editor, &st->scene, &st->camera, nx, ny, aspect);
@@ -8564,12 +8641,20 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     }
     st->editor.was_active = st->editor.active;
 
-    /* Delete / Backspace: drop the selected walkway while editing */
+    /* Delete / Backspace: drop the selected walkway, else delete the selected
+       island/abbey (terrain) — its dressing, plot churches, and walkways go too. */
     {
         sol_bool del_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_DELETE) == GLFW_PRESS ||
                                       glfwGetKey(w, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
-        if (st->editor.active && del_now && !st->editor_del_was)
-            editor_delete_selected(&st->editor, &st->scene);
+        if (st->editor.active && del_now && !st->editor_del_was) {
+            if (st->editor.selected_wk != 0) {
+                editor_delete_selected(&st->editor, &st->scene);
+            } else {
+                SceneObject *so = scene_get(&st->scene, st->selected_handle);
+                if (so && so->mesh_ref && strcmp(so->mesh_ref, "terrain") == 0)
+                    editor_delete_island(st, st->selected_handle);
+            }
+        }
         st->editor_del_was = del_now;
     }
 
@@ -8579,6 +8664,22 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        the solver is fast and the rebuild is scoped to a few meshes, not all ~19.
        Colliders aren't used by the RTS camera, so they wait for release. */
     if (st->editor.commit) {
+        if (st->editor_resize_keyed) {           /* a terrain island was resized: re-tessellate */
+            SceneObject *ro = scene_get(&st->scene, st->editor.room);
+            asset_release(&g_mesh_assets, st->editor_resize_key);
+            if (ro) memset(&ro->mesh, 0, sizeof ro->mesh);   /* drop the borrow; resolve rebuilds */
+            scene_resolve_meshes(&st->scene);
+            st->editor_resize_keyed = SOL_FALSE;
+        }
+        {   /* an island move/resize relocates its WORLD-baked FIELD data
+               (grass, forest, gothic ornament) — re-derive it at the new pose */
+            SceneObject *er = scene_get(&st->scene, st->editor.room);
+            if (er && er->mesh_ref && strcmp(er->mesh_ref, "terrain") == 0) {
+                meadow_rebuild(st);
+                forest_rebuild(st);
+                ornament_rebuild(st);
+            }
+        }
         connections_rebuild(st);
         collide_rebuild(&st->colliders, &st->scene);
         scene_save(&st->scene, "scene.stml");
@@ -11206,9 +11307,13 @@ static void editor_draw_overlay(AppState *st) {
         float    px[4], py[4], psx, psy;
         int      k, ok = 1;
         sol_bool active_room;
-        if (st->scene.objects[i].mesh_ref) continue;
-        if (!scene_meta_get(&st->scene, h, "room_type")) continue;
-        if (!scene_object_active(&st->scene, h)) continue;   /* only the active world's rooms */
+        if (st->scene.objects[i].mesh_ref &&
+            strcmp(st->scene.objects[i].mesh_ref, "terrain") != 0) continue;
+        {
+            const char *rt = scene_meta_get(&st->scene, h, "room_type");
+            if (!rt || strcmp(rt, "church") == 0) continue;  /* a church rides its hill */
+        }
+        if (!scene_object_active(&st->scene, h)) continue;   /* only the active world */
         r = editor_room_rect(&st->scene, h);
         cw[0] = vec3_make(r.cx - r.hw, r.floor_y, r.cz - r.hd);
         cw[1] = vec3_make(r.cx + r.hw, r.floor_y, r.cz - r.hd);
@@ -11226,10 +11331,12 @@ static void editor_draw_overlay(AppState *st) {
             else
                 ui_line(px[k], py[k], px[n], py[n], 1.5f, 0.65f, 0.72f, 0.80f, 0.85f);
         }
-        /* corner resize handles */
-        for (k = 0; k < 4; k++)
-            ui_quad(px[k] - hs, py[k] - hs, 2.0f * hs, 2.0f * hs,
-                    0.92f, 0.92f, 0.96f, 0.95f);
+        /* corner resize handles — only for resizable footprints (rooms,
+           church-less islands); an abbey hill shows move + connect, no resize */
+        if (editor_resizable(&st->scene, h))
+            for (k = 0; k < 4; k++)
+                ui_quad(px[k] - hs, py[k] - hs, 2.0f * hs, 2.0f * hs,
+                        0.92f, 0.92f, 0.96f, 0.95f);
         /* connection node (port) above the center */
         port = vec3_make(r.cx, r.floor_y + EDITOR_PORT_LIFT, r.cz);
         if (editor_world_to_screen(st, aspect, port, &psx, &psy))
