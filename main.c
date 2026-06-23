@@ -7281,7 +7281,9 @@ static void cmd_carry_toggle(AppState *st) {
         sol_u32 t = carry_target(st, st->selected_handle);
         if (t != 0) {
             SceneObject *co = scene_get(&st->scene, t);
-            st->carried = t;
+            st->carried  = t;
+            st->place_yaw = 0.0f;                  /* a fresh grab starts un-spun;
+                                                      ',' / '.' rotate from here */
             if (co) {
                 st->carry_origin      = co->pos;   /* remember its spot, to snap it back */
                 st->carry_prev_parent = co->parent; /* and its parent (e.g. a shelf) + rot */
@@ -7651,6 +7653,10 @@ static void carry_update(AppState *st) {
     hold    = vec3_add(st->camera.pos, vec3_scale(fwd, CARRY_HOLD_DIST));
     hold.y -= CARRY_HOLD_DROP;
     o->pos  = scene_world_to_local(&st->scene, o->parent, hold);
+    /* free-float carry: ',' / '.' spin the held object around vertical (place_yaw)
+       from its pick-up orientation, and the angle persists when it's dropped. */
+    o->rot  = quat_mul(quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), st->place_yaw),
+                       st->carry_prev_rot);
 }
 
 #define HOME_FLOOR_Y 12.0f   /* the home room floats this high in the sky */
