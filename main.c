@@ -6195,9 +6195,10 @@ static void reader_update(AppState *st, float dt) {
     st->reader_pos = vec3_add(st->reader_a_pos,
                      vec3_scale(vec3_sub(st->reader_b_pos, st->reader_a_pos), s));
     st->reader_rot = quat_slerp(st->reader_a_rot, st->reader_b_rot, s);
-    /* an editable book swings the look to centre as it rises (runs AFTER
-       camera_update, so it overrides this frame's mouse-look) */
-    if (st->reader_state == READER_RISING && st->reader_editable &&
+    /* an editable OR app book swings the look to centre as it rises (runs
+       AFTER camera_update, so it overrides this frame's mouse-look) */
+    if (st->reader_state == READER_RISING &&
+        (st->reader_editable || st->reader_app) &&
         (st->camera.mode == CAMERA_WALK || st->camera.mode == CAMERA_FLY)) {
         float yd = st->reader_cam_yaw1 - st->reader_cam_yaw0;
         while (yd >  SOL_PI) yd -= 2.0f * SOL_PI;
