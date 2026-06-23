@@ -155,6 +155,16 @@ if [ "$MODE" = "inventorytest" ]; then
     exit 0
 fi
 
+# widgettest: the pure immediate-mode widget core (scene-free C89). libc only.
+if [ "$MODE" = "widgettest" ]; then
+    set -x
+    clang -std=c89 -pedantic-errors -Werror -g -fsanitize=address,undefined \
+        widget.c widget_test.c \
+        -o widget_test
+    echo "built ./widget_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
 # imagetest: the pure aspect-fit math in image.c (image_fit_box). image.c pulls
 # stb, so this rides -std=c11 like skeltest, not c89-pedantic.
 if [ "$MODE" = "imagetest" ]; then
