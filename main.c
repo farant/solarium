@@ -2673,6 +2673,7 @@ typedef struct AppState {
     sol_bool    editor_del_was;    /* edge-detect Delete/Backspace -> disconnect (editor) */
     char        editor_resize_key[160];  /* a resized island's mesh registry key, captured at press */
     sol_bool    editor_resize_keyed;     /* a terrain resize is in flight (rebuild its mesh on commit) */
+    sol_bool    show_hud;                 /* the upper-left debug/stats card (default on) */
     double      press_x, press_y;  /* left-press position, for orbit tap-vs-drag */
     /* drag-to-place (P3 item 4) */
     sol_u32     floor_handle;      /* room structure: never draggable (§1.2 is
@@ -7958,6 +7959,11 @@ static void cmd_inventory_open(AppState *st) {
     st->inv_open = SOL_TRUE;
 }
 
+/* palette: show/hide the upper-left stats card. */
+static void cmd_toggle_hud(AppState *st) {
+    st->show_hud = (sol_bool)!st->show_hud;
+}
+
 /* palette (top-down): drop a FREE room — a "mirror" room with NO source_path,
    so it is inert to the filesystem (no scan/sync) yet a first-class editor
    footprint (move/resize/connect). Lands on the floor plane under the screen
@@ -8028,7 +8034,8 @@ static Command g_commands[] = {
     { "Place furniture",             NULL, 0,          cmd_place_furniture,   NULL,                  SOL_FALSE },
     { "Top-down editor",             NULL, 0,          cmd_toggle_editor,     NULL,                  SOL_FALSE },
     { "Disconnect selected",         NULL, 0,          cmd_disconnect,        can_disconnect,        SOL_FALSE },
-    { "Add room",                    NULL, 0,          cmd_add_room,          NULL,                  SOL_FALSE }
+    { "Add room",                    NULL, 0,          cmd_add_room,          NULL,                  SOL_FALSE },
+    { "Toggle stats card",           NULL, 0,          cmd_toggle_hud,        NULL,                  SOL_FALSE }
 };
 
 #define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
@@ -10245,6 +10252,7 @@ static int init_scene(AppState *state) {
         }
         state->bloom_on = SOL_TRUE;
     }
+    state->show_hud = SOL_TRUE;        /* the stats card shows by default */
 
     /* the meadow's machinery (P4 item 3 piece 2): ONE crossed-tapered-quad
        tuft (stream 0) shared by every island; the per-island instance
@@ -12441,7 +12449,9 @@ static void render(AppState *state) {
     us = (float)state->fb_height / 1080.0f;
 
     /* the debug readout panel — live state, monospace-aligned (3c; this
-       retired the window-title sprintf hack). ui_text positions BASELINES. */
+       retired the window-title sprintf hack). ui_text positions BASELINES.
+       ':' "Toggle stats card" hides it. */
+    if (state->show_hud) {
     ui_quad(8.0f * us, 8.0f * us, 340.0f * us, 190.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
     ui_quad_outline(8.0f * us, 8.0f * us, 340.0f * us, 190.0f * us,
                     1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
@@ -12539,6 +12549,7 @@ static void render(AppState *state) {
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
         }
     }
+    }   /* show_hud */
 
     /* first-person crosshair at the pick point (screen centre, via the
        viewport-relative units) — orbit mode picks at the cursor instead */
