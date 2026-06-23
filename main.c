@@ -5688,6 +5688,19 @@ static void reader_load_pages(AppState *st, sol_u32 root) {
     st->reader_page       = 0;
 }
 
+static void reader_save_pages(AppState *st) {
+    char key[16], cbuf[16];
+    int  i;
+    if (!st->reader_editable || !st->reader_pages || st->reader_source == 0) return;
+    snprintf(cbuf, sizeof cbuf, "%d", st->reader_page_count);
+    scene_meta_set(&st->scene, st->reader_source, "pagecount", cbuf);
+    for (i = 0; i < st->reader_page_count; i++) {
+        snprintf(key, sizeof key, "page%d", i);
+        scene_meta_set(&st->scene, st->reader_source, key,
+                       st->reader_pages[i] ? st->reader_pages[i] : "");
+    }
+}
+
 static float reader_field_w(const AppState *st) {
     const float *bp = st->reader_params;
     float wb = bp[0] - bp[4];
@@ -5922,6 +5935,12 @@ static void reader_build_leaf(AppState *st, float alpha, float lag);  /* below *
 static void reader_close(AppState *st) {
     if (st->reader_state == READER_IDLE || st->reader_state == READER_RETURNING)
         return;
+    if (st->reader_editable) {
+        reader_save_pages(st);
+        scene_save(&st->scene, "scene.stml");
+        reader_free_pages(st);
+        st->reader_editable = SOL_FALSE;
+    }
     st->reader_a_pos = st->reader_pos;
     st->reader_a_rot = st->reader_rot;
     st->reader_b_pos = st->reader_rest_pos;
