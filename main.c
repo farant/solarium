@@ -6907,6 +6907,56 @@ static float note_text_size(Scene *s, sol_u32 h) {
     return ts;
 }
 
+/* THE authority for a note's height + vertical position: fit the card to its
+   wrapped text at the current width and size, top-anchored (the top edge stays
+   put, the card grows downward), but never shorter than meta["min_h"]. Rebuilds
+   the registry-shared "card" mesh only when the height actually changes; width
+   and horizontal position are left untouched. */
+static void note_autosize(AppState *st, sol_u32 h) {
+    SceneObject *o = scene_get(&st->scene, h);
+    const char  *txt, *mv;
+    char         wbuf[4096];
+    float        cw, h0, ct, ts, lh, px2m, usable, content_h, min_h, new_h;
+    int          lines;
+    if (!o || o->kind != KIND_NOTE || !st->ui_font) return;
+    if (!o->mesh_ref || strcmp(o->mesh_ref, "card") != 0) return;
+    cw = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "w");
+    h0 = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "h");
+    ct = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "t");
+    ts = note_text_size(&st->scene, h);
+    lh = font_line_height(st->ui_font);
+    px2m = (lh > 0.0f) ? ts / lh : ts;
+    usable = cw - 2.0f * 0.025f;
+    txt = scene_meta_get(&st->scene, h, "text");
+    lines = (txt && txt[0] && usable > 0.0f)
+          ? text_wrap(st->ui_font, txt, px2m, usable, wbuf, (int)sizeof wbuf)
+          : 1;
+    if (lines < 1) lines = 1;
+    content_h = (float)lines * ts + 2.0f * 0.025f;          /* top+bottom margins */
+    mv = scene_meta_get(&st->scene, h, "min_h");
+    min_h = mv ? (float)atof(mv) : 0.5f;                    /* default card height */
+    new_h = (content_h > min_h) ? content_h : min_h;
+    if (new_h < 0.05f) new_h = 0.05f;
+    if (new_h > h0 - 0.001f && new_h < h0 + 0.001f) return; /* unchanged: no rebuild */
+    {   /* top-anchored rebuild: capture the world top-centre, then keep it fixed */
+        mat4 M       = scene_world_matrix(&st->scene, o);
+        vec3 top_w   = mat4_mul_point(M, vec3_make(0.0f, h0, 0.0f));
+        char oldkey[160];
+        sol_bool keyed = mesh_asset_key(o, oldkey);
+        float p3[3];
+        p3[0] = cw; p3[1] = new_h; p3[2] = ct;
+        scene_mesh_params_set(&st->scene, h, p3, 3);
+        if (keyed) asset_release(&g_mesh_assets, oldkey);
+        o = scene_get(&st->scene, h);
+        if (o) {
+            vec3 nb = vec3_make(top_w.x, top_w.y - new_h, top_w.z);
+            memset(&o->mesh, 0, sizeof o->mesh);
+            o->pos = scene_world_to_local(&st->scene, o->parent, nb);
+        }
+        scene_resolve_meshes(&st->scene);
+    }
+}
+
 static void carry_update(AppState *st) {
     SceneObject *o;
     vec3         fwd, hold;
@@ -11640,6 +11690,7 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     st->edit_len += n;
     st->edit_buf[st->edit_len] = '\0';
     scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+    note_autosize(st, st->edit_handle);
 }
 
 /* KEYS are buttons. While a note has focus the only buttons that mean
@@ -11706,10 +11757,12 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
                 st->edit_len--;
             st->edit_buf[st->edit_len] = '\0';
             scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+            note_autosize(st, st->edit_handle);
         } else if (key == GLFW_KEY_ENTER && st->edit_len + 1 < EDIT_BUF_CAP) {
             st->edit_buf[st->edit_len++] = '\n';
             st->edit_buf[st->edit_len]   = '\0';
             scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+            note_autosize(st, st->edit_handle);
         }
         return;                                 /* everything else stays quiet */
     }
