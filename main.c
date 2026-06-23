@@ -2737,6 +2737,8 @@ typedef struct AppState {
     int         reader_page_count;
     int         reader_page;       /* current page (the caret's page) */
     sol_bool    reader_editable;   /* a codex opened as a writable notebook */
+    float       reader_cam_yaw0, reader_cam_yaw1;     /* swing the look to centre */
+    float       reader_cam_pitch0, reader_cam_pitch1; /* the book as it rises */
     const Font *reader_font;       /* mono for code, sans for prose */
     float       reader_px2m;       /* body text scale, meters per font px */
     sol_bool    reader_is_image;       /* this book shows an image, not text */
@@ -5916,9 +5918,22 @@ static void reader_open(AppState *st, sol_u32 handle) {
     st->reader_state  = READER_RISING;
     st->reader_t      = 0.0f;
     if (cover != 0) {                          /* a codex: an editable notebook */
+        vec3  cd  = vec3_sub(st->reader_b_pos, st->camera.pos);
+        float clen = (float)sqrt((double)vec3_dot(cd, cd));
         st->reader_editable = SOL_TRUE;
         reader_load_pages(st, root);
         reader_pack_pages(st);
+        /* swing the camera to centre the held book (the book is placed along the
+           LEVEL forward, so a look up/down would leave it off-screen) */
+        st->reader_cam_yaw0   = st->camera.yaw;
+        st->reader_cam_pitch0 = st->camera.pitch;
+        st->reader_cam_yaw1   = st->camera.yaw;
+        st->reader_cam_pitch1 = st->camera.pitch;
+        if (clen > 1e-4f) {
+            vec3 dir = vec3_scale(cd, 1.0f / clen);
+            st->reader_cam_yaw1   = (float)atan2((double)dir.z, (double)dir.x);
+            st->reader_cam_pitch1 = (float)asin((double)dir.y);
+        }
     } else {
         st->reader_editable = SOL_FALSE;
         reader_load_content(st, o->content);   /* a file/alias card: read-only */
@@ -5978,6 +5993,17 @@ static void reader_update(AppState *st, float dt) {
     st->reader_pos = vec3_add(st->reader_a_pos,
                      vec3_scale(vec3_sub(st->reader_b_pos, st->reader_a_pos), s));
     st->reader_rot = quat_slerp(st->reader_a_rot, st->reader_b_rot, s);
+    /* an editable book swings the look to centre as it rises (runs AFTER
+       camera_update, so it overrides this frame's mouse-look) */
+    if (st->reader_state == READER_RISING && st->reader_editable &&
+        (st->camera.mode == CAMERA_WALK || st->camera.mode == CAMERA_FLY)) {
+        float yd = st->reader_cam_yaw1 - st->reader_cam_yaw0;
+        while (yd >  SOL_PI) yd -= 2.0f * SOL_PI;
+        while (yd < -SOL_PI) yd += 2.0f * SOL_PI;
+        st->camera.yaw   = st->reader_cam_yaw0 + yd * s;
+        st->camera.pitch = st->reader_cam_pitch0 +
+                           (st->reader_cam_pitch1 - st->reader_cam_pitch0) * s;
+    }
     if (st->reader_t >= 1.0f) {
         if (st->reader_state == READER_RISING) {
             st->reader_state = READER_OPEN;
