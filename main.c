@@ -8380,7 +8380,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        decision): the system never throws away the marker for you. Item 8
        extends it to ARROWS: deleting the edge object deletes the relation. */
     {
-        sol_bool bs_now = glfwGetKey(w, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
+        sol_bool bs_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_BACKSPACE) == GLFW_PRESS ||
+                                     glfwGetKey(w, GLFW_KEY_DELETE)    == GLFW_PRESS);
         if (bs_now && !st->bs_was_down && st->selected_handle != 0) {
             SceneObject *o = scene_get(&st->scene, st->selected_handle);
             if (o && o->kind == KIND_TOMBSTONE) {
@@ -8400,6 +8401,22 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 st->selected_handle = 0;
                 scene_save(&st->scene, "scene.stml");
                 printf("removed arrow — the connection is gone\n");
+            } else if (o && o->mesh_ref != NULL &&
+                       strcmp(o->mesh_ref, "picture") == 0) {
+                /* a placed image (on a wall or pinned to a whiteboard): remove
+                   the display copy. The file card already returned to its shelf
+                   when the picture was planted, and the texture is a shared,
+                   session-lived asset — only the per-object mesh buffer goes. */
+                char    akey[160];
+                sol_u32 doomed = st->selected_handle;
+                if (mesh_asset_key(o, akey))
+                    asset_release(&g_mesh_assets, akey);
+                st->selected_handle = 0;
+                if (st->resize_board == doomed) st->resize_board = 0;
+                if (st->move_board   == doomed) st->move_board   = 0;
+                scene_remove(&st->scene, doomed);
+                scene_save(&st->scene, "scene.stml");
+                printf("deleted picture #%u\n", (unsigned)doomed);
             }
         }
         st->bs_was_down = bs_now;
