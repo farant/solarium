@@ -22,6 +22,10 @@ sol_u32 descend_room_at(Scene *s, vec3 p) {
         rt = scene_meta_get(s, o->handle, "room_type");
         if (!rt) continue;
         if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        if (!scene_object_active(s, o->handle)) continue;   /* only the ACTIVE world's
+                                                               rooms — workspaces overlap
+                                                               in space, so an unfiltered
+                                                               hit lands in the wrong one */
         r = editor_room_rect(s, o->handle);
         if (p.x < r.cx - r.hw || p.x > r.cx + r.hw) continue;
         if (p.z < r.cz - r.hd || p.z > r.cz + r.hd) continue;

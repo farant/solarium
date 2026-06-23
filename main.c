@@ -40,6 +40,7 @@
 #include "platform_audio.h"      /* the fifth quarantine: CoreAudio + the ring */
 #include "stml.h"                /* sounds.stml: the ear's hot-reloadable knobs */
 #include "furniture.h"           /* scene-free furniture catalog + meshes (Furniture & Filing) */
+#include "inventory.h"           /* scene-free inventory grid layout math (the bag) */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -2483,6 +2484,8 @@ static RhiTexture build_decal_atlas(void) {
     return rhi_create_texture(px, DECAL_ATLAS_W, DECAL_ATLAS_H, RHI_TEX_RGBA8);
 }
 
+#define INV_THUMB_CAP 64   /* max items the bag tracks / caches at once */
+
 typedef struct AppState {
     int         fb_width, fb_height;
     Editor      editor;         /* top-down spatial-tree editor (zero = inactive) */
@@ -2697,6 +2700,12 @@ typedef struct AppState {
     quat        picture_rot;       /* the picture's local rotation */
     sol_u32     carry_prev_parent; /* the carried object's pre-pickup parent (restore on plant) */
     quat        carry_prev_rot;    /* and its pre-pickup local rotation */
+    /* inventory (the bag): a mesh-less anchor tagged meta["inventory"]; items
+       re-parented under it are "stowed" (scene_object_stowed hides them). */
+    sol_u32     inv_anchor;     /* cached anchor handle; 0 = not created yet     */
+    sol_bool    inv_open;       /* the modal screen is up                        */
+    sol_bool    inv_was_open;   /* edge-detect for the cursor release            */
+    int         inv_page;       /* current page in the grid                      */
     sol_u32     move_board;        /* picture being slid along its wall; 0 = none */
     vec3        move_grab;         /* origin - cursor-hit at grab, so it tracks the cursor */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
@@ -7025,6 +7034,132 @@ static vec3 shelf_append_local(AppState *st, sol_u32 furniture, sol_u32 carried)
     return shelf_item_pos(st, furniture, carried, xs[n], rows[n]);
 }
 
+/* ---- the inventory bag (Inventory feature) ----------------------------- */
+
+/* The bag anchor's handle, found by its meta["inventory"] tag and cached. 0 if
+   no bag exists yet. Resolving by tag (not only the cached field) is what makes
+   a bag persisted in scene.stml visible right after load, before any stow. */
+static sol_u32 inventory_anchor_find(AppState *st) {
+    int i;
+    if (st->inv_anchor != 0 && scene_get(&st->scene, st->inv_anchor) != 0)
+        return st->inv_anchor;
+    for (i = 0; i < (int)st->scene.count; i++) {
+        sol_u32 h = st->scene.objects[i].handle;
+        if (scene_meta_get(&st->scene, h, "inventory")) { st->inv_anchor = h; return h; }
+    }
+    st->inv_anchor = 0;
+    return 0;
+}
+
+/* The bag's anchor, find-or-create: a mesh-less object at the world root tagged
+   meta["inventory"]. NOTE: creating it calls scene_add, which can realloc
+   s->objects — callers must re-fetch any SceneObject* AFTER calling this. */
+static sol_u32 inventory_anchor(AppState *st) {
+    Mesh    empty;
+    vec3    z   = vec3_make(0.0f, 0.0f, 0.0f);
+    quat    q   = quat_identity();
+    vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+    sol_u32 h   = inventory_anchor_find(st);
+    if (h != 0) return h;
+    memset(&empty, 0, sizeof empty);                        /* else create one */
+    st->inv_anchor = scene_add(&st->scene, 0, empty, z, q, one);
+    scene_meta_set(&st->scene, st->inv_anchor, "inventory", "1");
+    return st->inv_anchor;
+}
+
+/* Gather the bag's direct children (one entry per stowed item — a card, a
+   note, a picture, or a codex anchor). Returns the count (<= cap). */
+static int inventory_collect(AppState *st, sol_u32 *out, int cap) {
+    int i, n = 0;
+    sol_u32 anchor = inventory_anchor_find(st);
+    if (anchor == 0) return 0;
+    for (i = 0; i < (int)st->scene.count && n < cap; i++) {
+        if (st->scene.objects[i].parent == anchor)
+            out[n++] = st->scene.objects[i].handle;
+    }
+    return n;
+}
+
+/* The "world changed" rebuild after a stow/take: meshes, materials, colliders,
+   pick BVH, edges, and a save. (Mirrors the load tail + the descend path.) */
+static void inventory_commit(AppState *st) {
+    scene_resolve_meshes(&st->scene);
+    apply_kind_materials(&st->scene);
+    collide_rebuild(&st->colliders, &st->scene);
+    bvh_refresh(st);
+    arrows_rebuild(st);
+    connections_rebuild(st);
+    scene_save(&st->scene, "scene.stml");
+}
+
+/* Stow the carried item: re-parent it under the bag anchor and drop the carry
+   state. The item becomes hidden (scene_object_stowed) on the next frame. */
+static void inventory_stow(AppState *st) {
+    sol_u32      item = st->carried, anchor;
+    SceneObject *o;
+    if (item == 0) return;
+    anchor = inventory_anchor(st);          /* may scene_add -> re-fetch below */
+    o = scene_get(&st->scene, item);
+    if (!o) { st->carried = 0; return; }
+    o->parent = anchor;
+    o->pos    = vec3_make(0.0f, 0.0f, 0.0f);
+    o->rot    = quat_identity();
+    st->carried     = 0;
+    st->plant_aim   = SOL_FALSE;
+    st->file_aim    = SOL_FALSE;
+    st->picture_aim = SOL_FALSE;
+    inventory_commit(st);
+    printf("stowed an item\n");
+}
+
+/* An image card (mesh_ref "card" with an image content) is the reusable
+   "picture" the spec means: the carry/place path (the picture branch in
+   cmd_carry_toggle) already HANGS a copy on the wall and snaps the card back
+   to its pre-carry parent — so taking one with carry_prev_parent = the bag
+   makes a wall-mount return it to the bag automatically. (Identified exactly
+   as the mount path does, main.c:7531.) */
+static sol_bool is_image_card(const SceneObject *o) {
+    return (sol_bool)(o && o->mesh_ref && strcmp(o->mesh_ref, "card") == 0 &&
+                      o->kind != KIND_FOLDER &&
+                      o->content && reader_is_image_path(o->content));
+}
+
+/* Take an item from the bag into the hands: re-parent it to the world (so it
+   is visible while carried) and make it the carried object. An image card
+   gets carry_prev_parent = the bag, so a wall/board mount returns it to the
+   bag (the reusable-picture rule); every other item is unique. Closes the
+   screen. */
+static void inventory_take(AppState *st, sol_u32 item) {
+    SceneObject *o = scene_get(&st->scene, item);
+    vec3         w;
+    sol_bool     img;
+    quat         orot;
+    if (!o) return;
+    w    = carry_place_point(st);           /* a point in front of the camera */
+    img  = is_image_card(o);
+    orot = o->rot;
+    o->parent = 0;                          /* into the world / your hands */
+    o->pos    = w;
+    st->carried = item;
+    /* the bag is GLOBAL: an item taken out JOINS the current workspace (so it
+       is visible and places here, not in the world it was stowed from). Tagged
+       like every other mint (active_ws, or "home" at the base world). */
+    scene_meta_set(&st->scene, item, "workspace",
+                   st->scene.active_ws[0] ? st->scene.active_ws : "home");
+    if (img) {                              /* a wall-mount returns it to the bag */
+        st->carry_prev_parent = inventory_anchor(st);   /* anchor exists (we took from it) */
+        st->carry_origin      = vec3_make(0.0f, 0.0f, 0.0f);
+        st->carry_prev_rot    = quat_identity();
+    } else {
+        st->carry_prev_parent = 0;
+        st->carry_origin      = w;
+        st->carry_prev_rot    = orot;
+    }
+    st->inv_open = SOL_FALSE;
+    inventory_commit(st);
+    printf("took an item from the bag\n");
+}
+
 /* E: put down what you're carrying, else pick up the selected movable object.
    A carried FOLDER, dropped while aiming at a wall, OPENS the folder as a real
    sub-room (door + walkway + its contents) — and the folder card snaps back to
@@ -7784,6 +7919,12 @@ static void cmd_disconnect(AppState *st) {
     editor_delete_selected(&st->editor, &st->scene);
 }
 
+/* I / palette: open the inventory screen (the bag). */
+static void cmd_inventory_open(AppState *st) {
+    st->inv_page = 0;
+    st->inv_open = SOL_TRUE;
+}
+
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
@@ -7794,7 +7935,8 @@ static Command g_commands[] = {
     { "Toggle shadow-map inspector", "M", GLFW_KEY_M, cmd_toggle_shadowmap,  NULL,                  SOL_FALSE },
     { "Toggle day/night",            "`", GLFW_KEY_GRAVE_ACCENT, cmd_toggle_daynight, NULL,         SOL_FALSE },
     { "Cycle color grade",           "9", GLFW_KEY_9, cmd_cycle_grade,       NULL,                  SOL_FALSE },
-    { "Toggle irradiance view",      "I", GLFW_KEY_I, cmd_toggle_irradiance, can_toggle_irradiance, SOL_FALSE },
+    { "Toggle irradiance view",      NULL, 0,        cmd_toggle_irradiance, can_toggle_irradiance, SOL_FALSE },
+    { "Inventory",                   "I",  0,        cmd_inventory_open,    NULL,                  SOL_FALSE },
     { "Cycle prefilter inspector",   "P", GLFW_KEY_P, cmd_cycle_prefilter,   can_cycle_prefilter,   SOL_FALSE },
     { "Cycle text inspector",        "T", GLFW_KEY_T, cmd_cycle_textinspect, can_cycle_textinspect, SOL_FALSE },
     { "Toggle floor-plan overlay",   "J", GLFW_KEY_J, cmd_toggle_floorplan,  NULL,                  SOL_FALSE },
@@ -7826,12 +7968,25 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
     fp = (st->camera.mode != CAMERA_ORBIT);
 
+    /* inventory: release the cursor for clicking on open, restore on close
+       (edge-detect, mirroring the editor's cursor toggle). Runs every frame,
+       before the modal gate below early-returns. */
+    if (st->inv_open && !st->inv_was_open) {
+        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        st->mouse_skip = 2;
+    } else if (!st->inv_open && st->inv_was_open && !st->editor.active) {
+        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        st->mouse_skip = 2;
+    }
+    st->inv_was_open = st->inv_open;
+
     /* FOCUS (item 8 piece 5): while a note is open for typing, the keyboard
        is TEXT — chars route to the note (on_char/on_key) and every button
        below goes quiet, so 'w' writes a letter instead of walking. A click
        blurs (saving) without also picking — the standard text-field deal:
-       the first click leaves the field, the next one acts. */
-    if (st->edit_handle != 0 || st->palette.open || reader_is_editing(st)) {
+       the first click leaves the field, the next one acts. The inventory
+       screen joins this gate: it suppresses movement and click-takes items. */
+    if (st->edit_handle != 0 || st->palette.open || reader_is_editing(st) || st->inv_open) {
         in->forward = in->back = in->left = in->right = SOL_FALSE;
         in->up = in->down = SOL_FALSE;
         in->look_dx = 0.0f;
@@ -7846,6 +8001,35 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         } else if (reader_is_editing(st)) {  /* click closes the book (saves) */
             sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
             if (lmb && !st->lmb_was_down) reader_close(st);
+            st->lmb_was_down = lmb;
+        } else if (st->inv_open) {     /* click a tile to take it; arrows page */
+            sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (lmb && !st->lmb_was_down) {
+                int     ww, wh, n, slot;
+                float   scale, px, py, rx, ry, rw, rh;
+                sol_u32 items[INV_THUMB_CAP];
+                n = inventory_collect(st, items, INV_THUMB_CAP);
+                glfwGetWindowSize(w, &ww, &wh);
+                scale = (ww > 0) ? (float)st->fb_width / (float)ww : 1.0f;
+                px = (float)mx * scale;
+                py = (float)my * scale;
+                inv_prev_rect(st->fb_width, st->fb_height, &rx, &ry, &rw, &rh);
+                if (px >= rx && px <= rx + rw && py >= ry && py <= ry + rh) {
+                    st->inv_page = inv_clamp_page(st->inv_page - 1, n, INV_PER_PAGE);
+                } else {
+                    inv_next_rect(st->fb_width, st->fb_height, &rx, &ry, &rw, &rh);
+                    if (px >= rx && px <= rx + rw && py >= ry && py <= ry + rh) {
+                        st->inv_page = inv_clamp_page(st->inv_page + 1, n, INV_PER_PAGE);
+                    } else {
+                        slot = inv_hit_slot(px, py, INV_COLS, INV_ROWS,
+                                            st->fb_width, st->fb_height);
+                        if (slot >= 0) {
+                            int idx = st->inv_page * INV_PER_PAGE + slot;
+                            if (idx < n) inventory_take(st, items[idx]);
+                        }
+                    }
+                }
+            }
             st->lmb_was_down = lmb;
         }
         st->mouse_last_x = mx;       /* keep tracking: no look-jump on blur */
@@ -10788,6 +10972,72 @@ static sol_bool editor_world_to_screen(AppState *st, float aspect, vec3 wp,
     return SOL_TRUE;
 }
 
+/* a stable-ish tile color from a kind, so the placeholder grid is legible. */
+static void inv_kind_color(const SceneObject *o, sol_bool is_codex,
+                           float *r, float *g, float *b) {
+    const char *mr = o && o->mesh_ref ? o->mesh_ref : "";
+    *r = 0.35f; *g = 0.38f; *b = 0.45f;                 /* default slate */
+    if (is_codex) { *r = 0.45f; *g = 0.32f; *b = 0.22f; }                    /* book brown */
+    else if (strcmp(mr, "picture") == 0) { *r = 0.25f; *g = 0.40f; *b = 0.50f; }
+    else if (o && o->kind == KIND_NOTE)  { *r = 0.55f; *g = 0.52f; *b = 0.30f; }
+}
+
+/* The inventory screen: a dim backdrop, a grid of item tiles (placeholder
+   colored squares until Task 4's thumbnails), name labels, and pagination.
+   Drawn inside the open UI batch, like the palette/editor overlays. */
+static void inventory_draw_overlay(AppState *st) {
+    sol_u32 items[INV_THUMB_CAP];
+    int     n, pages, slot;
+    float   sw = (float)st->fb_width, sh = (float)st->fb_height;
+    float   us = sh / 1080.0f;
+    char    pagebuf[32];
+    if (!st->inv_open) return;
+    n     = inventory_collect(st, items, INV_THUMB_CAP);
+    st->inv_page = inv_clamp_page(st->inv_page, n, INV_PER_PAGE);
+    pages = inv_page_count(n, INV_PER_PAGE);
+
+    ui_quad(0.0f, 0.0f, sw, sh, 0.04f, 0.04f, 0.06f, 0.82f);   /* dim backdrop */
+
+    for (slot = 0; slot < INV_PER_PAGE; slot++) {
+        int   idx = st->inv_page * INV_PER_PAGE + slot;
+        float x, y, w, h, cr, cg, cb;
+        SceneObject *o;
+        sol_bool is_codex;
+        if (idx >= n) break;
+        o = scene_get(&st->scene, items[idx]);
+        is_codex = (sol_bool)(codex_cover_child(&st->scene, items[idx]) != 0);
+        inv_cell_rect(slot, INV_COLS, INV_ROWS, st->fb_width, st->fb_height, &x, &y, &w, &h);
+        inv_kind_color(o, is_codex, &cr, &cg, &cb);
+        ui_quad(x, y, w, h, cr, cg, cb, 1.0f);                 /* placeholder tile */
+        ui_quad_outline(x, y, w, h, 2.0f, 0.85f, 0.88f, 0.95f, 1.0f);
+        {   /* the item's name, centred under the tile */
+            const char *nm = o ? scene_meta_get(&st->scene, items[idx], "name") : (const char *)0;
+            const char *content = o ? o->content : (const char *)0;
+            const char *label = nm ? nm : (content ? content : "item");
+            float ts = 0.40f * us;
+            float lw, lh;
+            text_measure(st->ui_font, label, ts, &lw, &lh);
+            ui_text(st->ui_font, label, x + (w - lw) * 0.5f,
+                    y + h + font_ascent(st->ui_font) * ts + 4.0f * us, ts,
+                    0.92f, 0.94f, 0.98f, 1.0f);
+        }
+    }
+
+    if (pages > 1) {                                           /* page arrows + label */
+        float rx, ry, rw, rh, ts = 0.45f * us, lw, lh;
+        inv_prev_rect(st->fb_width, st->fb_height, &rx, &ry, &rw, &rh);
+        ui_quad(rx, ry, rw, rh, 0.20f, 0.22f, 0.28f, 1.0f);
+        ui_text(st->ui_font, "<", rx + rw * 0.32f, ry + rh * 0.5f + font_ascent(st->ui_font) * ts * 0.5f, ts, 1.0f, 1.0f, 1.0f, 1.0f);
+        inv_next_rect(st->fb_width, st->fb_height, &rx, &ry, &rw, &rh);
+        ui_quad(rx, ry, rw, rh, 0.20f, 0.22f, 0.28f, 1.0f);
+        ui_text(st->ui_font, ">", rx + rw * 0.32f, ry + rh * 0.5f + font_ascent(st->ui_font) * ts * 0.5f, ts, 1.0f, 1.0f, 1.0f, 1.0f);
+        snprintf(pagebuf, sizeof pagebuf, "page %d / %d", st->inv_page + 1, pages);
+        ts = 0.36f * us;
+        text_measure(st->ui_font, pagebuf, ts, &lw, &lh);
+        ui_text(st->ui_font, pagebuf, sw * 0.5f - lw * 0.5f, sh * 0.965f, ts, 0.85f, 0.88f, 0.95f, 1.0f);
+    }
+}
+
 /* The editor's 2D affordances, drawn inside the open UI batch. */
 static void editor_draw_overlay(AppState *st) {
     float   aspect = (st->fb_height > 0)
@@ -12085,6 +12335,7 @@ static void render(AppState *state) {
                         ty + 14.5f * us, ts2, 1.0f, 1.0f, 1.0f, 0.95f);
         }
     }
+    inventory_draw_overlay(state);
     palette_draw(&state->palette, state, state->mono_font,
                  g_commands, G_COMMAND_COUNT, state->fb_width, state->fb_height);
     editor_draw_overlay(state);
@@ -12194,6 +12445,20 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         return;
     }
 
+    /* The inventory screen owns the keyboard while open. */
+    if (st->inv_open) {
+        if (action == GLFW_PRESS) {
+            sol_u32 items[INV_THUMB_CAP];
+            int     n = inventory_collect(st, items, INV_THUMB_CAP);
+            if (key == GLFW_KEY_ESCAPE || key == GLFW_KEY_I) st->inv_open = SOL_FALSE;
+            else if (key == GLFW_KEY_LEFT)
+                st->inv_page = inv_clamp_page(st->inv_page - 1, n, INV_PER_PAGE);
+            else if (key == GLFW_KEY_RIGHT)
+                st->inv_page = inv_clamp_page(st->inv_page + 1, n, INV_PER_PAGE);
+        }
+        return;
+    }
+
     /* Place mode owns the keyboard while previewing furniture. */
     if (st->place_active) {
         if (action == GLFW_PRESS || action == GLFW_REPEAT) {
@@ -12214,10 +12479,25 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         else if (key == GLFW_KEY_PERIOD) st->place_yaw += sol_radians(15.0f);
     }
 
+    /* Enter while carrying = stow the held item into the inventory bag. */
+    if (action == GLFW_PRESS && (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER)
+        && st->carried != 0 && !st->place_active && !st->editor.active) {
+        inventory_stow(st);
+        return;
+    }
+
     /* ':' (Shift+;) opens the palette when nothing else owns the keyboard. */
     if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && (mods & GLFW_MOD_SHIFT)
         && st->edit_handle == 0 && st->reader_state == READER_IDLE) {
         palette_open_now(&st->palette);
+        return;
+    }
+
+    /* 'i' opens the inventory when nothing else owns the keyboard. */
+    if (action == GLFW_PRESS && key == GLFW_KEY_I && st->carried == 0 &&
+        st->edit_handle == 0 && st->reader_state == READER_IDLE &&
+        !st->place_active && !st->palette.open && !st->editor.active) {
+        cmd_inventory_open(st);
         return;
     }
 
