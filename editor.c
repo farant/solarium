@@ -163,6 +163,23 @@ void editor_apply_resize(Scene *s, sol_u32 room, EditZone zone, float gx, float 
             break;
         }
     }
+    /* Wall-mounted boards/pictures ride their wall: scale each child's offset
+       from the room centre by the per-axis size change. A child sitting ON a
+       wall (offset ~= +/-half) lands ON the resized wall; a child on the
+       OPPOSITE (fixed) wall stays put (that half is unchanged); along-wall
+       positions scale with the wall's new length. */
+    {
+        float rx = (r.hw > 1e-4f) ? nhw / r.hw : 1.0f;
+        float rz = (r.hd > 1e-4f) ? nhd / r.hd : 1.0f;
+        for (i = 0; i < s->count; i++) {
+            SceneObject *o = &s->objects[i];
+            if (o->parent != room || !o->mesh_ref) continue;
+            if (strcmp(o->mesh_ref, "board") != 0 &&
+                strcmp(o->mesh_ref, "picture") != 0) continue;
+            o->pos.x *= rx;
+            o->pos.z *= rz;
+        }
+    }
 }
 
 /* world ground point where the cursor ray meets the plane y = floor_y */

@@ -201,6 +201,31 @@ int main(void) {
         scene_free(&s);
     }
 
+    /* resize repositions wall-mounted boards: one on the moved wall rides it,
+       one on the opposite (fixed) wall stays put in world space. */
+    {
+        Scene s; sol_u32 a, moved, fixed; Mesh empty;
+        SceneObject *mo, *fo; RoomRect r;
+        memset(&empty, 0, sizeof empty);
+        scene_init(&s);
+        a = add_room(&s, 0.0f, 0.0f, 0.0f, 8.0f, 6.0f);          /* hw=4, hd=3 */
+        moved = scene_add(&s, a, empty, vec3_make( 4.0f, 1.5f, 0.0f),
+                          quat_identity(), vec3_make(1,1,1));     /* on +X wall */
+        scene_mesh_ref_set(&s, moved, "board");
+        fixed = scene_add(&s, a, empty, vec3_make(-4.0f, 1.5f, 0.0f),
+                          quat_identity(), vec3_make(1,1,1));     /* on -X wall */
+        scene_mesh_ref_set(&s, fixed, "picture");
+        editor_apply_resize(&s, a, EDIT_ZONE_EDGE_XP, 8.0f, 0.0f); /* drag +X wall to x=8 */
+        r  = editor_room_rect(&s, a);
+        mo = scene_get(&s, moved);
+        fo = scene_get(&s, fixed);
+        CHECK(fabs((double)(r.cx - 2.0f)) < 1e-3);               /* centre -> 2 */
+        CHECK(fabs((double)(r.hw - 6.0f)) < 1e-3);               /* half-width -> 6 */
+        CHECK(fabs((double)((r.cx + mo->pos.x) - 8.0f)) < 1e-3); /* rode the +X wall */
+        CHECK(fabs((double)((r.cx + fo->pos.x) + 4.0f)) < 1e-3); /* stayed on the fixed -X wall */
+        scene_free(&s);
+    }
+
     if (fails == 0) printf("editor_test: OK\n");
     return fails ? 1 : 0;
 }
