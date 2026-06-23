@@ -6921,6 +6921,110 @@ static vec3 carry_place_point(AppState *st) {
     return place;
 }
 
+#define SHELF_MAX_ITEMS 64
+
+/* a filed item on a shelf = a codex anchor or a card (NOT the shelf's own mesh). */
+static int shelf_is_filed_item(AppState *st, sol_u32 h) {
+    SceneObject *o = scene_get(&st->scene, h);
+    if (!o) return 0;
+    if (codex_cover_child(&st->scene, h) != 0) return 1;
+    return (int)(o->mesh_ref && strcmp(o->mesh_ref, "card") == 0);
+}
+
+/* the item's shelf footprint: along_w = thickness (packs along the shelf),
+   depth = width (into the shelf), height = h. A codex reads its cover child. */
+static void shelf_item_dims(AppState *st, sol_u32 handle,
+                            float *along_w, float *depth, float *height) {
+    sol_u32      cov = codex_cover_child(&st->scene, handle);
+    SceneObject *o   = scene_get(&st->scene, cov != 0 ? cov : handle);
+    const char  *ref = (cov != 0) ? "book_cover"
+                     : (o && o->mesh_ref) ? o->mesh_ref : "card";
+    const float *p   = o ? o->mesh_params : (const float *)0;
+    int          pc  = o ? o->mesh_param_count : 0;
+    *along_w = mesh_ref_param(ref, p, pc, "t");
+    *depth   = mesh_ref_param(ref, p, pc, "w");
+    *height  = mesh_ref_param(ref, p, pc, "h");
+}
+
+/* the LOCAL pos `item` should take on `furniture` for layout x/row `rx`/`row`:
+   depth-aware z (spine flush at the front), per-item vertical anchor. */
+static vec3 shelf_item_pos(AppState *st, sol_u32 furniture, sol_u32 item,
+                           float rx, int row) {
+    SceneObject *fo = scene_get(&st->scene, furniture);
+    float aw, dp, ht, d, ry;
+    vec3  r;
+    d  = (fo && fo->mesh_param_count > 2) ? fo->mesh_params[2] : 0.3f;
+    ry = furniture_shelf_row_y(fo ? fo->mesh_params : (const float *)0,
+                               fo ? fo->mesh_param_count : 0, row);
+    shelf_item_dims(st, item, &aw, &dp, &ht);
+    r.x = rx;
+    r.y = ry + ((codex_cover_child(&st->scene, item) != 0) ? ht * 0.5f : 0.0f);
+    r.z = (d * 0.5f + 0.04f) - dp * 0.5f;   /* spine sits proud of the front edge */
+    return r;
+}
+
+/* Re-flow every filed item on `furniture` tight, left-to-right, no gaps. */
+static void shelf_repack(AppState *st, sol_u32 furniture) {
+    sol_u32      items[SHELF_MAX_ITEMS];
+    float        widths[SHELF_MAX_ITEMS], xs[SHELF_MAX_ITEMS];
+    int          rows[SHELF_MAX_ITEMS];
+    int          n = 0, i, j;
+    SceneObject *fo = scene_get(&st->scene, furniture);
+    if (!fo || !fo->mesh_ref || !furniture_is_shelf(fo->mesh_ref)) return;
+    for (i = 0; i < (int)st->scene.count && n < SHELF_MAX_ITEMS; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        if (o->parent != furniture) continue;
+        if (!shelf_is_filed_item(st, o->handle)) continue;
+        items[n++] = o->handle;
+    }
+    /* stable fill order: higher row (bigger y) first, then left (smaller x);
+       a just-dropped item placed at the append x sorts to the end. */
+    for (i = 0; i < n; i++)
+        for (j = i + 1; j < n; j++) {
+            SceneObject *a = scene_get(&st->scene, items[i]);
+            SceneObject *b = scene_get(&st->scene, items[j]);
+            int swap = 0;
+            if (a && b) {
+                if (b->pos.y > a->pos.y + 0.01f) swap = 1;
+                else if (fabs((double)(b->pos.y - a->pos.y)) <= 0.01 &&
+                         b->pos.x < a->pos.x) swap = 1;
+            }
+            if (swap) { sol_u32 t = items[i]; items[i] = items[j]; items[j] = t; }
+        }
+    for (i = 0; i < n; i++) {
+        float aw, dp, ht;
+        shelf_item_dims(st, items[i], &aw, &dp, &ht);
+        widths[i] = aw;
+    }
+    furniture_shelf_layout(fo->mesh_params, fo->mesh_param_count, widths, n, xs, rows);
+    for (i = 0; i < n; i++) {
+        SceneObject *o = scene_get(&st->scene, items[i]);
+        if (o) o->pos = shelf_item_pos(st, furniture, items[i], xs[i], rows[i]);
+    }
+}
+
+/* where a carried item WOULD land if filed now (append at the end of the pack) —
+   for the live preview. */
+static vec3 shelf_append_local(AppState *st, sol_u32 furniture, sol_u32 carried) {
+    float        widths[SHELF_MAX_ITEMS + 1], xs[SHELF_MAX_ITEMS + 1];
+    int          rows[SHELF_MAX_ITEMS + 1];
+    int          n = 0, i;
+    SceneObject *fo = scene_get(&st->scene, furniture);
+    float        aw, dp, ht;
+    if (!fo) { vec3 z = { 0.0f, 0.0f, 0.0f }; return z; }
+    for (i = 0; i < (int)st->scene.count && n < SHELF_MAX_ITEMS; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        if (o->parent != furniture || o->handle == carried) continue;
+        if (!shelf_is_filed_item(st, o->handle)) continue;
+        shelf_item_dims(st, o->handle, &aw, &dp, &ht);
+        widths[n++] = aw;
+    }
+    shelf_item_dims(st, carried, &aw, &dp, &ht);
+    widths[n] = aw;
+    furniture_shelf_layout(fo->mesh_params, fo->mesh_param_count, widths, n + 1, xs, rows);
+    return shelf_item_pos(st, furniture, carried, xs[n], rows[n]);
+}
+
 /* E: put down what you're carrying, else pick up the selected movable object.
    A carried FOLDER, dropped while aiming at a wall, OPENS the folder as a real
    sub-room (door + walkway + its contents) — and the folder card snaps back to
@@ -6983,6 +7087,11 @@ static void cmd_carry_toggle(AppState *st) {
                 o->parent = st->file_target;          /* re-parent: the furniture owns it now */
                 o->pos    = st->file_local;           /* furniture-local resting pos */
                 o->rot    = st->file_rot;
+                {   /* a shelf re-flows all its items tight after the drop */
+                    SceneObject *ft = scene_get(&st->scene, st->file_target);
+                    if (ft && ft->mesh_ref && furniture_is_shelf(ft->mesh_ref))
+                        shelf_repack(st, st->file_target);
+                }
                 scene_resolve_meshes(&st->scene);
                 apply_kind_materials(&st->scene);
                 scene_save(&st->scene, "scene.stml");
@@ -7023,9 +7132,13 @@ static void cmd_carry_toggle(AppState *st) {
                         (strcmp(co->mesh_ref, "board") == 0 ||
                          strcmp(co->mesh_ref, "picture") == 0));
                     if (on_furn || mounted) {
-                        vec3 wp = object_world_pos(&st->scene, t);   /* world pos before detach */
-                        co->parent = 0;                               /* leave the wall/furniture */
+                        vec3     wp  = object_world_pos(&st->scene, t);  /* world pos before detach */
+                        sol_u32  src = co->parent;                       /* the shelf, if any */
+                        sol_bool was_shelf = (sol_bool)(par && par->mesh_ref &&
+                                                        furniture_is_shelf(par->mesh_ref));
+                        co->parent = 0;                                 /* leave the wall/furniture */
                         co->pos    = wp;
+                        if (was_shelf) shelf_repack(st, src);           /* reflow the rest */
                     }
                 }
             }
@@ -7036,31 +7149,6 @@ static void cmd_carry_toggle(AppState *st) {
 /* Per-frame: float the carried object in front of the camera. Called right after
    update() (so it runs before components_update reads poses). A carried FOLDER
    tablet instead snaps flat to the wall you're aiming at (descent planting). */
-/* the LOWEST shelf slot that no current spine occupies, so a tablet filed after
-   one was removed FILLS the gap instead of landing on an occupied slot. Matches
-   each child's local pos to a slot position (filed cards rest exactly on theirs);
-   `skip` is excluded (the tablet being re-filed). Returns capacity if the shelf
-   is full — wraps, as before. */
-static int shelf_free_slot(AppState *st, sol_u32 furniture, sol_u32 skip,
-                           const float *params, int pcount) {
-    int cap = furniture_shelf_capacity(params, pcount);
-    int i;
-    for (i = 0; i < cap; i++) {
-        vec3    sp = furniture_shelf_slot(params, pcount, i);
-        sol_u32 k;
-        int     taken = 0;
-        for (k = 0; k < st->scene.count; k++) {
-            SceneObject *c = &st->scene.objects[k];
-            float dx, dy, dz;
-            if (c->parent != furniture || c->handle == skip) continue;
-            dx = c->pos.x - sp.x; dy = c->pos.y - sp.y; dz = c->pos.z - sp.z;
-            if (dx * dx + dy * dy + dz * dz < 0.025f * 0.025f) { taken = 1; break; }
-        }
-        if (!taken) return i;
-    }
-    return cap;
-}
-
 /* a board mounted on a wall = mesh "board" whose parent carries room_type. */
 static sol_bool board_is_mounted(Scene *s, sol_u32 h) {
     SceneObject *o = scene_get(s, h);
@@ -7276,35 +7364,19 @@ static void carry_update(AppState *st) {
                                        fpos, fyaw, ray, &loc)) continue;
             st->file_aim    = SOL_TRUE;
             st->file_target = f->handle;
-            if (carry_is_codex) {
-                float bh = mesh_ref_param("book_cover", (const float *)0, 0, "h");
-                sol_u32 ccov = codex_cover_child(&st->scene, st->carried);
-                if (ccov != 0) {
-                    SceneObject *cco = scene_get(&st->scene, ccov);
-                    if (cco) bh = mesh_ref_param("book_cover", cco->mesh_params,
-                                                 cco->mesh_param_count, "h");
-                }
-                /* upright, spine toward the room — FURNITURE-LOCAL (the parent's
-                   yaw is applied by the shelf transform, so no fyaw here, exactly
-                   like the card's plain Y(90) above). */
-                st->file_rot = quat_mul(
+            if (furniture_is_shelf(f->mesh_ref)) {
+                /* variable-width packing computes the append position (depth +
+                   vertical anchor handled inside); FURNITURE-LOCAL spine-out rot. */
+                st->file_local = shelf_append_local(st, f->handle, st->carried);
+                st->file_rot   = carry_is_codex
+                    ? quat_mul(quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)),
+                               quat_from_axis_angle(vec3_make(1.0f,0.0f,0.0f), sol_radians(-90.0f)))
+                    : quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)); /* spine edge-out */
+            } else if (carry_is_codex) {
+                st->file_local = furniture_table_point(f->mesh_params, f->mesh_param_count, loc);
+                st->file_rot   = quat_mul(
                     quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)),
                     quat_from_axis_angle(vec3_make(1.0f,0.0f,0.0f), sol_radians(-90.0f)));
-                if (furniture_is_shelf(f->mesh_ref)) {
-                    int idx = shelf_free_slot(st, f->handle, st->carried,
-                                              f->mesh_params, f->mesh_param_count);
-                    st->file_local = furniture_shelf_slot(f->mesh_params,
-                                              f->mesh_param_count, idx);
-                    st->file_local.y += bh * 0.5f;   /* base rests on the board */
-                } else {
-                    st->file_local = furniture_table_point(f->mesh_params,
-                                              f->mesh_param_count, loc);
-                }
-            } else if (furniture_is_shelf(f->mesh_ref)) {
-                int idx = shelf_free_slot(st, f->handle, st->carried,
-                                          f->mesh_params, f->mesh_param_count);
-                st->file_local = furniture_shelf_slot(f->mesh_params, f->mesh_param_count, idx);
-                st->file_rot   = quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), sol_radians(90.0f)); /* spine: edge-out */
             } else {
                 st->file_local = furniture_table_point(f->mesh_params, f->mesh_param_count, loc);
                 st->file_rot   = quat_mul(quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), st->place_yaw),
