@@ -41,6 +41,8 @@
 #include "stml.h"                /* sounds.stml: the ear's hot-reloadable knobs */
 #include "furniture.h"           /* scene-free furniture catalog + meshes (Furniture & Filing) */
 #include "inventory.h"           /* scene-free inventory grid layout math (the bag) */
+#include "widget.h"              /* immediate-mode widget core (TODO5 app books) */
+#include "app_synth.h"           /* the synth book's page layout (TODO5) */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -2777,6 +2779,14 @@ typedef struct AppState {
     int         reader_turn_old;   /* the spread we are turning AWAY from */
     Mesh        reader_leaf;       /* rebuilt per frame (curl = vertex map) */
     LeafShape   reader_leaf_shape; /* this frame's section: mesh + ink share it */
+    /* the app book (TODO5 slice): an open book whose meta["app"] routes the
+       reader to an in-world widget UI instead of page text. */
+    int       reader_app;                  /* 0 none, 1 synth */
+    sol_bool  reader_app_was;              /* edge tracker for the cursor toggle */
+    float     synth_params[SYNTH_PARAMS];  /* the open book's live patch */
+    sol_u32   synth_rng;                   /* the "Roll" LCG state */
+    WidgetCtx widget_ctx;                  /* this frame's emitted draw-list */
+    Mesh      widget_quad;                 /* unit XY quad for widget rects (lazy) */
     /* terrain shading (item 10): set per draw by the scene loop, read by
        draw_mesh — the plot wears the slope/height palette */
     sol_bool    terrain_blend;
@@ -5872,6 +5882,32 @@ static void reader_edit_flip(AppState *st, int dir) {
         play_oneshot(g_snd_whoosh, g_snd_whoosh_frames, 0.30f, 0.0f);
     }
     reader_pack_pages(st);
+}
+
+/* The open book's flat page-plane transform: wtext_block draws ink on its z=0
+   plane (x right, y up, page-local meters). Shared by the page render and the
+   app-book cursor hit-test. Optionally returns the page rect metrics. */
+static mat4 reader_page_matrix(const AppState *st, float *out_wb, float *out_zh,
+                               float *out_xf, float *out_mg) {
+    const float *bp    = st->reader_params;
+    float        wb    = bp[0] - bp[4];
+    float        zh    = bp[1] * 0.5f - bp[4];
+    float        stack = (bp[2] - 2.0f * bp[3]) * 0.5f;
+    float        xf, fy, mg;
+    mat4         bm, page;
+    if (stack < 0.004f) stack = 0.004f;
+    xf = wb * BOOK_GUTTER_FRAC;
+    fy = bp[3] + stack + 0.0012f;
+    mg = wb * 0.06f;
+    bm = mat4_from_trs(st->reader_pos, st->reader_rot, vec3_make(1.0f, 1.0f, 1.0f));
+    page = mat4_mul(bm, mat4_mul(mat4_translate(vec3_make(0.0f, fy, 0.0f)),
+               quat_to_mat4(quat_from_axis_angle(
+                   vec3_make(1.0f, 0.0f, 0.0f), sol_radians(-90.0f)))));
+    if (out_wb) *out_wb = wb;
+    if (out_zh) *out_zh = zh;
+    if (out_xf) *out_xf = xf;
+    if (out_mg) *out_mg = mg;
+    return page;
 }
 
 /* Open `handle` as a book. A codex rises as ITSELF (its own build and
@@ -11780,20 +11816,11 @@ static void render(AppState *state) {
         if (state->reader_state != READER_IDLE &&
             state->reader_cover.index_count > 0) {
             const float *bp = state->reader_params;
-            float wb    = bp[0] - bp[4];
-            float zh    = bp[1] * 0.5f - bp[4];
-            float stack = (bp[2] - 2.0f * bp[3]) * 0.5f;
-            float xf, fy, mg;
+            float wb, zh, xf, mg;
             mat4  bm, page;
-            if (stack < 0.004f) stack = 0.004f;
-            xf   = wb * BOOK_GUTTER_FRAC;
-            fy   = bp[3] + stack + 0.0012f;
-            mg   = wb * 0.06f;
+            page = reader_page_matrix(state, &wb, &zh, &xf, &mg);
             bm   = mat4_from_trs(state->reader_pos, state->reader_rot,
                                  vec3_make(1.0f, 1.0f, 1.0f));
-            page = mat4_mul(bm, mat4_mul(mat4_translate(vec3_make(0.0f, fy, 0.0f)),
-                       quat_to_mat4(quat_from_axis_angle(
-                           vec3_make(1.0f, 0.0f, 0.0f), sol_radians(-90.0f)))));
             if (state->reader_is_image && state->reader_image_tex.id) {
                 /* the image on the RIGHT page (fitted), filename on the LEFT */
                 float field_w_left = wb - xf - 2.0f * mg;
