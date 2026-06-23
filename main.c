@@ -2733,6 +2733,10 @@ typedef struct AppState {
     int         reader_line_count;
     int         reader_lines_per_page;
     int         reader_spread;     /* current page-pair, 0-based */
+    char      **reader_pages;      /* editable codex: page text array */
+    int         reader_page_count;
+    int         reader_page;       /* current page (the caret's page) */
+    sol_bool    reader_editable;   /* a codex opened as a writable notebook */
     const Font *reader_font;       /* mono for code, sans for prose */
     float       reader_px2m;       /* body text scale, meters per font px */
     sol_bool    reader_is_image;       /* this book shows an image, not text */
@@ -5646,6 +5650,111 @@ static void reader_load_content(AppState *st, const char *path) {
     st->reader_line_off[line] = (int)st->reader_text_len + 1;  /* sentinel */
 }
 
+static char *reader_strdup(const char *s) {
+    size_t n = strlen(s ? s : "");
+    char  *d = (char *)malloc(n + 1);
+    if (d) { memcpy(d, s ? s : "", n); d[n] = '\0'; }
+    return d;
+}
+
+static void reader_free_pages(AppState *st) {
+    int i;
+    if (st->reader_pages) {
+        for (i = 0; i < st->reader_page_count; i++) free(st->reader_pages[i]);
+        free(st->reader_pages);
+    }
+    st->reader_pages      = (char **)0;
+    st->reader_page_count = 0;
+    st->reader_page       = 0;
+}
+
+/* load page0..page{N-1} from the codex anchor's meta; a fresh book = 1 blank page */
+static void reader_load_pages(AppState *st, sol_u32 root) {
+    const char *pc = scene_meta_get(&st->scene, root, "pagecount");
+    int n = pc ? atoi(pc) : 0, i;
+    char key[16];
+    reader_free_pages(st);
+    if (n < 1) n = 1;
+    if (n > 4096) n = 4096;
+    st->reader_pages = (char **)malloc(sizeof(char *) * (size_t)n);
+    if (!st->reader_pages) return;
+    for (i = 0; i < n; i++) {
+        const char *t;
+        snprintf(key, sizeof key, "page%d", i);
+        t = scene_meta_get(&st->scene, root, key);
+        st->reader_pages[i] = reader_strdup(t ? t : "");
+    }
+    st->reader_page_count = n;
+    st->reader_page       = 0;
+}
+
+static float reader_field_w(const AppState *st) {
+    const float *bp = st->reader_params;
+    float wb = bp[0] - bp[4];
+    return wb - wb * BOOK_GUTTER_FRAC - 2.0f * (wb * 0.06f);
+}
+
+/* Rebuild reader_text from the page array so the EXISTING page/leaf render works:
+   each page is wrapped to field_w, then capped + padded to exactly L lines and
+   concatenated. The current page shows a trailing caret while open. Frees the old
+   reader_text/line_off INLINE (not reader_free_text — that resets reader_spread). */
+static void reader_pack_pages(AppState *st) {
+    const float *bp = st->reader_params;
+    float zh = bp[1] * 0.5f - bp[4];
+    float field_h, field_w = reader_field_w(st);
+    int   L, pg, c, line, total_lines;
+    long  cap, used;
+    char *out;
+    int  *offs;
+    if (!st->ui_font || st->reader_page_count <= 0) return;
+    st->reader_font = st->ui_font;
+    st->reader_px2m = (bp[1] * 0.022f) / font_line_height(st->reader_font);
+    field_h = 2.0f * zh - 2.0f * (bp[0] - bp[4]) * 0.06f;
+    L = (int)(field_h / (font_line_height(st->reader_font) * st->reader_px2m));
+    if (L < 1) L = 1;
+    st->reader_lines_per_page = L;
+    total_lines = st->reader_page_count * L;
+    cap  = (long)total_lines * 512L + 256L;
+    out  = (char *)malloc((size_t)cap);
+    offs = (int *)malloc(sizeof(int) * (size_t)(total_lines + 1));
+    if (!out || !offs) { free(out); free(offs); return; }
+    used = 0; line = 0;
+    for (pg = 0; pg < st->reader_page_count; pg++) {
+        char        wbuf[8192];
+        char        caretp[8192];
+        const char *src = st->reader_pages[pg] ? st->reader_pages[pg] : "";
+        const char *p;
+        int         nlines;
+        if (pg == st->reader_page && st->reader_editable &&
+            st->reader_state != READER_RETURNING) {
+            size_t sl = strlen(src);
+            if (sl > sizeof(caretp) - 2) sl = sizeof(caretp) - 2;
+            memcpy(caretp, src, sl); caretp[sl] = '_'; caretp[sl + 1] = '\0';
+            src = caretp;
+        }
+        nlines = text_wrap(st->reader_font, src, st->reader_px2m, field_w,
+                           wbuf, (int)sizeof wbuf);
+        if (nlines < 1) { wbuf[0] = '\0'; }
+        p = wbuf;
+        for (c = 0; c < L; c++) {
+            offs[line++] = (int)used;
+            if (c < nlines) {
+                while (*p && *p != '\n' && used < cap - 2) out[used++] = *p++;
+                if (*p == '\n') p++;
+            }
+            out[used++] = '\n';
+        }
+    }
+    out[used] = '\0';
+    offs[line] = (int)used + 1;        /* sentinel */
+    free(st->reader_text);             /* inline free: keep reader_spread */
+    free(st->reader_line_off);
+    st->reader_text       = out;
+    st->reader_text_len   = used;
+    st->reader_line_off   = offs;
+    st->reader_line_count = total_lines;
+}
+
 /* Open `handle` as a book. A codex rises as ITSELF (its own build and
    leather, read from the cover child's params — the open refs share the
    closed schema's prefix); a FILE/ALIAS card rises as the default codex:
@@ -5716,8 +5825,16 @@ static void reader_open(AppState *st, sol_u32 handle) {
     st->reader_source = root;
     st->reader_state  = READER_RISING;
     st->reader_t      = 0.0f;
-    reader_load_content(st, o->content);       /* the card's file; a codex
-                                                  carries none (yet) */
+    if (cover != 0) {                          /* a codex: an editable notebook */
+        st->reader_editable = SOL_TRUE;
+        reader_load_pages(st, root);
+        reader_pack_pages(st);
+    } else {
+        st->reader_editable = SOL_FALSE;
+        reader_load_content(st, o->content);   /* a file/alias card: read-only */
+    }
+    st->reader_page   = 0;
+    st->reader_spread = 0;
     printf("reading '%s' — Esc or click to put it back; left/right turn pages\n",
            object_label(s, root, lbuf));
 }
