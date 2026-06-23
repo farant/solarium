@@ -657,54 +657,9 @@ Replace it with (note: `bm` is still needed below for the leaf hinge at ~11861, 
 
 (`bp` stays — later lines use `bp[3]`, `bp[1]`, etc. `bm` is recomputed cheaply for the leaf hinge. The values are bit-identical to before.)
 
-- [ ] **Step 4: Add the cursor-ray + page-hit + reader-app helpers**
+> **Decomposition note (corrected):** the `cursor_ray` / `page_under_cursor` / `reader_is_app` helpers were originally listed here, but they are not *called* until Task 6, and `c89check` runs `-Wall -Wextra -Werror` which errors on `-Wunused-function`. They have therefore been **moved to Task 6 Step 1** (where their callers live). Task 3 adds only `reader_page_matrix`, which the render block uses immediately (Step 3), so Task 3 stays clean. Do **not** add the three helpers in this task.
 
-Add these static helpers **above `reader_page_matrix`** (so `cursor_ray` can use `pick_ray`'s neighbors; place them just before `reader_open`, after the existing reader helpers). `reader_is_app` needs `READER_OPEN` (defined at main.c:2793) — already in scope.
-
-```c
-/* a pick ray through the OS cursor (app-book mode frees the cursor; pick_ray
-   only reads the cursor in ORBIT, so the app book needs its own). */
-static Ray cursor_ray(AppState *st, GLFWwindow *w) {
-    int    ww, wh;
-    float  aspect, nx, ny;
-    double mx, my;
-    glfwGetWindowSize(w, &ww, &wh);
-    aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
-    glfwGetCursorPos(w, &mx, &my);
-    nx = (ww > 0) ? 2.0f * (float)mx / (float)ww - 1.0f : 0.0f;
-    ny = (wh > 0) ? 1.0f - 2.0f * (float)my / (float)wh : 0.0f;
-    return camera_ray(&st->camera, nx, ny, aspect);
-}
-
-/* cursor → the open page's z=0 plane → page-local 2D meters. `in` is true when
-   the hit lands within the book's page rect [-wb,wb] x [-zh,zh]. */
-static sol_bool page_under_cursor(AppState *st, GLFWwindow *w, mat4 page,
-                                  float wb, float zh, float *px, float *py) {
-    Ray   r;
-    vec3  o, zp, n, hit, loc;
-    float t;
-    mat4  inv;
-    r   = cursor_ray(st, w);
-    o   = mat4_mul_point(page, vec3_make(0.0f, 0.0f, 0.0f));
-    zp  = mat4_mul_point(page, vec3_make(0.0f, 0.0f, 1.0f));
-    n   = vec3_normalize(vec3_sub(zp, o));
-    if (!ray_vs_plane(r, o, n, &t)) return SOL_FALSE;
-    hit = vec3_add(r.origin, vec3_scale(r.dir, t));
-    inv = mat4_inverse(page);
-    loc = mat4_mul_point(inv, hit);
-    *px = loc.x;
-    *py = loc.y;
-    return (sol_bool)(loc.x >= -wb && loc.x <= wb &&
-                      loc.y >= -zh && loc.y <= zh);
-}
-
-/* an app book is OPEN and routes to the widget UI. */
-static sol_bool reader_is_app(const AppState *st) {
-    return (sol_bool)(st->reader_app != 0 && st->reader_state == READER_OPEN);
-}
-```
-
-- [ ] **Step 5: Wire `widget.c` and `app_synth.c` into the 4 source lists in `build.sh`**
+- [ ] **Step 4: Wire `widget.c` and `app_synth.c` into the 4 source lists in `build.sh`**
 
 In each of these four `clang`/source lines, append ` widget.c app_synth.c` to the end of the source file list (they currently end with `... furniture.c inventory.c`):
 - `c89check` list (main.c:16)
@@ -718,22 +673,21 @@ Example (the c89check line becomes):
         -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c widget.c app_synth.c
 ```
 
-- [ ] **Step 6: Build both backends (compile-only verification)**
+- [ ] **Step 5: Build both backends (compile-only verification)**
 
 Run: `./build.sh c89check && ./build.sh debug && ./build.sh metal`
-Expected: all three PASS. No behavior change yet — `reader_app` is always 0, the helpers are unused (the compiler may warn "unused function" for `cursor_ray`/`page_under_cursor`/`reader_is_app`; that is fine — Tasks 5-7 wire them. If the build uses `-Werror` on unused-function for these and fails, proceed directly to Tasks 4-7 in one batch before building, or temporarily reference them — but the debug/metal builds here do not use `-Werror`, only `c89check` does, and `-fsyntax-only` does not error on unused static functions).
+Expected: all three PASS. No behavior change yet — `reader_app` is always 0; the only new function, `reader_page_matrix`, is called by the render block, so there is no `-Wunused-function`. **`c89check` now compiles `widget.c` + `app_synth.c` under `-Wall -Wextra -Werror` for the first time** (the `widgettest`/`appsynthtest` targets used only `-pedantic-errors -Werror`, not `-Wall -Wextra`). If c89check surfaces a `-Wall`/`-Wextra` warning inside `widget.c` or `app_synth.c` (e.g. an unused parameter, a sign-compare), fix it minimally in that file — those files must now be `-Wall -Wextra` clean. Re-run `./build.sh widgettest && ./widget_test` and `./build.sh appsynthtest && ./app_synth_test` after any such fix to confirm no regression.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add main.c build.sh
 git commit -m "$(cat <<'EOF'
-TODO5 scaffolding: app-book state, page-matrix + cursor-hit helpers
+TODO5 scaffolding: app-book state + the shared page-matrix helper
 
 AppState fields for an open app book; reader_page_matrix extracted from the
-render block (shared with the input path); cursor_ray / page_under_cursor /
-reader_is_app helpers; widget.c + app_synth.c wired into the 4 source lists.
-No behavior yet (reader_app stays 0).
+render block (shared with the input path that lands in Task 6); widget.c +
+app_synth.c wired into the 4 source lists. No behavior yet (reader_app stays 0).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
@@ -906,9 +860,50 @@ EOF
 
 - [ ] **Step 1: Add the input + play helpers**
 
-Add these static helpers above `reader_open` (with the Task 3/5 helpers). `synth_book_play` uses a file-scope static scratch buffer (single-threaded; avoids bloating AppState):
+Add these static helpers above `reader_open` (with the Task 3/5 helpers). The first three (`cursor_ray`, `page_under_cursor`, `reader_is_app`) were moved here from Task 3 — they are added now because this task is where they are first *called* (so they don't trip `-Wunused-function` under c89check's `-Wall -Wextra -Werror`). `reader_is_app` needs `READER_OPEN` (defined at main.c:2793) — already in scope. `synth_book_play` uses a file-scope static scratch buffer (single-threaded; avoids bloating AppState):
 
 ```c
+/* a pick ray through the OS cursor (app-book mode frees the cursor; pick_ray
+   only reads the cursor in ORBIT, so the app book needs its own). */
+static Ray cursor_ray(AppState *st, GLFWwindow *w) {
+    int    ww, wh;
+    float  aspect, nx, ny;
+    double mx, my;
+    glfwGetWindowSize(w, &ww, &wh);
+    aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
+    glfwGetCursorPos(w, &mx, &my);
+    nx = (ww > 0) ? 2.0f * (float)mx / (float)ww - 1.0f : 0.0f;
+    ny = (wh > 0) ? 1.0f - 2.0f * (float)my / (float)wh : 0.0f;
+    return camera_ray(&st->camera, nx, ny, aspect);
+}
+
+/* cursor → the open page's z=0 plane → page-local 2D meters. `in` is true when
+   the hit lands within the book's page rect [-wb,wb] x [-zh,zh]. */
+static sol_bool page_under_cursor(AppState *st, GLFWwindow *w, mat4 page,
+                                  float wb, float zh, float *px, float *py) {
+    Ray   r;
+    vec3  o, zp, n, hit, loc;
+    float t;
+    mat4  inv;
+    r   = cursor_ray(st, w);
+    o   = mat4_mul_point(page, vec3_make(0.0f, 0.0f, 0.0f));
+    zp  = mat4_mul_point(page, vec3_make(0.0f, 0.0f, 1.0f));
+    n   = vec3_normalize(vec3_sub(zp, o));
+    if (!ray_vs_plane(r, o, n, &t)) return SOL_FALSE;
+    hit = vec3_add(r.origin, vec3_scale(r.dir, t));
+    inv = mat4_inverse(page);
+    loc = mat4_mul_point(inv, hit);
+    *px = loc.x;
+    *py = loc.y;
+    return (sol_bool)(loc.x >= -wb && loc.x <= wb &&
+                      loc.y >= -zh && loc.y <= zh);
+}
+
+/* an app book is OPEN and routes to the widget UI. */
+static sol_bool reader_is_app(const AppState *st) {
+    return (sol_bool)(st->reader_app != 0 && st->reader_state == READER_OPEN);
+}
+
 static void widget_quad_build(AppState *st) {
     MeshBuilder mb;
     mb_init(&mb);
