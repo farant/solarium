@@ -6897,6 +6897,16 @@ static float room_interior_height(Scene *s, sol_u32 room) {
     return 3.0f;
 }
 
+/* a note's body text size in metres-per-line; absent meta => the default,
+   clamped to the editable range. */
+static float note_text_size(Scene *s, sol_u32 h) {
+    const char *v = scene_meta_get(s, h, "text_size");
+    float ts = v ? (float)atof(v) : 0.028f;
+    if (ts < 0.015f) ts = 0.015f;
+    if (ts > 0.060f) ts = 0.060f;
+    return ts;
+}
+
 static void carry_update(AppState *st) {
     SceneObject *o;
     vec3         fwd, hold;
@@ -10849,26 +10859,29 @@ static void render(AppState *state) {
                     continue;                                /* spines: no flat label */
                 }
             }
-            /* the label: the card's name across the top, shrunk to fit */
-            nm = object_label(&state->scene, o->handle, lbuf);
-            px2m = 0.038f / lh;                             /* ~3.8cm line */
-            text_measure(uf, nm, 1.0f, &name_w, (float *)0);
-            if (name_w * px2m > usable && name_w > 0.0f)
-                px2m = usable / name_w;                     /* shrink, don't clip */
-            wtext_block(uf, vp, face, nm,
-                        -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
-                        ink_r, ink_g, ink_b);
-            {   /* the same label on the BACK face, so the tablet names itself
-                   from both sides (rotate 180 about Y so it reads, not mirrors;
-                   the engine never culls back faces, so the back is visible) */
-                mat4 back = mat4_mul(
-                    mat4_mul(scene_world_matrix(&state->scene, o),
-                             quat_to_mat4(quat_from_axis_angle(
-                                 vec3_make(0.0f, 1.0f, 0.0f), sol_radians(180.0f)))),
-                    mat4_translate(vec3_make(0.0f, 0.0f, ct * 0.5f + 0.0008f)));
-                wtext_block(uf, vp, back, nm,
+            /* the label: the card's name across the top, shrunk to fit. Notes
+               carry their content in the body, not a name — skip their label. */
+            if (o->kind != KIND_NOTE) {
+                nm = object_label(&state->scene, o->handle, lbuf);
+                px2m = 0.038f / lh;                             /* ~3.8cm line */
+                text_measure(uf, nm, 1.0f, &name_w, (float *)0);
+                if (name_w * px2m > usable && name_w > 0.0f)
+                    px2m = usable / name_w;                     /* shrink, don't clip */
+                wtext_block(uf, vp, face, nm,
                             -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
                             ink_r, ink_g, ink_b);
+                {   /* the same label on the BACK face, so the tablet names itself
+                       from both sides (rotate 180 about Y so it reads, not mirrors;
+                       the engine never culls back faces, so the back is visible) */
+                    mat4 back = mat4_mul(
+                        mat4_mul(scene_world_matrix(&state->scene, o),
+                                 quat_to_mat4(quat_from_axis_angle(
+                                     vec3_make(0.0f, 1.0f, 0.0f), sol_radians(180.0f)))),
+                        mat4_translate(vec3_make(0.0f, 0.0f, ct * 0.5f + 0.0008f)));
+                    wtext_block(uf, vp, back, nm,
+                                -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
+                                ink_r, ink_g, ink_b);
+                }
             }
             /* the note body: the inline text meta, wrapped to the card.
                While the note has focus, a caret tails the text — the meta
@@ -10885,9 +10898,9 @@ static void render(AppState *state) {
                     txt = ebuf;
                 }
                 if (txt && txt[0]) {
-                    float bpx2m = 0.028f / lh;              /* ~2.8cm body lines */
+                    float bpx2m = note_text_size(&state->scene, o->handle) / lh;
                     wtext_block(uf, vp, face, txt,
-                                -cw * 0.5f + margin, ch - margin - 0.055f,
+                                -cw * 0.5f + margin, ch - margin,
                                 bpx2m, usable, ink_r, ink_g, ink_b);
                 }
             }
