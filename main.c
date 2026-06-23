@@ -8562,26 +8562,33 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
     /* +/- resize the SELECTED note's body text. read_input has already returned
        above if a note is being edited or the palette is open, so these keys are
-       free here. =/+ grows, -/_ shrinks; numpad +/- too. */
+       free here. =/+ grows, -/_ shrinks; numpad +/- too. A press gives one clear
+       step; HOLDING keeps scaling (dt-rate, like the exposure scrub); the size is
+       saved once on release rather than every frame. */
     {
         sol_bool plus_now  = (sol_bool)(glfwGetKey(w, GLFW_KEY_EQUAL) == GLFW_PRESS ||
                                         glfwGetKey(w, GLFW_KEY_KP_ADD) == GLFW_PRESS);
         sol_bool minus_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_MINUS) == GLFW_PRESS ||
                                         glfwGetKey(w, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS);
         sol_bool ts_now    = (sol_bool)(plus_now || minus_now);
-        if (ts_now && !st->textsize_was_down && st->selected_handle != 0) {
+        if (ts_now && st->selected_handle != 0) {
             SceneObject *o = scene_get(&st->scene, st->selected_handle);
             if (o && o->kind == KIND_NOTE) {
-                float ts = note_text_size(&st->scene, st->selected_handle);
+                float ts    = note_text_size(&st->scene, st->selected_handle);
+                float delta = (float)dt * 0.10f;             /* held: continuous m/s */
                 char  tb[32];
-                ts += plus_now ? 0.004f : -0.004f;
+                if (!st->textsize_was_down) delta += 0.004f; /* initial press: a click */
+                ts += plus_now ? delta : -delta;
                 if (ts < 0.015f) ts = 0.015f;
                 if (ts > 0.180f) ts = 0.180f;
                 snprintf(tb, sizeof tb, "%.4f", (double)ts);
                 scene_meta_set(&st->scene, st->selected_handle, "text_size", tb);
-                note_autosize(st, st->selected_handle);
-                scene_save(&st->scene, "scene.stml");
+                note_autosize(st, st->selected_handle);      /* live; rebuilds only on change */
             }
+        }
+        if (!ts_now && st->textsize_was_down) {              /* released: persist once */
+            SceneObject *o = scene_get(&st->scene, st->selected_handle);
+            if (o && o->kind == KIND_NOTE) scene_save(&st->scene, "scene.stml");
         }
         st->textsize_was_down = ts_now;
     }
