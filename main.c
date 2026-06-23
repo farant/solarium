@@ -6958,6 +6958,14 @@ static void note_autosize(AppState *st, sol_u32 h) {
     }
 }
 
+/* a note card can be corner-resized (free-standing or pinned, unlike the
+   wall-only board path). */
+static sol_bool note_resizable(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    return (sol_bool)(o && o->kind == KIND_NOTE &&
+                      o->mesh_ref && strcmp(o->mesh_ref, "card") == 0);
+}
+
 static void carry_update(AppState *st) {
     SceneObject *o;
     vec3         fwd, hold;
@@ -7608,7 +7616,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 if (try_connect(st, st->selected_handle)) {
                     /* the press completed a connection — no drag */
                 } else if (st->selected_handle != 0 &&
-                           board_is_mounted(&st->scene, st->selected_handle) &&
+                           (board_is_mounted(&st->scene, st->selected_handle) ||
+                            note_resizable(&st->scene, st->selected_handle)) &&
                            resize_corner_pick(st, w)) {
                     /* grabbed a corner handle — resize, not carry */
                 } else if (st->selected_handle != 0 &&
@@ -7685,8 +7694,52 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }
         if (lmb && st->resize_board != 0) {             /* ---- resizing ---- */
             SceneObject *o = scene_get(&st->scene, st->resize_board);
-            if (!o || st->resize_room == 0 ||
-                scene_get(&st->scene, st->resize_room) == 0) {
+            if (!o) {
+                st->resize_board = 0;                   /* object vanished */
+            } else if (o->kind == KIND_NOTE) {
+                /* free-standing note: drag the card's OWN front-face plane (no
+                   wall). Horizontal drag sets the width (the wrap boundary);
+                   vertical drag sets a MIN height; note_autosize then enforces
+                   height >= wrapped content and keeps the top edge fixed. */
+                Ray   ray = pick_ray(st, w);
+                float yaw = board_yaw(&st->scene, st->resize_board);
+                vec3  n   = vec3_make((float)sin((double)yaw), 0.0f,
+                                      (float)cos((double)yaw));
+                float tt;
+                ray.dir = vec3_normalize(ray.dir);
+                if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
+                    vec3  hit = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+                    vec3  origin, cur_bottom, nb;
+                    float nw, nh, p3[3];
+                    float ct  = mesh_ref_param("card", o->mesh_params,
+                                               o->mesh_param_count, "t");
+                    char  oldkey[160], mhbuf[32];
+                    sol_bool keyed;
+                    board_resize_corner(st->resize_anchor, hit, st->resize_u,
+                                        0.15f, 0.0f, &nw, &nh, &origin);
+                    snprintf(mhbuf, sizeof mhbuf, "%.4f", (double)nh);
+                    scene_meta_set(&st->scene, st->resize_board, "min_h", mhbuf);
+                    /* width: release/rebuild the shared card mesh, keep height +
+                       vertical; set horizontal centre from the drag's origin */
+                    cur_bottom = object_world_pos(&st->scene, st->resize_board);
+                    keyed = mesh_asset_key(o, oldkey);
+                    p3[0] = nw;
+                    p3[1] = mesh_ref_param("card", o->mesh_params,
+                                           o->mesh_param_count, "h");
+                    p3[2] = ct;
+                    scene_mesh_params_set(&st->scene, st->resize_board, p3, 3);
+                    if (keyed) asset_release(&g_mesh_assets, oldkey);
+                    o = scene_get(&st->scene, st->resize_board);
+                    if (o) {
+                        memset(&o->mesh, 0, sizeof o->mesh);
+                        nb = vec3_make(origin.x, cur_bottom.y, origin.z);
+                        o->pos = scene_world_to_local(&st->scene, o->parent, nb);
+                    }
+                    scene_resolve_meshes(&st->scene);
+                    note_autosize(st, st->resize_board);  /* height + top-anchor */
+                }
+            } else if (st->resize_room == 0 ||
+                       scene_get(&st->scene, st->resize_room) == 0) {
                 st->resize_board = 0;                   /* board/room vanished */
             } else {
                 Ray      ray = pick_ray(st, w);
@@ -11052,7 +11105,8 @@ static void render(AppState *state) {
         /* resize handles (whiteboard resize): a selected wall-mounted board
            shows a small glowing quad at each of its 4 corners. */
         if (state->selected_handle != 0 &&
-            board_is_mounted(&state->scene, state->selected_handle)) {
+            (board_is_mounted(&state->scene, state->selected_handle) ||
+             note_resizable(&state->scene, state->selected_handle))) {
             vec3     cor[4], u, n;
             float    yaw = board_yaw(&state->scene, state->selected_handle);
             Material hm  = material_default();
