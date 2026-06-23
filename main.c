@@ -2484,7 +2484,10 @@ static RhiTexture build_decal_atlas(void) {
     return rhi_create_texture(px, DECAL_ATLAS_W, DECAL_ATLAS_H, RHI_TEX_RGBA8);
 }
 
-#define INV_THUMB_CAP 64   /* max items the bag tracks / caches at once */
+#define INV_THUMB_CAP 64    /* max items the bag tracks (items[] buffers, paging) */
+#define INV_THUMB_SIZE 256  /* per-item thumbnail render-target edge, px */
+#define INV_THUMB_POOL 16   /* cached thumbnail render targets (bounds GPU RT slots:
+                               only the visible page is built, a few spill cached) */
 
 typedef struct AppState {
     int         fb_width, fb_height;
@@ -2706,6 +2709,13 @@ typedef struct AppState {
     sol_bool    inv_open;       /* the modal screen is up                        */
     sol_bool    inv_was_open;   /* edge-detect for the cursor release            */
     int         inv_page;       /* current page in the grid                      */
+    /* inventory thumbnails: one cached RGBA8 target per stowed item, plus a
+       shared HDR scratch + two 1x1 neutral textures for the post-pass reuse. */
+    struct { sol_u32 handle; RhiRenderTarget rt; } inv_thumbs[INV_THUMB_POOL];
+    int             inv_thumb_count;
+    RhiRenderTarget inv_thumb_hdr;   /* shared HDR scratch (RGBA16F)          */
+    RhiTexture      inv_white_tex;   /* 1x1 white: neutral AO input           */
+    RhiTexture      inv_black_tex;   /* 1x1 black: neutral godray/bloom/depth  */
     sol_u32     move_board;        /* picture being slid along its wall; 0 = none */
     vec3        move_grab;         /* origin - cursor-hit at grab, so it tracks the cursor */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
@@ -6400,6 +6410,15 @@ static void cmd_mint_codex(AppState *st) {
            p[7] > 0.5f ? ", clasped" : "");
 }
 
+/* tag a freshly minted root into the current workspace (absent => the base
+   "home", matching every other prop mint) so scenery lands in the world you
+   are standing in, not the default one. */
+static void mint_tag_ws(AppState *st, sol_u32 h) {
+    if (h != 0)
+        scene_meta_set(&st->scene, h, "workspace",
+                       st->scene.active_ws[0] ? st->scene.active_ws : "home");
+}
+
 /* H mints a terrain ISLAND ahead of you, at your floor level (item 10):
    press it while flying and the island FLOATS there — vertical
    placement for free. room_type meta makes it LAND (architecture is
@@ -6433,6 +6452,7 @@ static void cmd_mint_island(AppState *st) {
     scene_mesh_params_set(&st->scene, h, p, 5);
     scene_meta_set(&st->scene, h, "name", isle[ni]);
     scene_meta_set(&st->scene, h, "room_type", "terrain");
+    mint_tag_ws(st, h);                          /* land in the active world */
     {
         SceneObject *to = scene_get(&st->scene, h);
         if (to) {
@@ -6627,6 +6647,7 @@ static void cmd_mint_church(AppState *st) {
                                     vec3_make(0.0f, datum, 0.0f)),
                            rot, one);
         scene_meta_set(&st->scene, anchor, "room_type", "church");
+        mint_tag_ws(st, anchor);                 /* land in the active world */
         if (isl->nid)            /* the dial finds it next press */
             scene_meta_set(&st->scene, anchor, "plot", isl->nid);
         {
@@ -6718,6 +6739,7 @@ static void cmd_mint_lantern(AppState *st) {
                   vec3_make(0.16f, 0.16f, 0.16f));
     scene_mesh_ref_set(&st->scene, h, "box");
     scene_meta_set(&st->scene, h, "name", "lantern");
+    mint_tag_ws(st, h);                          /* land in the active world */
     scene_meta_set(&st->scene, h, "light", "point");
     scene_meta_set(&st->scene, h, "light_color", "1.0 0.72 0.42");
     scene_meta_set(&st->scene, h, "light_intensity", "14");
@@ -6794,6 +6816,7 @@ static void cmd_mint_pond(AppState *st) {
     params[0] = r; params[1] = 2.0f; params[2] = 7.0f;
     scene_mesh_params_set(&st->scene, h, params, 3);
     scene_meta_set(&st->scene, h, "name", "pond");
+    mint_tag_ws(st, h);                          /* land in the active world */
     scene_resolve_meshes(&st->scene);
     st->selected_handle = h;
     scene_save(&st->scene, "scene.stml");
@@ -6820,6 +6843,7 @@ static void cmd_mint_dust(AppState *st) {
                   vec3_make(0.05f, 0.05f, 0.05f));
     scene_mesh_ref_set(&st->scene, h, "box");
     scene_meta_set(&st->scene, h, "name", "dust");
+    mint_tag_ws(st, h);                          /* land in the active world */
     scene_component_add(&st->scene, h, "emit", (const float *)0, 0);
     {
         SceneObject *eo = scene_get(&st->scene, h);
@@ -6855,6 +6879,7 @@ static void cmd_mint_fox(AppState *st) {
     h = scene_add(&st->scene, 0, empty, pos, quat_identity(),
                   vec3_make(0.007f, 0.007f, 0.007f));
     scene_meta_set(&st->scene, h, "name", "fox");
+    mint_tag_ws(st, h);                          /* land in the active world */
     scene_meta_set(&st->scene, h, "skin_glb", "Fox.glb");
     scene_component_add(&st->scene, h, "animate", (const float *)0, 0);
                                /* the persisted rule: clip 0 if it
@@ -8715,6 +8740,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             scene_mesh_params_set(&st->scene, island, tpar, 5);
             scene_meta_set(&st->scene, island, "room_type", "land");
             scene_meta_set(&st->scene, island, "name", "the abbey hill");
+            mint_tag_ws(st, island);             /* the abbey lands in the active world */
 
             /* the hall church, already half-fallen (style 1, ruin 0.55) */
             cpar[0] = 15.0f; cpar[1] = 24.0f; cpar[2] = iseed;
@@ -8764,6 +8790,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                rot, one);
             scene_meta_set(&st->scene, anchor, "room_type", "church");
             scene_meta_set(&st->scene, anchor, "name", "the abbey");
+            mint_tag_ws(st, anchor);             /* the abbey church in the active world */
             {
                 SceneObject *iso = scene_get(&st->scene, island);
                 if (iso && iso->nid)
@@ -9897,6 +9924,13 @@ static int init_scene(AppState *state) {
         state->grade_luts[0] = build_grade_lut(0);   /* P9 item 1: identity strip */
         state->grade_luts[1] = build_grade_lut(1);   /* P9 item 1: filmic split-tone */
         state->decal_atlas   = build_decal_atlas();  /* P9 item 3: stain + moss atlas */
+        {   /* inventory thumbnail scratch + neutral post inputs (created once) */
+            unsigned char wpx[4] = { 255, 255, 255, 255 };
+            unsigned char bpx[4] = { 0, 0, 0, 255 };
+            state->inv_thumb_hdr = rhi_create_render_target(INV_THUMB_SIZE, INV_THUMB_SIZE, RHI_TEX_RGBA16F);
+            state->inv_white_tex = rhi_create_texture(wpx, 1, 1, RHI_TEX_RGBA8);
+            state->inv_black_tex = rhi_create_texture(bpx, 1, 1, RHI_TEX_RGBA8);
+        }
     }
 
     {   /* god-rays (P8 item 3): a fullscreen raymarch, same desc shape as post */
@@ -10973,18 +11007,138 @@ static sol_bool editor_world_to_screen(AppState *st, float aspect, vec3 wp,
 }
 
 /* a stable-ish tile color from a kind, so the placeholder grid is legible. */
-static void inv_kind_color(const SceneObject *o, sol_bool is_codex,
-                           float *r, float *g, float *b) {
-    const char *mr = o && o->mesh_ref ? o->mesh_ref : "";
-    *r = 0.35f; *g = 0.38f; *b = 0.45f;                 /* default slate */
-    if (is_codex) { *r = 0.45f; *g = 0.32f; *b = 0.22f; }                    /* book brown */
-    else if (strcmp(mr, "picture") == 0) { *r = 0.25f; *g = 0.40f; *b = 0.50f; }
-    else if (o && o->kind == KIND_NOTE)  { *r = 0.55f; *g = 0.52f; *b = 0.30f; }
+/* The representative mesh + material for an item's thumbnail: a codex shows its
+   cover; everything else shows its own mesh. SOL_FALSE if it has no drawable
+   mesh. */
+static sol_bool inventory_thumb_mesh(AppState *st, sol_u32 item, Mesh *mesh, Material *mat) {
+    sol_u32      cov = codex_cover_child(&st->scene, item);
+    SceneObject *o   = scene_get(&st->scene, cov != 0 ? cov : item);
+    if (!o || o->mesh.index_count == 0) return SOL_FALSE;
+    *mesh = o->mesh;
+    *mat  = o->material;
+    return SOL_TRUE;
 }
 
-/* The inventory screen: a dim backdrop, a grid of item tiles (placeholder
-   colored squares until Task 4's thumbnails), name labels, and pagination.
-   Drawn inside the open UI batch, like the palette/editor overlays. */
+/* Tonemap+encode the HDR scratch into `dst` using the EXISTING post pipeline,
+   driven with neutral inputs (no bloom/godray/fog/grade/vignette) so the
+   thumbnail is a clean sRGB-encoded RGBA8 that ui_textured_quad can show. */
+static void inventory_thumb_tonemap(AppState *st, RhiRenderTarget dst) {
+    mat4 ident = mat4_identity();
+    rhi_begin_pass(dst, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);
+    rhi_set_pipeline(st->post_pipeline);
+    rhi_bind_texture(rhi_render_target_texture(st->inv_thumb_hdr), 0);
+    rhi_bind_texture(st->inv_black_tex, 1);   /* uBloom (gated to 0 anyway)   */
+    rhi_bind_texture(st->inv_black_tex, 2);   /* uDepth (fog gated off)       */
+    rhi_bind_texture(st->inv_black_tex, 3);   /* uGodray = black (added raw)  */
+    rhi_bind_texture(st->inv_white_tex, 4);   /* uAO = white (multiplied)     */
+    rhi_bind_texture(st->inv_black_tex, 5);   /* uLut (gated to 0)            */
+    rhi_set_uniform_int("uHdr", 0);    rhi_set_uniform_int("uBloom", 1);
+    rhi_set_uniform_int("uDepth", 2);  rhi_set_uniform_int("uGodray", 3);
+    rhi_set_uniform_int("uAO", 4);     rhi_set_uniform_int("uLut", 5);
+    rhi_set_uniform_float("uBloomStrength", 0.0f);
+    rhi_set_uniform_float("uExposure", st->exposure);
+    rhi_set_uniform_float("uFogDensity", 0.0f);
+    rhi_set_uniform_float("uFogFalloff", 1.0f);
+    rhi_set_uniform_float("uFogHeight", 0.0f);
+    rhi_set_uniform_float("uFogStrength", 0.0f);
+    rhi_set_uniform_vec3 ("uAerialColor", 0.0f, 0.0f, 0.0f);
+    rhi_set_uniform_vec3 ("uFogColor", 0.0f, 0.0f, 0.0f);
+    rhi_set_uniform_vec3 ("uCamPos", 0.0f, 0.0f, 0.0f);
+    rhi_set_uniform_mat4 ("uInvViewProj", ident.m);
+    rhi_set_uniform_vec3 ("uGradeTint", 1.0f, 1.0f, 1.0f);
+    rhi_set_uniform_float("uGradeContrast", 1.0f);
+    rhi_set_uniform_float("uGradeSaturation", 1.0f);
+    rhi_set_uniform_float("uLutMix", 0.0f);
+    rhi_set_uniform_float("uVignetteStrength", 0.0f);
+    rhi_set_uniform_float("uVignetteRadius", 1.0f);
+    rhi_draw(0, 3);
+    rhi_end_pass();
+}
+
+/* Render an item's thumbnail into `dst`: the representative mesh, framed by a
+   fixed 3/4 view, into the HDR scratch (existing forward PBR draw), then
+   tonemapped into dst. */
+static void inventory_thumb_render(AppState *st, sol_u32 item, RhiRenderTarget dst) {
+    Mesh     mesh;
+    Material mat;
+    mat4     model, view, proj;
+    vec3     eye, ctr, ext;
+    float    rad, dist;
+    if (!inventory_thumb_mesh(st, item, &mesh, &mat)) return;
+    ctr  = vec3_scale(vec3_add(mesh.bounds.min, mesh.bounds.max), 0.5f);
+    ext  = vec3_sub(mesh.bounds.max, mesh.bounds.min);
+    rad  = 0.5f * (float)sqrt((double)vec3_dot(ext, ext));   /* no vec3_length in sol_math */
+    if (rad < 1e-3f) rad = 0.5f;
+    dist = rad * 2.6f;
+    eye  = vec3_add(ctr, vec3_make(dist * 0.7f, dist * 0.6f, dist * 0.7f));
+    model = mat4_identity();
+    view  = mat4_look_at(eye, ctr, vec3_make(0.0f, 1.0f, 0.0f));
+    proj  = mat4_perspective(sol_radians(35.0f), 1.0f, 0.05f, dist * 4.0f + 10.0f);
+    rhi_begin_pass(st->inv_thumb_hdr, RHI_CLEAR_ALL, 0.10f, 0.12f, 0.15f, 1.0f);
+    draw_mesh(st, mesh, model, view, proj, eye, 0.0f, mat);
+    rhi_end_pass();
+    inventory_thumb_tonemap(st, dst);
+}
+
+/* Look up (or build) the cached thumbnail target for an item. {0} if the item
+   has no mesh. Simple eviction: when full, recycle slot 0. */
+static RhiRenderTarget inventory_thumb_get(AppState *st, sol_u32 item) {
+    int i;
+    for (i = 0; i < st->inv_thumb_count; i++)
+        if (st->inv_thumbs[i].handle == item) return st->inv_thumbs[i].rt;
+    if (st->inv_thumb_count >= INV_THUMB_POOL) {    /* pool full: evict the oldest */
+        rhi_destroy_render_target(st->inv_thumbs[0].rt);
+        for (i = 1; i < st->inv_thumb_count; i++) st->inv_thumbs[i - 1] = st->inv_thumbs[i];
+        st->inv_thumb_count--;
+    }
+    i = st->inv_thumb_count++;
+    st->inv_thumbs[i].handle = item;
+    st->inv_thumbs[i].rt     = rhi_create_render_target(INV_THUMB_SIZE, INV_THUMB_SIZE, RHI_TEX_RGBA8);
+    inventory_thumb_render(st, item, st->inv_thumbs[i].rt);
+    return st->inv_thumbs[i].rt;
+}
+
+/* Cache-only lookup ({0} if not built). The overlay uses this so it NEVER
+   triggers a render mid-UI-batch — inventory_ensure_thumbs (frame top) builds. */
+static RhiRenderTarget inventory_thumb_lookup(AppState *st, sol_u32 item) {
+    RhiRenderTarget none;
+    int i;
+    none.id = 0;
+    for (i = 0; i < st->inv_thumb_count; i++)
+        if (st->inv_thumbs[i].handle == item) return st->inv_thumbs[i].rt;
+    return none;
+}
+
+/* Build the thumbnails for the CURRENT PAGE (only — to bound GPU render-target
+   slots, since each thumbnail is a render target), and drop cached targets whose
+   item left the bag. Call at the top of the frame while the screen is open
+   (inside the frame's command stream — no rhi_flush). */
+static void inventory_ensure_thumbs(AppState *st) {
+    sol_u32 items[INV_THUMB_CAP];
+    int     n = inventory_collect(st, items, INV_THUMB_CAP), i, j, start, end;
+    st->inv_page = inv_clamp_page(st->inv_page, n, INV_PER_PAGE);
+    start = st->inv_page * INV_PER_PAGE;
+    end   = start + INV_PER_PAGE;
+    if (end > n) end = n;
+    /* Evict every cached thumbnail NOT on the current page (covers departed
+       items too). The pool then holds at most one page, so building the page's
+       misses below can never evict a thumbnail this page still needs. */
+    for (i = 0; i < st->inv_thumb_count; ) {
+        sol_bool keep = SOL_FALSE;
+        for (j = start; j < end; j++)
+            if (items[j] == st->inv_thumbs[i].handle) { keep = SOL_TRUE; break; }
+        if (!keep) {
+            rhi_destroy_render_target(st->inv_thumbs[i].rt);
+            for (j = i + 1; j < st->inv_thumb_count; j++) st->inv_thumbs[j - 1] = st->inv_thumbs[j];
+            st->inv_thumb_count--;
+        } else i++;
+    }
+    for (i = start; i < end; i++) (void)inventory_thumb_get(st, items[i]);   /* build the page */
+}
+
+/* The inventory screen: a dim backdrop, a grid of item tiles (live 3D
+   thumbnails, built at frame top), name labels, and pagination. Drawn inside
+   the open UI batch, like the palette/editor overlays. */
 static void inventory_draw_overlay(AppState *st) {
     sol_u32 items[INV_THUMB_CAP];
     int     n, pages, slot;
@@ -11000,15 +11154,15 @@ static void inventory_draw_overlay(AppState *st) {
 
     for (slot = 0; slot < INV_PER_PAGE; slot++) {
         int   idx = st->inv_page * INV_PER_PAGE + slot;
-        float x, y, w, h, cr, cg, cb;
-        SceneObject *o;
-        sol_bool is_codex;
+        float x, y, w, h;
+        SceneObject    *o;
+        RhiRenderTarget rt;
         if (idx >= n) break;
         o = scene_get(&st->scene, items[idx]);
-        is_codex = (sol_bool)(codex_cover_child(&st->scene, items[idx]) != 0);
         inv_cell_rect(slot, INV_COLS, INV_ROWS, st->fb_width, st->fb_height, &x, &y, &w, &h);
-        inv_kind_color(o, is_codex, &cr, &cg, &cb);
-        ui_quad(x, y, w, h, cr, cg, cb, 1.0f);                 /* placeholder tile */
+        ui_quad(x, y, w, h, 0.08f, 0.09f, 0.11f, 1.0f);        /* matte behind */
+        rt = inventory_thumb_lookup(st, items[idx]);           /* built at frame top */
+        if (rt.id != 0) ui_textured_quad(rhi_render_target_texture(rt), x, y, w, h);
         ui_quad_outline(x, y, w, h, 2.0f, 0.85f, 0.88f, 0.95f, 1.0f);
         {   /* the item's name, centred under the tile */
             const char *nm = o ? scene_meta_get(&st->scene, items[idx], "name") : (const char *)0;
@@ -11054,6 +11208,7 @@ static void editor_draw_overlay(AppState *st) {
         sol_bool active_room;
         if (st->scene.objects[i].mesh_ref) continue;
         if (!scene_meta_get(&st->scene, h, "room_type")) continue;
+        if (!scene_object_active(&st->scene, h)) continue;   /* only the active world's rooms */
         r = editor_room_rect(&st->scene, h);
         cw[0] = vec3_make(r.cx - r.hw, r.floor_y, r.cz - r.hd);
         cw[1] = vec3_make(r.cx + r.hw, r.floor_y, r.cz - r.hd);
@@ -11102,6 +11257,8 @@ static void render(AppState *state) {
     unsigned char *vis;
 
     ensure_render_target(state, state->fb_width, state->fb_height);
+    if (state->inv_open) inventory_ensure_thumbs(state);   /* build missing bag thumbnails
+                                                              inside the frame stream */
     rt0 = glfwGetTime();
     state->draws_total = 0;
     state->draws_done  = 0;

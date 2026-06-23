@@ -80,7 +80,7 @@ extern void  objc_autoreleasePoolPop(void *pool);
 #define MAX_SHADERS          64
 #define MAX_PIPELINES        64
 #define MAX_TEXTURES       1024
-#define MAX_RENDER_TARGETS   16
+#define MAX_RENDER_TARGETS   48   /* engine ~14 + inventory thumbnail pool + scratch */
 #define SLOT_NONE  ((sol_u32)-1)
 
 /* sampler kinds — GL baked sampler state into the texture object at
