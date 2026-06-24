@@ -4178,8 +4178,11 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define WALL_TILE_M    3.0f      /* meters per texture-repeat (the plank-size knob) */
 #define WALL_EPS       0.01f     /* inward lift off the wall face (anti z-fight) */
 #define ROOM_FRAME_MAX 128
+#define FRAME_COL_T  0.24f       /* corner column cross-section (m) */
+#define WOOD_TILE_M  1.0f        /* meters per wood texture-repeat along a beam */
 
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
+static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
 
 typedef struct { sol_u32 handle; Mesh wall, wood; } RoomFrame;
 static RoomFrame g_room_frame[ROOM_FRAME_MAX];
@@ -4259,6 +4262,45 @@ static void wall_panels(MeshBuilder *b, int runx, float f, float ns,
     }
 }
 
+/* a quad a->b->c->d (CCW from +n) with bilinear UVs: a=(u0,v0) ... c=(u1,v1). */
+static void frame_quad(MeshBuilder *mb, vec3 a, vec3 b, vec3 c, vec3 d,
+                       vec3 n, float u0, float v0, float u1, float v1) {
+    sol_u32 ia, ib, ic, id;
+    ia = mb_push_vertex(mb, a.x, a.y, a.z, n.x, n.y, n.z, u0, v0);
+    ib = mb_push_vertex(mb, b.x, b.y, b.z, n.x, n.y, n.z, u1, v0);
+    ic = mb_push_vertex(mb, c.x, c.y, c.z, n.x, n.y, n.z, u1, v1);
+    id = mb_push_vertex(mb, d.x, d.y, d.z, n.x, n.y, n.z, u0, v1);
+    mb_push_triangle(mb, ia, ib, ic);
+    mb_push_triangle(mb, ia, ic, id);
+}
+
+/* a t x t square-section beam swept A->B, wood tiling along its length. */
+static void frame_beam(MeshBuilder *mb, vec3 a, vec3 b, float t) {
+    vec3  dir, side, vup, refv, s, v;
+    vec3  a00, a01, a11, a10, b00, b01, b11, b10;
+    float len, hr = t * 0.5f, uL, vT;
+    dir = vec3_sub(b, a);
+    len = (float)sqrt((double)vec3_dot(dir, dir));
+    if (len < 1e-5f) return;
+    dir  = vec3_scale(dir, 1.0f / len);
+    refv = (fabs((double)dir.y) < 0.99) ? vec3_make(0.0f, 1.0f, 0.0f)
+                                        : vec3_make(1.0f, 0.0f, 0.0f);
+    side = vec3_normalize(vec3_cross(dir, refv));
+    vup  = vec3_normalize(vec3_cross(side, dir));
+    s = vec3_scale(side, hr); v = vec3_scale(vup, hr);
+    a00 = vec3_sub(vec3_sub(a, s), v); a10 = vec3_sub(vec3_add(a, s), v);
+    a11 = vec3_add(vec3_add(a, s), v); a01 = vec3_add(vec3_sub(a, s), v);
+    b00 = vec3_sub(vec3_sub(b, s), v); b10 = vec3_sub(vec3_add(b, s), v);
+    b11 = vec3_add(vec3_add(b, s), v); b01 = vec3_add(vec3_sub(b, s), v);
+    uL = len / WOOD_TILE_M; vT = t / WOOD_TILE_M;
+    frame_quad(mb, a10, b10, b11, a11, side,                    0.0f, 0.0f, uL, vT);  /* +side */
+    frame_quad(mb, a01, b01, b00, a00, vec3_scale(side, -1.0f), 0.0f, 0.0f, uL, vT);  /* -side */
+    frame_quad(mb, a11, b11, b01, a01, vup,                     0.0f, 0.0f, uL, vT);  /* +vup  */
+    frame_quad(mb, a00, b00, b10, a10, vec3_scale(vup,  -1.0f), 0.0f, 0.0f, uL, vT);  /* -vup  */
+    frame_quad(mb, b10, b00, b01, b11, dir,                     0.0f, 0.0f, vT, vT);  /* +end  */
+    frame_quad(mb, a00, a10, a11, a01, vec3_scale(dir,  -1.0f), 0.0f, 0.0f, vT, vT);  /* -end  */
+}
+
 /* build a RoomFrame (wall + timber) for a room shell from its openings and
    store it by handle (replacing any prior entry). no-op if planks disabled. */
 static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no) {
@@ -4266,24 +4308,37 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
     Mesh        wall, wood;
     float       w, d, h, hw, hd;
     int         i;
-    if (g_wall_mat.albedo_tex.id == 0) return;     /* (a later task widens this) */
+    if (g_wall_mat.albedo_tex.id == 0 && g_dark_wood.albedo_tex.id == 0) return;
     w  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
     d  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
     h  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
     hw = w * 0.5f; hd = d * 0.5f;
     memset(&wall, 0, sizeof wall);
     memset(&wood, 0, sizeof wood);
-    mb_init(&mb);
-    if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "wn") > 0.5f)
-        wall_panels(&mb, 1, -hd + WALL_EPS,  1.0f, -hw, hw, h, ops, no, ROOM_WALL_N);
-    if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ws") > 0.5f)
-        wall_panels(&mb, 1,  hd - WALL_EPS, -1.0f, -hw, hw, h, ops, no, ROOM_WALL_S);
-    if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "we") > 0.5f)
-        wall_panels(&mb, 0,  hw - WALL_EPS, -1.0f, -hd, hd, h, ops, no, ROOM_WALL_E);
-    if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f)
-        wall_panels(&mb, 0, -hw + WALL_EPS,  1.0f, -hd, hd, h, ops, no, ROOM_WALL_W);
-    if (mb.index_count > 0) wall = mesh_from_builder(&mb);
-    mb_free(&mb);
+    if (g_wall_mat.albedo_tex.id != 0) {
+        mb_init(&mb);
+        if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "wn") > 0.5f)
+            wall_panels(&mb, 1, -hd + WALL_EPS,  1.0f, -hw, hw, h, ops, no, ROOM_WALL_N);
+        if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ws") > 0.5f)
+            wall_panels(&mb, 1,  hd - WALL_EPS, -1.0f, -hw, hw, h, ops, no, ROOM_WALL_S);
+        if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "we") > 0.5f)
+            wall_panels(&mb, 0,  hw - WALL_EPS, -1.0f, -hd, hd, h, ops, no, ROOM_WALL_E);
+        if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f)
+            wall_panels(&mb, 0, -hw + WALL_EPS,  1.0f, -hd, hd, h, ops, no, ROOM_WALL_W);
+        if (mb.index_count > 0) wall = mesh_from_builder(&mb);
+        mb_free(&mb);
+    }
+    if (g_dark_wood.albedo_tex.id != 0) {
+        float ci = FRAME_COL_T * 0.5f + 0.02f;   /* inset just inside the walls */
+        float cx = hw - ci, cz = hd - ci;
+        mb_init(&mb);
+        frame_beam(&mb, vec3_make(-cx, 0.0f, -cz), vec3_make(-cx, h, -cz), FRAME_COL_T);
+        frame_beam(&mb, vec3_make( cx, 0.0f, -cz), vec3_make( cx, h, -cz), FRAME_COL_T);
+        frame_beam(&mb, vec3_make( cx, 0.0f,  cz), vec3_make( cx, h,  cz), FRAME_COL_T);
+        frame_beam(&mb, vec3_make(-cx, 0.0f,  cz), vec3_make(-cx, h,  cz), FRAME_COL_T);
+        if (mb.index_count > 0) wood = mesh_from_builder(&mb);
+        mb_free(&mb);
+    }
     for (i = 0; i < g_room_frame_n; i++)
         if (g_room_frame[i].handle == shell->handle) {
             mesh_destroy(&g_room_frame[i].wall);
@@ -9783,6 +9838,13 @@ static void wall_mat_init(void) {
         "weathered_brown_planks/weathered_brown_planks_arm_1k.png");
 }
 
+static void dark_wood_mat_init(void) {
+    g_dark_wood = load_pbr_material(
+        "dark_wood/dark_wood_diff_1k.png",
+        "dark_wood/dark_wood_nor_gl_1k.png",
+        "dark_wood/dark_wood_arm_1k.png");
+}
+
 /* a w x d floor quad (XZ, +Y up) with meter-based tiling UVs, cached by size so a
    tile is the same physical size in every room. empty mesh on cache overflow. */
 static Mesh floor_quad_for(float w, float d) {
@@ -10933,6 +10995,7 @@ static int init_scene(AppState *state) {
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
     floor_mat_init();   /* sandstone floor overlay (sourced experiment, flagged) */
     wall_mat_init();    /* plank walls overlay (sourced experiment, flagged) */
+    dark_wood_mat_init();   /* timber halls: corner columns + trusses */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
        loaded and brought fully to life. The home scene builds only on first
@@ -12106,6 +12169,8 @@ static void render(AppState *state) {
             rm = scene_world_matrix(&state->scene, o);
             if (g_wall_mat.albedo_tex.id != 0 && rf->wall.index_count > 0)
                 draw_mesh(state, rf->wall, rm, view, proj, eye, 0.0f, g_wall_mat);
+            if (g_dark_wood.albedo_tex.id != 0 && rf->wood.index_count > 0)
+                draw_mesh(state, rf->wood, rm, view, proj, eye, 0.0f, g_dark_wood);
         }
     }
 
