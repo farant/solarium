@@ -4198,6 +4198,12 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define CAMPUS_PAD_SINK  0.15f    /* sink a pad below the floor/deck so the solid covers it (m) */
 #define CAMPUS_PATH_HALF 0.85f    /* half-width of a walkway corridor pad (m) */
 #define CAMPUS_PATH_STEP 1.2f     /* sample spacing along a walkway leg (m) */
+#define CAMPUS_GRASS_PER_M2 2.0f      /* grass density on the campus */
+#define CAMPUS_GRASS_MAX    16000
+#define CAMPUS_TREE_PER_M2  0.012f    /* tree density */
+#define CAMPUS_TREE_MAX     128
+#define CAMPUS_GRASS_CLEAR  0.4f      /* keep grass this far off pads (m) */
+#define CAMPUS_TREE_CLEAR   1.6f      /* keep trees this far off pads (m) */
 
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
@@ -4218,6 +4224,13 @@ typedef struct {
     Mesh      mesh;
 } CampusState;
 static CampusState g_campus;       /* derived: the active world's campus, or disabled */
+
+typedef struct {
+    RhiBuffer grass;                          int grass_n;
+    RhiBuffer wood[FOREST_VARIANT_COUNT];      int wood_n[FOREST_VARIANT_COUNT];
+    RhiBuffer canopy[2];                       int canopy_n[2];
+} CampusFlora;
+static CampusFlora g_campus_flora;             /* derived, drawn explicitly when g_campus.enabled */
 
 static void room_frame_flush(void) {
     int i;
@@ -4692,6 +4705,8 @@ static int campus_gather_pads(AppState *st, const Route *routes, int nroutes,
     return n;
 }
 
+static void campus_flora_rebuild(AppState *st);  /* scatters campus grass + trees; defined below */
+
 /* (re)build the active world's campus terrain into g_campus, or disable it.
    Derived: called at the end of connections_rebuild (every structural change). */
 static void campus_rebuild(AppState *st, const Route *routes, int nroutes) {
@@ -4819,6 +4834,7 @@ static void connections_rebuild(AppState *st) {
     }
 
     campus_rebuild(st, routes, n);   /* derived: the active world's grounding terrain */
+    campus_flora_rebuild(st);   /* the campus's grass + trees follow it */
 }
 
 /* Incident rebuild for the LIVE editor drag: re-thread only the walkways that
@@ -5629,6 +5645,118 @@ static void forest_rebuild(AppState *st) {
     if (st->forest_count > 0)
         printf("the forest: %d island(s), %d trees + scree\n",
                st->forest_count, total);
+}
+
+static void campus_flora_free(void) {
+    int v;
+    if (g_campus_flora.grass_n) rhi_destroy_buffer(g_campus_flora.grass);
+    for (v = 0; v < FOREST_VARIANT_COUNT; v++)
+        if (g_campus_flora.wood_n[v]) rhi_destroy_buffer(g_campus_flora.wood[v]);
+    if (g_campus_flora.canopy_n[0]) rhi_destroy_buffer(g_campus_flora.canopy[0]);
+    if (g_campus_flora.canopy_n[1]) rhi_destroy_buffer(g_campus_flora.canopy[1]);
+    memset(&g_campus_flora, 0, sizeof g_campus_flora);
+}
+
+/* scatter grass + trees over the active campus, sampling campus_height and
+   skipping the pads (rooms + walkway corridors). Reuses the meadow tuft format
+   and forest_place; drawn explicitly (campus is a derived global). No-op when off. */
+static void campus_flora_rebuild(AppState *st) {
+    float   cx, cz, w, d, amp;
+    int     target, placed, k;
+    sol_u32 rng;
+    float  *buf;
+    (void)st;
+    campus_flora_free();
+    if (!g_campus.enabled || g_campus.npads == 0) return;
+    cx = g_campus.center.x; cz = g_campus.center.z;
+    w = g_campus.w; d = g_campus.d; amp = CAMPUS_HILL_AMP;
+
+    /* --- grass (world-space; reuse the meadow tuft format/colors) --- */
+    rng    = CAMPUS_SEED * 2654435761u + 7u;
+    target = (int)(w * d * CAMPUS_GRASS_PER_M2);
+    if (target > CAMPUS_GRASS_MAX) target = CAMPUS_GRASS_MAX;
+    buf = (float *)malloc((size_t)(target > 0 ? target : 1) * 8 * sizeof(float));
+    placed = 0;
+    for (k = 0; buf && k < target; k++) {
+        float lx, lz, h, sx, sz, slope, r1, r2, r3;
+        lx = (meadow_rnd(&rng) - 0.5f) * (w - 1.5f);
+        lz = (meadow_rnd(&rng) - 0.5f) * (d - 1.5f);
+        if (campus_point_blocked(g_campus.pads, g_campus.npads, lx, lz, CAMPUS_GRASS_CLEAR)) continue;
+        h  = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz);
+        sx = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx + 0.5f, lz);
+        sz = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz + 0.5f);
+        slope = (float)sqrt((double)((sx - h) * (sx - h) + (sz - h) * (sz - h))) * 2.0f;
+        if (slope > 0.5f) continue;                       /* steep hillside: bare */
+        r1 = meadow_rnd(&rng); r2 = meadow_rnd(&rng); r3 = meadow_rnd(&rng);
+        buf[placed * 8 + 0] = cx + lx;
+        buf[placed * 8 + 1] = h;
+        buf[placed * 8 + 2] = cz + lz;
+        buf[placed * 8 + 3] = 0.16f + 0.20f * r1;
+        buf[placed * 8 + 4] = 0.10f + 0.10f * r2;
+        buf[placed * 8 + 5] = 0.22f + 0.16f * r3;
+        buf[placed * 8 + 6] = 0.05f + 0.06f * r2;
+        buf[placed * 8 + 7] = 1.0f;
+        placed++;
+    }
+    if (buf && placed > 0) {
+        g_campus_flora.grass = rhi_create_buffer(RHI_BUFFER_VERTEX, buf,
+                                   (size_t)placed * 8 * sizeof(float));
+        g_campus_flora.grass_n = placed;
+    }
+    free(buf);
+
+    /* --- trees (local-to-centre via forest_place; needs the canopy slots) --- */
+    if (g_forest_built) {
+        float *wood[FOREST_VARIANT_COUNT];
+        float *can[2];
+        int    wn[FOREST_VARIANT_COUNT], cn[2], v, ok = 1, darts;
+        rng    = CAMPUS_SEED * 2246822519u + 13u;
+        target = (int)(w * d * CAMPUS_TREE_PER_M2);
+        if (target > CAMPUS_TREE_MAX) target = CAMPUS_TREE_MAX;
+        for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+            wood[v] = (float *)malloc((size_t)(target > 0 ? target : 1) * 8 * sizeof(float));
+            wn[v] = 0;
+            if (!wood[v]) ok = 0;
+        }
+        can[0] = (float *)malloc((size_t)FOREST_CANOPY_CAP * 8 * sizeof(float));
+        can[1] = (float *)malloc((size_t)FOREST_CANOPY_CAP * 8 * sizeof(float));
+        cn[0] = cn[1] = 0;
+        if (!can[0] || !can[1]) ok = 0;
+        if (ok && target > 0) {
+            placed = 0;
+            for (darts = 0; darts < target * 6 && placed < target; darts++) {
+                float lx, lz, h, sx, sz, slope, yaw, sc;
+                lx = (forest_rnd(&rng) - 0.5f) * (w - 2.0f);
+                lz = (forest_rnd(&rng) - 0.5f) * (d - 2.0f);
+                if (campus_point_blocked(g_campus.pads, g_campus.npads, lx, lz, CAMPUS_TREE_CLEAR)) continue;
+                h  = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz);
+                sx = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx + 0.5f, lz);
+                sz = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz + 0.5f);
+                slope = (float)sqrt((double)((sx - h) * (sx - h) + (sz - h) * (sz - h))) * 2.0f;
+                if (slope > 0.45f) continue;
+                v   = (int)(forest_rnd(&rng) * (float)FOREST_TREE_VARIANTS);
+                if (v >= FOREST_TREE_VARIANTS) v = FOREST_TREE_VARIANTS - 1;
+                yaw = forest_rnd(&rng) * 6.2831853f;
+                sc  = FOREST_VARIANTS[v].scale * (0.82f + 0.36f * forest_rnd(&rng));
+                forest_place(v, lx, lz, h, yaw, sc, wood, wn, can, cn);
+                placed++;
+            }
+            for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+                g_campus_flora.wood_n[v] = wn[v];
+                if (wn[v] > 0)
+                    g_campus_flora.wood[v] = rhi_create_buffer(RHI_BUFFER_VERTEX,
+                                                 wood[v], (size_t)wn[v] * 8 * sizeof(float));
+            }
+            for (k = 0; k < 2; k++) {
+                g_campus_flora.canopy_n[k] = cn[k];
+                if (cn[k] > 0)
+                    g_campus_flora.canopy[k] = rhi_create_buffer(RHI_BUFFER_VERTEX,
+                                                   can[k], (size_t)cn[k] * 8 * sizeof(float));
+            }
+        }
+        for (v = 0; v < FOREST_VARIANT_COUNT; v++) free(wood[v]);
+        free(can[0]); free(can[1]);
+    }
 }
 
 /* ---- the watcher (P4 item 4 piece 3c): hot reload by mtime ----
