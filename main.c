@@ -7732,7 +7732,7 @@ static float room_interior_height(Scene *s, sol_u32 room) {
         if (c->parent == room && c->mesh_ref && strcmp(c->mesh_ref, "room") == 0)
             return mesh_ref_param("room", c->mesh_params, c->mesh_param_count, "h");
     }
-    return 3.0f;
+    return 4.5f;
 }
 
 /* a note's body text size in metres-per-line; absent meta => the default,
@@ -7952,7 +7952,7 @@ static void carry_update(AppState *st) {
             bw = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "w");
             bh = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "h");
             bt = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "t");
-            rh = 3.0f;                                  /* room interior height (default) */
+            rh = 4.5f;                                  /* room interior height (default) */
             for (ci = 0; ci < st->scene.count; ci++) {
                 SceneObject *c = &st->scene.objects[ci];
                 if (c->parent == room && c->mesh_ref &&
@@ -8006,7 +8006,7 @@ static sol_bool root_spot_occupied(AppState *st, vec3 c, float half) {
         if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
         e = room_half_extent(&st->scene, o->handle);
         p = object_world_pos(&st->scene, o->handle);
-        if ((c.y > p.y ? c.y - p.y : p.y - c.y) >= 3.5f) continue;   /* clear in Y (room height 3.0 + 0.5 gap) */
+        if ((c.y > p.y ? c.y - p.y : p.y - c.y) >= 5.0f) continue;   /* clear in Y (room height 4.5 + 0.5 gap) */
         if (c.x + half < p.x - e || c.x - half > p.x + e) continue;  /* clear in X */
         if (c.z + half < p.z - e || c.z - half > p.z + e) continue;  /* clear in Z */
         return SOL_TRUE;                                             /* overlaps */
@@ -8070,7 +8070,7 @@ static void create_root_from_path(AppState *st, const char *path) {
     shell = scene_add(&st->scene, root, empty, vec3_make(0.0f, 0.0f, 0.0f),
                       quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
     scene_mesh_ref_set(&st->scene, shell, "room");
-    room_p[0] = 10.0f; room_p[1] = 10.0f; room_p[2] = 3.0f;
+    room_p[0] = 10.0f; room_p[1] = 10.0f; room_p[2] = 4.5f;   /* timber halls: tall */
     room_p[3] = 1.0f;  room_p[4] = 1.0f;  room_p[5] = 1.0f;  room_p[6] = 1.0f;
     room_p[7] = 0.0f;
     scene_mesh_params_set(&st->scene, shell, room_p, 8);
@@ -8318,7 +8318,7 @@ static void cmd_add_room(AppState *st) {
     scene_meta_set(&st->scene, room, "workspace", ws);
     shell = scene_add(&st->scene, room, empty, zero, qid, one);  /* room invalidated; use handles */
     scene_mesh_ref_set(&st->scene, shell, "room");
-    p[0] = 8.0f; p[1] = 8.0f; p[2] = 3.0f; p[3] = 1.0f;
+    p[0] = 8.0f; p[1] = 8.0f; p[2] = 4.5f; p[3] = 1.0f;   /* timber halls: tall */
     p[4] = 1.0f; p[5] = 1.0f; p[6] = 1.0f; p[7] = 0.0f;
     scene_mesh_params_set(&st->scene, shell, p, 8);
     scene_resolve_meshes(&st->scene);
@@ -10339,6 +10339,22 @@ static void portal_update(AppState *st) {
    (a runtime texture handle) rebound, and the mirrors reconciled against
    today's disk — the folder may have changed while the palace slept.
    SOL_FALSE if the file is absent or won't parse. */
+/* timber halls (stage 1): one-time idempotent room-height migration. A room
+   still at the old 3.0m default becomes 4.5m; a deliberately-resized height is
+   left alone, and re-running on a 4.5m room is a no-op (4.5 != 3.0). Height is
+   mesh_params[2] in the room schema {w,d,h,...}. */
+static void migrate_room_heights(Scene *s) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        if (o->mesh_ref && strcmp(o->mesh_ref, "room") == 0 &&
+            o->mesh_param_count >= 3 &&
+            fabs((double)(o->mesh_params[2] - 3.0f)) < 0.01) {
+            o->mesh_params[2] = 4.5f;
+        }
+    }
+}
+
 static sol_bool load_palace(AppState *st) {
     Scene fresh, old;
     int   changes;
@@ -10361,6 +10377,7 @@ static sol_bool load_palace(AppState *st) {
        route solver treats a hidden workspace's room as a bystander, deflecting a
        door onto the wrong wall. Set the filter here, not at the tail. */
     strcpy(st->scene.active_ws, keep_ws);
+    migrate_room_heights(&st->scene);   /* timber halls: 3.0m rooms -> 4.5m (idempotent) */
     scene_reimport_glbs(st);
     scene_resolve_meshes(&st->scene);             /* ACQUIRE (the new) */
     scene_release_meshes(&old);                   /* RELEASE (the old) */
@@ -10407,7 +10424,7 @@ static void populate_home_scene(AppState *state) {
 
     /* an open-topped 8x8 parametric room (floor + 4 walls, no ceiling) anchored
        high up, so it reads as a platform floating in the sky */
-    home_p[0] = 8.0f;  home_p[1] = 8.0f;  home_p[2] = 3.0f;
+    home_p[0] = 8.0f;  home_p[1] = 8.0f;  home_p[2] = 4.5f;   /* timber halls: tall */
     home_p[3] = 1.0f;  home_p[4] = 1.0f;  home_p[5] = 1.0f;  home_p[6] = 1.0f;
     home_p[7] = 0.0f;
 
