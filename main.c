@@ -5790,7 +5790,7 @@ static void campus_flora_rebuild(AppState *st) {
             }
             {   /* shrubs (variant 5), biased UNDER the canopy like the islands */
                 int stgt = (int)((float)placed * 1.6f), sdarts, splaced = 0;
-                if (stgt > CAMPUS_TREE_MAX) stgt = CAMPUS_TREE_MAX;
+                if (stgt > target) stgt = target;   /* wood[5] is sized `target` */
                 for (sdarts = 0; sdarts < stgt * 8 && splaced < stgt; sdarts++) {
                     float lx, lz, h, sx, sz, slope, yaw, sc, near2 = 1e30f;
                     int   ti;
@@ -12385,6 +12385,31 @@ static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) 
                 rhi_draw_indexed_instanced(0, um->index_count,
                                            f->canopy_count[lk]);
             }
+        }
+    }
+    /* the campus trees cast too (derived; no scene handle -> model is the
+       campus-centre translate, like their main-pass draw) */
+    if (state->ornament_shadow_pipeline.id && g_campus.enabled) {
+        mat4 cmodel = mat4_translate(g_campus.center);
+        int  v, lk;
+        rhi_set_pipeline(state->ornament_shadow_pipeline);
+        rhi_set_uniform_mat4("uLightVP", lvp.m);
+        rhi_set_uniform_mat4("uModel", cmodel.m);
+        for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+            Mesh *um = &state->forest_wood[v];
+            if (g_campus_flora.wood_n[v] == 0 || um->index_count == 0) continue;
+            rhi_bind_vertex_buffer(um->vbuffer);
+            rhi_bind_index_buffer(um->ibuffer);
+            rhi_bind_instance_buffer(g_campus_flora.wood[v]);
+            rhi_draw_indexed_instanced(0, um->index_count, g_campus_flora.wood_n[v]);
+        }
+        for (lk = 0; lk < 2; lk++) {
+            Mesh *um = &state->orn_mesh[lk == 0 ? ORN_LEAF_BROAD : ORN_LEAF_CONIFER];
+            if (g_campus_flora.canopy_n[lk] == 0 || um->index_count == 0) continue;
+            rhi_bind_vertex_buffer(um->vbuffer);
+            rhi_bind_index_buffer(um->ibuffer);
+            rhi_bind_instance_buffer(g_campus_flora.canopy[lk]);
+            rhi_draw_indexed_instanced(0, um->index_count, g_campus_flora.canopy_n[lk]);
         }
     }
 }
