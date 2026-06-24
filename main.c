@@ -12566,6 +12566,17 @@ static void render(AppState *state) {
         }
     }
 
+    /* the campus ground (derived; drawn with the terrain slope/height palette) */
+    if (g_campus.enabled && g_campus.mesh.index_count > 0) {
+        mat4     cm   = mat4_translate(g_campus.center);   /* heights are world-absolute */
+        Material cmat = material_default();
+        state->terrain_blend = SOL_TRUE;
+        state->terrain_y0    = g_campus.y0;
+        state->terrain_amp   = g_campus.amp_range;
+        draw_mesh(state, g_campus.mesh, cm, view, proj, eye, 0.0f, cmat);
+        state->terrain_blend = SOL_FALSE;
+    }
+
     /* dark-wood curb trim along the marble walkways (its own cached mesh, since
        it wears a different material than the deck). gated on the deck mesh so a
        stale entry for a now-invalid walkway isn't drawn. */
