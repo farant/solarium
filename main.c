@@ -4180,6 +4180,10 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define ROOM_FRAME_MAX 128
 #define FRAME_COL_T  0.24f       /* corner column cross-section (m) */
 #define WOOD_TILE_M  1.0f        /* meters per wood texture-repeat along a beam */
+#define FRAME_BEAM_T       0.14f     /* truss beam cross-section (m) */
+#define FRAME_PITCH_DEG    35.0f     /* roof / truss pitch (degrees) */
+#define FRAME_BENT_SPACING 2.5f      /* meters between scissor-truss bents */
+#define FRAME_SCISSOR_FRAC 0.6f      /* lower chord meets the opposite rafter this far up */
 
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
@@ -4274,6 +4278,13 @@ static void frame_quad(MeshBuilder *mb, vec3 a, vec3 b, vec3 c, vec3 d,
     mb_push_triangle(mb, ia, ic, id);
 }
 
+/* map a bent's (along-ridge, across-span, height) to a world point. ridge_along_x:
+   1 = ridge runs X so span is Z; 0 = ridge runs Z so span is X. */
+static vec3 bent_pt(int ridge_along_x, float along, float span, float y) {
+    return ridge_along_x ? vec3_make(along, y, span)
+                         : vec3_make(span, y, along);
+}
+
 /* a t x t square-section beam swept A->B, wood tiling along its length. */
 static void frame_beam(MeshBuilder *mb, vec3 a, vec3 b, float t) {
     vec3  dir, side, vup, refv, s, v;
@@ -4336,6 +4347,31 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
         frame_beam(&mb, vec3_make( cx, 0.0f, -cz), vec3_make( cx, h, -cz), FRAME_COL_T);
         frame_beam(&mb, vec3_make( cx, 0.0f,  cz), vec3_make( cx, h,  cz), FRAME_COL_T);
         frame_beam(&mb, vec3_make(-cx, 0.0f,  cz), vec3_make(-cx, h,  cz), FRAME_COL_T);
+        /* scissor trusses: bents spaced along the ridge axis (the longer dim) */
+        {
+            int   rax     = (w >= d) ? 1 : 0;      /* 1 = ridge along X (span = Z) */
+            float rlen    = rax ? w : d;           /* ridge length */
+            float along_h = rax ? hw : hd;         /* half the ridge length */
+            float sh      = rax ? hd : hw;         /* half-span (eave -> centre) */
+            float dy      = sh * (float)tan((double)sol_radians(FRAME_PITCH_DEG));
+            float ridge_y = h + dy;                /* ridge peak above the floor */
+            float f       = FRAME_SCISSOR_FRAC;
+            float cross_y = h + dy * f / (2.0f - f);  /* where the lower chords cross */
+            int   bents   = (int)(rlen / FRAME_BENT_SPACING + 0.5f);
+            int   bi;
+            if (bents < 2) bents = 2;
+            for (bi = 0; bi < bents; bi++) {
+                float al    = -along_h + rlen * ((float)bi + 0.5f) / (float)bents;
+                vec3  eaveL = bent_pt(rax, al, -sh,  h);
+                vec3  eaveR = bent_pt(rax, al,  sh,  h);
+                vec3  apex  = bent_pt(rax, al, 0.0f, ridge_y);
+                frame_beam(&mb, eaveL, apex, FRAME_BEAM_T);                                            /* rafter L */
+                frame_beam(&mb, eaveR, apex, FRAME_BEAM_T);                                            /* rafter R */
+                frame_beam(&mb, eaveL, bent_pt(rax, al,  sh * (1.0f - f), h + dy * f), FRAME_BEAM_T);  /* scissor L */
+                frame_beam(&mb, eaveR, bent_pt(rax, al, -sh * (1.0f - f), h + dy * f), FRAME_BEAM_T);  /* scissor R */
+                frame_beam(&mb, bent_pt(rax, al, 0.0f, cross_y), apex, FRAME_BEAM_T);                  /* king post */
+            }
+        }
         if (mb.index_count > 0) wood = mesh_from_builder(&mb);
         mb_free(&mb);
     }
@@ -4426,7 +4462,8 @@ static void connections_rebuild(AppState *st) {
                              mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "we") > 0.5f,
                              mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ws") > 0.5f,
                              mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f,
-                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ceil") > 0.5f,
+                             (g_dark_wood.albedo_tex.id == 0 &&
+                              mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ceil") > 0.5f),
                              ops, no);
             if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
             mb_free(&mb);
@@ -4508,7 +4545,8 @@ static void connections_rebuild_focus(AppState *st, sol_u32 focus) {
                              mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "we") > 0.5f,
                              mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ws") > 0.5f,
                              mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f,
-                             mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ceil") > 0.5f,
+                             (g_dark_wood.albedo_tex.id == 0 &&
+                              mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ceil") > 0.5f),
                              ops, no);
             if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
             mb_free(&mb);
