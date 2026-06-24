@@ -4416,16 +4416,40 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
         int gi;
         mb_init(&mb);
         for (gi = 0; gi < 2; gi++) {
-            float ge  = gi ? along_h : -along_h;       /* the two ridge ends */
-            float gn  = gi ? 1.0f : -1.0f;             /* outward along the ridge axis */
-            vec3  eL  = bent_pt(rax, ge, -sh,  h);
-            vec3  eR  = bent_pt(rax, ge,  sh,  h);
-            vec3  ap  = bent_pt(rax, ge, 0.0f, ridge_y);
-            vec3  nrm = vec3_normalize(bent_pt(rax, gn, 0.0f, 0.0f));
-            gable_tri(&mb, eL, eR, ap, nrm,
+            float ge   = gi ? along_h : -along_h;      /* this ridge end (inner-face plane) */
+            float gout = gi ? 1.0f : -1.0f;            /* outward along the ridge axis */
+            vec3  off  = bent_pt(rax, gout * ROUTE_WALL_T, 0.0f, 0.0f);  /* thickness, extruded outward */
+            vec3  nout = vec3_normalize(bent_pt(rax, gout, 0.0f, 0.0f)); /* faces the island exterior */
+            vec3  nin  = vec3_scale(nout, -1.0f);                        /* faces the hall interior */
+            vec3  eL   = bent_pt(rax, ge, -sh,  h);
+            vec3  eR   = bent_pt(rax, ge,  sh,  h);
+            vec3  ap   = bent_pt(rax, ge, 0.0f, ridge_y);
+            vec3  eLo  = vec3_add(eL, off);
+            vec3  eRo  = vec3_add(eR, off);
+            vec3  apo  = vec3_add(ap, off);
+            /* a gable wall WITH thickness, like make_room_doored's walls: emit the
+               two EXPOSED faces -- inner (flush with the end wall, lit for the hall)
+               and outer (off by the wall thickness, lit for the exterior). offset so
+               they never z-fight; each lit for its own side, so the gable reads right
+               from inside the hall and from outside -- no backface culling needed. */
+            gable_tri(&mb, eL, eR, ap, nin,            /* inner face (toward the hall) */
                       -sh / WALL_TILE_M, h / WALL_TILE_M,
                        sh / WALL_TILE_M, h / WALL_TILE_M,
                       0.0f,              ridge_y / WALL_TILE_M);
+            gable_tri(&mb, eRo, eLo, apo, nout,        /* outer face (reversed winding) */
+                       sh / WALL_TILE_M, h / WALL_TILE_M,
+                      -sh / WALL_TILE_M, h / WALL_TILE_M,
+                      0.0f,              ridge_y / WALL_TILE_M);
+            {   /* cap the two sloped top edges (the rake) so the slab isn't hollow
+                   where it stands proud of the roof; bottom edge sits on the wall
+                   top, so it stays hidden like the walls' unexposed faces. */
+                float raflen = (float)sqrt((double)(sh * sh + dy * dy));
+                float ue = raflen / WALL_TILE_M, ve = ROUTE_WALL_T / WALL_TILE_M;
+                vec3  nrp = vec3_normalize(bent_pt(rax, 0.0f,  dy, sh));  /* +span rake */
+                vec3  nrn = vec3_normalize(bent_pt(rax, 0.0f, -dy, sh));  /* -span rake */
+                frame_quad(&mb, eR, ap, apo, eRo, nrp, 0.0f, 0.0f, ue, ve);
+                frame_quad(&mb, ap, eL, eLo, apo, nrn, 0.0f, 0.0f, ue, ve);
+            }
         }
         if (mb.index_count > 0) gable = mesh_from_builder(&mb);
         mb_free(&mb);
