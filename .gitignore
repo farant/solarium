@@ -33,6 +33,8 @@
 *.hdr
 # Debug screenshots (kept local; paper-picture.png is a real asset, so only .jpg)
 *.jpg
+# Sourced PBR material (PolyHaven, CC0) — kept local per synthesized-never-sourced (the floor-overlay experiment)
+/red_sandstone_tiles/
 
 # Editor / tooling
 compile_commands.json

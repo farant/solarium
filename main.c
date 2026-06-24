@@ -9577,6 +9577,107 @@ static RhiTexture load_texture(const char *path) {
     return tex;
 }
 
+/* like load_texture but LINEAR (RGBA8) — for normal/ORM maps that must not be
+   sRGB-decoded. distinct cache key (sRGB flag false); no watcher. */
+static RhiTexture load_texture_linear(const char *path) {
+    Image      img;
+    RhiTexture tex;
+    char       key[320];
+    tex.id = 0;
+    tex_asset_key(path, SOL_FALSE, key);           /* linear: data maps, not colour */
+    if (asset_acquire(&g_tex_assets, key, &tex, sizeof tex))
+        return tex;
+    if (image_load(path, &img)) {
+        tex = rhi_create_texture(img.pixels, img.w, img.h, RHI_TEX_RGBA8);
+        image_free(&img);
+        if (tex.id) asset_store_add(&g_tex_assets, key, &tex, sizeof tex);
+    } else {
+        fprintf(stderr, "image load failed: %s\n", path);
+    }
+    return tex;
+}
+
+/* ---- sandstone floor overlay (sourced-texture experiment, flagged) ----
+   A deliberate, reversible departure from synthesized-never-sourced: a PolyHaven
+   (CC0) PBR set tiled over room floors, render-time. No scene change, no shader. */
+#define FLOOR_TILE_M    2.25f    /* meters per texture-repeat (the tile-size knob) */
+#define FLOOR_EPS       0.012f   /* lift above the room's own floor (anti z-fight) */
+#define FLOOR_CACHE_MAX 32
+
+static Material g_floor_mat;      /* sandstone; albedo_tex.id == 0 => overlay disabled */
+static struct { float w, d; Mesh mesh; } g_floor_cache[FLOOR_CACHE_MAX];
+static int      g_floor_cache_n = 0;
+
+static void floor_mat_init(void) {
+    g_floor_mat = material_default();
+    g_floor_mat.albedo_tex =
+        load_texture("red_sandstone_tiles/red_sandstone_tiles_diff_1k.png");   /* sRGB */
+    if (g_floor_mat.albedo_tex.id == 0) return;    /* folder missing: stay disabled */
+    g_floor_mat.normal_tex =
+        load_texture_linear("red_sandstone_tiles/red_sandstone_tiles_nor_gl_1k.png");
+    g_floor_mat.mr_tex =
+        load_texture_linear("red_sandstone_tiles/red_sandstone_tiles_arm_1k.png");
+    g_floor_mat.ao_tex       = g_floor_mat.mr_tex; /* ARM: R=AO, G=rough, B=metal */
+    g_floor_mat.base_color   = vec3_make(1.0f, 1.0f, 1.0f);
+    g_floor_mat.metallic     = 1.0f;
+    g_floor_mat.roughness    = 1.0f;
+    g_floor_mat.normal_scale = 1.0f;
+    g_floor_mat.ao_strength  = 1.0f;
+}
+
+/* a w x d floor quad (XZ, +Y up) with meter-based tiling UVs, cached by size so a
+   tile is the same physical size in every room. empty mesh on cache overflow. */
+static Mesh floor_quad_for(float w, float d) {
+    MeshBuilder mb;
+    Mesh        m;
+    int         i;
+    float       uw, ud;
+    sol_u32     a, b2, c, e;
+    for (i = 0; i < g_floor_cache_n; i++)
+        if (fabs((double)(g_floor_cache[i].w - w)) < 1e-3 &&
+            fabs((double)(g_floor_cache[i].d - d)) < 1e-3)
+            return g_floor_cache[i].mesh;
+    memset(&m, 0, sizeof m);
+    if (g_floor_cache_n >= FLOOR_CACHE_MAX) {
+        static int warned = 0;
+        if (!warned) { printf("floor overlay: cache full (%d sizes)\n",
+                              FLOOR_CACHE_MAX); warned = 1; }
+        return m;
+    }
+    uw = w / FLOOR_TILE_M;
+    ud = d / FLOOR_TILE_M;
+    mb_init(&mb);
+    a  = mb_push_vertex(&mb, -w * 0.5f, 0.0f, -d * 0.5f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+    b2 = mb_push_vertex(&mb,  w * 0.5f, 0.0f, -d * 0.5f, 0.0f, 1.0f, 0.0f, uw,   0.0f);
+    c  = mb_push_vertex(&mb,  w * 0.5f, 0.0f,  d * 0.5f, 0.0f, 1.0f, 0.0f, uw,   ud);
+    e  = mb_push_vertex(&mb, -w * 0.5f, 0.0f,  d * 0.5f, 0.0f, 1.0f, 0.0f, 0.0f, ud);
+    mb_push_triangle(&mb, a, c, b2);               /* CCW from +Y (matches make_grid) */
+    mb_push_triangle(&mb, a, e, c);
+    m = mesh_from_builder(&mb);                     /* tangents auto-computed */
+    mb_free(&mb);
+    g_floor_cache[g_floor_cache_n].w    = w;
+    g_floor_cache[g_floor_cache_n].d    = d;
+    g_floor_cache[g_floor_cache_n].mesh = m;
+    g_floor_cache_n++;
+    return m;
+}
+
+/* pre-build floor quads for the active rooms — called at the top of render(),
+   BEFORE any rhi pass, so no GPU mesh is created mid-encoder. */
+static void floor_quads_ensure(AppState *st) {
+    sol_u32 i;
+    if (g_floor_mat.albedo_tex.id == 0) return;
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        float        w, d;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "room") != 0) continue;
+        if (!scene_object_active(&st->scene, o->handle)) continue;
+        w = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "w");
+        d = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "d");
+        (void)floor_quad_for(w, d);
+    }
+}
+
 /* The six cubemap face bases (B1). The (forward, up) pairs are the standard
    cubemap convention; right = cross(fwd, up) makes dir = fwd + ndc.x*right +
    ndc.y*up the exact inverse of how texture(cube, dir) reads each face. Shared
@@ -10655,6 +10756,7 @@ static int init_scene(AppState *state) {
     }
 
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
+    floor_mat_init();   /* sandstone floor overlay (sourced experiment, flagged) */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
        loaded and brought fully to life. The home scene builds only on first
@@ -11641,6 +11743,7 @@ static void render(AppState *state) {
     rt0 = glfwGetTime();
     state->draws_total = 0;
     state->draws_done  = 0;
+    floor_quads_ensure(state);   /* build floor quads before any rhi pass */
 
     sel_root = selection_root(&state->scene, state->selected_handle);  /* 0 if nothing selected */
 
@@ -11788,6 +11891,28 @@ static void render(AppState *state) {
         state->draws_done++;                      /* == total until culling (P4 i2 p4) */
     }
     state->terrain_blend = SOL_FALSE;              /* the reader rig is not land */
+
+    /* sandstone floor overlay (sourced experiment): a tiled sandstone quad over
+       each active room's stone floor, just above it. render-only, no scene change. */
+    if (g_floor_mat.albedo_tex.id != 0) {
+        sol_u32 fi;
+        for (fi = 0; fi < state->scene.count; fi++) {
+            SceneObject *o = &state->scene.objects[fi];
+            float fw, fd;
+            Mesh  fq;
+            mat4  fm;
+            if (!o->mesh_ref || strcmp(o->mesh_ref, "room") != 0) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;
+            if (vis && !vis[o->handle]) continue;
+            fw = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "w");
+            fd = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "d");
+            fq = floor_quad_for(fw, fd);
+            if (fq.index_count == 0) continue;
+            fm = mat4_mul(scene_world_matrix(&state->scene, o),
+                          mat4_translate(vec3_make(0.0f, FLOOR_EPS, 0.0f)));
+            draw_mesh(state, fq, fm, view, proj, eye, 0.0f, g_floor_mat);
+        }
+    }
 
     /* skinned models (item 9): objects wearing skin_glb meta, drawn at the
        ANIMATED pose — the animate component picks clip and speed, absolute
