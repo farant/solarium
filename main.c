@@ -9850,20 +9850,14 @@ static void dark_wood_mat_init(void) {
 static Mesh floor_quad_for(float w, float d) {
     MeshBuilder mb;
     Mesh        m;
-    int         i;
+    int         i, slot;
+    static int  ev = 0;        /* round-robin eviction cursor */
     float       uw, ud;
     sol_u32     a, b2, c, e;
     for (i = 0; i < g_floor_cache_n; i++)
         if (fabs((double)(g_floor_cache[i].w - w)) < 1e-3 &&
             fabs((double)(g_floor_cache[i].d - d)) < 1e-3)
             return g_floor_cache[i].mesh;
-    memset(&m, 0, sizeof m);
-    if (g_floor_cache_n >= FLOOR_CACHE_MAX) {
-        static int warned = 0;
-        if (!warned) { printf("floor overlay: cache full (%d sizes)\n",
-                              FLOOR_CACHE_MAX); warned = 1; }
-        return m;
-    }
     uw = w / FLOOR_TILE_M;
     ud = d / FLOOR_TILE_M;
     mb_init(&mb);
@@ -9875,10 +9869,19 @@ static Mesh floor_quad_for(float w, float d) {
     mb_push_triangle(&mb, a, e, c);
     m = mesh_from_builder(&mb);                     /* tangents auto-computed */
     mb_free(&mb);
-    g_floor_cache[g_floor_cache_n].w    = w;
-    g_floor_cache[g_floor_cache_n].d    = d;
-    g_floor_cache[g_floor_cache_n].mesh = m;
-    g_floor_cache_n++;
+    /* insert; when full, evict round-robin so a resize drag's size-sweep never
+       starves the cache (the floor would otherwise vanish at FLOOR_CACHE_MAX
+       distinct sizes). always returns a freshly-built valid mesh. */
+    if (g_floor_cache_n < FLOOR_CACHE_MAX) {
+        slot = g_floor_cache_n++;
+    } else {
+        slot = ev;
+        ev   = (ev + 1) % FLOOR_CACHE_MAX;
+        mesh_destroy(&g_floor_cache[slot].mesh);
+    }
+    g_floor_cache[slot].w    = w;
+    g_floor_cache[slot].d    = d;
+    g_floor_cache[slot].mesh = m;
     return m;
 }
 
