@@ -4191,6 +4191,10 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define FRAME_SCISSOR_FRAC 0.6f      /* lower chord meets the opposite rafter this far up */
 #define ROOF_TILE_M  2.0f        /* meters per roof texture-repeat */
 
+#define CAMPUS_SUB      72        /* campus tessellation (clamped 2..96 in make_campus) */
+#define CAMPUS_HILL_AMP 2.0f      /* hill amplitude between rooms (m) */
+#define CAMPUS_SEED     7u        /* campus noise identity */
+
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
 static Material g_roof_mat;       /* pitched roof; albedo_tex.id == 0 => no roof */
@@ -4199,6 +4203,17 @@ static Material g_path_mat;       /* sandstone walkway deck; albedo_tex.id == 0 
 typedef struct { sol_u32 handle; Mesh wall, wood, roof, gable, door_floor, door_trim; } RoomFrame;
 static RoomFrame g_room_frame[ROOM_FRAME_MAX];
 static int       g_room_frame_n = 0;
+
+typedef struct {
+    int       enabled;
+    vec3      center;             /* world XZ centre of the rectangle (y unused) */
+    float     w, d;               /* rectangle size */
+    float     y0, amp_range;      /* for the terrain slope/height palette */
+    CampusPad pads[CAMPUS_MAX_PADS];
+    int       npads;
+    Mesh      mesh;
+} CampusState;
+static CampusState g_campus;       /* derived: the active world's campus, or disabled */
 
 static void room_frame_flush(void) {
     int i;
@@ -4599,6 +4614,84 @@ static void walk_trim_store(sol_u32 handle, Mesh trim) {
     g_walk_trim_n++;
 }
 
+/* fill g_campus.pads from the active world's ROOM anchors (not islands), and
+   return the footprint bounding box via lo/hi. Returns the pad count. */
+static int campus_gather_pads(AppState *st, vec3 *lo, vec3 *hi) {
+    Scene  *s = &st->scene;
+    int     n = 0;
+    sol_u32 i;
+    float   minx = 0, maxx = 0, minz = 0, maxz = 0;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        const char  *rt;
+        RoomRect     r;
+        if (o->mesh_ref) continue;                       /* room parents are empties */
+        rt = scene_meta_get(s, o->handle, "room_type");
+        if (!rt) continue;
+        if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
+        if (!scene_object_active(s, o->handle)) continue; /* this world only */
+        if (n >= CAMPUS_MAX_PADS) break;
+        r = editor_room_rect(s, o->handle);
+        g_campus.pads[n].cx = r.cx; g_campus.pads[n].cz = r.cz;
+        g_campus.pads[n].hw = r.hw; g_campus.pads[n].hd = r.hd;
+        g_campus.pads[n].floor_y = r.floor_y;
+        if (n == 0) {
+            minx = r.cx - r.hw; maxx = r.cx + r.hw;
+            minz = r.cz - r.hd; maxz = r.cz + r.hd;
+        } else {
+            if (r.cx - r.hw < minx) minx = r.cx - r.hw;
+            if (r.cx + r.hw > maxx) maxx = r.cx + r.hw;
+            if (r.cz - r.hd < minz) minz = r.cz - r.hd;
+            if (r.cz + r.hd > maxz) maxz = r.cz + r.hd;
+        }
+        n++;
+    }
+    *lo = vec3_make(minx, 0.0f, minz);
+    *hi = vec3_make(maxx, 0.0f, maxz);
+    return n;
+}
+
+/* (re)build the active world's campus terrain into g_campus, or disable it.
+   Derived: called at the end of connections_rebuild (every structural change). */
+static void campus_rebuild(AppState *st) {
+    const char *wsname = st->scene.active_ws[0] ? st->scene.active_ws : "home";
+    sol_u32     anchor = workspace_anchor_find(&st->scene, wsname);
+    const char *flag   = anchor ? scene_meta_get(&st->scene, anchor, "campus") : (const char *)0;
+    vec3        lo, hi;
+    float       margin, miny, maxy;
+    int         k;
+    MeshBuilder mb;
+    mesh_destroy(&g_campus.mesh);
+    g_campus.enabled = (flag && strcmp(flag, "1") == 0);
+    g_campus.npads   = 0;
+    if (!g_campus.enabled) return;
+    g_campus.npads = campus_gather_pads(st, &lo, &hi);
+    if (g_campus.npads == 0) { g_campus.enabled = 0; return; }    /* nothing to ground */
+    /* rubber-band rectangle: footprint bbox + a margin proportional to its size
+       (so rooms stay inside the un-faded rim zone). */
+    margin = 0.15f * ((hi.x - lo.x) > (hi.z - lo.z) ? (hi.x - lo.x) : (hi.z - lo.z));
+    if (margin < 8.0f) margin = 8.0f;
+    g_campus.center = vec3_make((lo.x + hi.x) * 0.5f, 0.0f, (lo.z + hi.z) * 0.5f);
+    g_campus.w = (hi.x - lo.x) + 2.0f * margin;
+    g_campus.d = (hi.z - lo.z) + 2.0f * margin;
+    /* pads to campus-local (centre at origin); track the height range for the palette */
+    miny = maxy = g_campus.pads[0].floor_y;
+    for (k = 0; k < g_campus.npads; k++) {
+        g_campus.pads[k].cx -= g_campus.center.x;
+        g_campus.pads[k].cz -= g_campus.center.z;
+        if (g_campus.pads[k].floor_y < miny) miny = g_campus.pads[k].floor_y;
+        if (g_campus.pads[k].floor_y > maxy) maxy = g_campus.pads[k].floor_y;
+    }
+    g_campus.y0        = miny;
+    g_campus.amp_range = (maxy - miny) + CAMPUS_HILL_AMP;
+    if (g_campus.amp_range < 0.001f) g_campus.amp_range = 0.001f;
+    mb_init(&mb);
+    make_campus(&mb, g_campus.pads, g_campus.npads, g_campus.w, g_campus.d,
+                CAMPUS_SUB, CAMPUS_HILL_AMP, CAMPUS_SEED);
+    if (mb.index_count > 0) g_campus.mesh = mesh_from_builder(&mb);
+    mb_free(&mb);
+}
+
 static void connections_rebuild(AppState *st) {
     Scene  *s = &st->scene;
     Route   routes[ROUTE_MAX];
@@ -4683,6 +4776,8 @@ static void connections_rebuild(AppState *st) {
             room_frame_build(shell, ops, no);   /* the room's timber frame */
         }
     }
+
+    campus_rebuild(st);   /* derived: the active world's grounding terrain */
 }
 
 /* Incident rebuild for the LIVE editor drag: re-thread only the walkways that
