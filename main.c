@@ -12915,6 +12915,50 @@ static void render(AppState *state) {
         }
     }
 
+    /* the campus flora: grass (meadow pipeline, world-space) + trees (ornament
+       pipeline, translated by the campus centre). Drawn when the campus is on;
+       no per-island vis cull (the campus IS the active world). */
+    if (g_campus.enabled && g_campus_flora.grass_n > 0 && state->meadow_pipeline.id) {
+        rhi_set_pipeline(state->meadow_pipeline);
+        rhi_set_uniform_mat4("uView", view.m);
+        rhi_set_uniform_mat4("uProj", proj.m);
+        rhi_set_uniform_float("uTime", (float)glfwGetTime());
+        rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
+        rhi_bind_vertex_buffer(state->meadow_vbuf);
+        rhi_bind_index_buffer(state->meadow_ibuf);
+        rhi_bind_instance_buffer(g_campus_flora.grass);
+        rhi_draw_indexed_instanced(0, 12, g_campus_flora.grass_n);
+    }
+    if (g_campus.enabled && state->ornament_pipeline.id) {
+        mat4     cmodel = mat4_translate(g_campus.center);
+        Material leafmat[2];
+        int      v, lk;
+        leafmat[0] = material_default(); leafmat[0].base_color = flora_leaf_color(FLORA_OAK);  leafmat[0].roughness = 0.85f;
+        leafmat[1] = material_default(); leafmat[1].base_color = flora_leaf_color(FLORA_PINE); leafmat[1].roughness = 0.85f;
+        for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
+            Mesh *um = &state->forest_wood[v];
+            if (g_campus_flora.wood_n[v] == 0 || um->index_count == 0) continue;
+            bind_scene_uniforms(state, state->ornament_pipeline, cmodel, view, proj, eye, 0.0f, forest_bark_material());
+            rhi_set_uniform_float("uTime", (float)glfwGetTime());
+            rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
+            rhi_bind_vertex_buffer(um->vbuffer);
+            rhi_bind_instance_buffer(g_campus_flora.wood[v]);
+            rhi_bind_index_buffer(um->ibuffer);
+            rhi_draw_indexed_instanced(0, um->index_count, g_campus_flora.wood_n[v]);
+        }
+        for (lk = 0; lk < 2; lk++) {
+            Mesh *um = &state->orn_mesh[lk == 0 ? ORN_LEAF_BROAD : ORN_LEAF_CONIFER];
+            if (g_campus_flora.canopy_n[lk] == 0 || um->index_count == 0) continue;
+            bind_scene_uniforms(state, state->ornament_pipeline, cmodel, view, proj, eye, 0.0f, leafmat[lk]);
+            rhi_set_uniform_float("uTime", (float)glfwGetTime());
+            rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
+            rhi_bind_vertex_buffer(um->vbuffer);
+            rhi_bind_instance_buffer(g_campus_flora.canopy[lk]);
+            rhi_bind_index_buffer(um->ibuffer);
+            rhi_draw_indexed_instanced(0, um->index_count, g_campus_flora.canopy_n[lk]);
+        }
+    }
+
     /* the instanced ornament (P6 item 10; P7 item 4 grew it to KINDS):
        balusters wear their carcass's OWN material (stone), leaf clusters
        wear the canopy green carried on the patch — one draw each, riding
