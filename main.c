@@ -4172,6 +4172,15 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
    each room's shell is rebuilt with the doorways its routes pierce. Rooms and
    walkways store no geometry — this runs on load and after every edit, so a
    new root can never leave a sibling's path stale (the take-1 bug). */
+/* ---- plank walls overlay (sourced-texture experiment, flagged) ----
+   Tiled planks on room inner-wall faces, split around doorways. Render-time;
+   built where the doorway openings are already computed (connections_rebuild). */
+#define WALL_TILE_M    1.5f      /* meters per texture-repeat (the plank-size knob) */
+#define WALL_EPS       0.01f     /* inward lift off the wall face (anti z-fight) */
+#define WALL_CACHE_MAX 128
+
+static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
+
 static void connections_rebuild(AppState *st) {
     Scene  *s = &st->scene;
     Route   routes[ROUTE_MAX];
@@ -9608,21 +9617,35 @@ static Material g_floor_mat;      /* sandstone; albedo_tex.id == 0 => overlay di
 static struct { float w, d; Mesh mesh; } g_floor_cache[FLOOR_CACHE_MAX];
 static int      g_floor_cache_n = 0;
 
+/* a 3-map PBR material (sourced-texture experiments): albedo sRGB, normal +
+   ORM linear (ARM packs AO/Rough/Metal). albedo id 0 = load failed = disabled. */
+static Material load_pbr_material(const char *diff, const char *nor, const char *arm) {
+    Material m = material_default();
+    m.albedo_tex = load_texture(diff);             /* sRGB */
+    if (m.albedo_tex.id == 0) return m;            /* missing: stay disabled */
+    m.normal_tex   = load_texture_linear(nor);
+    m.mr_tex       = load_texture_linear(arm);
+    m.ao_tex       = m.mr_tex;                     /* ARM: R=AO, G=rough, B=metal */
+    m.base_color   = vec3_make(1.0f, 1.0f, 1.0f);
+    m.metallic     = 1.0f;
+    m.roughness    = 1.0f;
+    m.normal_scale = 1.0f;
+    m.ao_strength  = 1.0f;
+    return m;
+}
+
 static void floor_mat_init(void) {
-    g_floor_mat = material_default();
-    g_floor_mat.albedo_tex =
-        load_texture("red_sandstone_tiles/red_sandstone_tiles_diff_1k.png");   /* sRGB */
-    if (g_floor_mat.albedo_tex.id == 0) return;    /* folder missing: stay disabled */
-    g_floor_mat.normal_tex =
-        load_texture_linear("red_sandstone_tiles/red_sandstone_tiles_nor_gl_1k.png");
-    g_floor_mat.mr_tex =
-        load_texture_linear("red_sandstone_tiles/red_sandstone_tiles_arm_1k.png");
-    g_floor_mat.ao_tex       = g_floor_mat.mr_tex; /* ARM: R=AO, G=rough, B=metal */
-    g_floor_mat.base_color   = vec3_make(1.0f, 1.0f, 1.0f);
-    g_floor_mat.metallic     = 1.0f;
-    g_floor_mat.roughness    = 1.0f;
-    g_floor_mat.normal_scale = 1.0f;
-    g_floor_mat.ao_strength  = 1.0f;
+    g_floor_mat = load_pbr_material(
+        "red_sandstone_tiles/red_sandstone_tiles_diff_1k.png",
+        "red_sandstone_tiles/red_sandstone_tiles_nor_gl_1k.png",
+        "red_sandstone_tiles/red_sandstone_tiles_arm_1k.png");
+}
+
+static void wall_mat_init(void) {
+    g_wall_mat = load_pbr_material(
+        "weathered_brown_planks/weathered_brown_planks_diff_1k.png",
+        "weathered_brown_planks/weathered_brown_planks_nor_gl_1k.png",
+        "weathered_brown_planks/weathered_brown_planks_arm_1k.png");
 }
 
 /* a w x d floor quad (XZ, +Y up) with meter-based tiling UVs, cached by size so a
@@ -10757,6 +10780,7 @@ static int init_scene(AppState *state) {
 
     state->albedo_tex = load_texture("paper-picture.png");   /* item 5b: decode via stb */
     floor_mat_init();   /* sandstone floor overlay (sourced experiment, flagged) */
+    wall_mat_init();    /* plank walls overlay (sourced experiment, flagged) */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
        loaded and brought fully to life. The home scene builds only on first

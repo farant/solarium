@@ -35,6 +35,7 @@
 *.jpg
 # Sourced PBR material (PolyHaven, CC0) — kept local per synthesized-never-sourced (the floor-overlay experiment)
 /red_sandstone_tiles/
+/weathered_brown_planks/
 
 # Editor / tooling
 compile_commands.json
