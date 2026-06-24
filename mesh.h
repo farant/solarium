@@ -135,6 +135,11 @@ float campus_height(const CampusPad *pads, int npads,
                     float w, float d, float amp, unsigned seed,
                     float lx, float lz);
 
+/* 1 if (lx,lz) is within `clear` of ANY pad's footprint (a room or a walkway
+   corridor) — used to keep flora off buildings and paths. */
+int campus_point_blocked(const CampusPad *pads, int npads,
+                         float lx, float lz, float clear);
+
 /* Build the campus terrain mesh (top grid + skirt + base), sampling
    campus_height. sub = tessellation (clamped 2..96). */
 void  make_campus(MeshBuilder *b, const CampusPad *pads, int npads,

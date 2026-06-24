@@ -35,6 +35,18 @@ int main(void) {
     check("outside rect -> 0",
           campus_height(two, 2, 60.0f, 60.0f, 0.0f, 7u, 40.0f, 0.0f), -0.001f, 0.001f);
 
+    /* campus_point_blocked: a 6x6 pad at origin blocks nearby points. */
+    {
+        CampusPad pad;
+        pad.cx = 0.0f; pad.cz = 0.0f; pad.hw = 3.0f; pad.hd = 3.0f; pad.floor_y = 0.0f;
+        check("blocked: inside the pad",
+              (float)campus_point_blocked(&pad, 1, 0.0f, 0.0f, 0.5f), 0.5f, 1.5f);
+        check("blocked: just outside within clearance",
+              (float)campus_point_blocked(&pad, 1, 3.2f, 0.0f, 0.5f), 0.5f, 1.5f);
+        check("clear: well outside",
+              (float)campus_point_blocked(&pad, 1, 10.0f, 0.0f, 0.5f), -0.5f, 0.5f);
+    }
+
     printf(fails ? "\n%d FAIL\n" : "\nall ok\n", fails);
     return fails ? 1 : 0;
 }

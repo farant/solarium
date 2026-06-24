@@ -636,6 +636,14 @@ float campus_height(const CampusPad *pads, int npads,
     return (flat + hills * (1.0f - infl)) * rim;              /* fade whole height to 0 at the rim */
 }
 
+int campus_point_blocked(const CampusPad *pads, int npads,
+                         float lx, float lz, float clear) {
+    int i;
+    for (i = 0; i < npads; i++)
+        if (campus_rect_dist(lx, lz, &pads[i]) < clear) return 1;
+    return 0;
+}
+
 void make_campus(MeshBuilder *b, const CampusPad *pads, int npads,
                  float w, float d, int sub, float amp, unsigned seed) {
     sol_f32 hw = w * 0.5f, hd = d * 0.5f, bt;
