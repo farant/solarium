@@ -4181,11 +4181,130 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 
+static struct { sol_u32 handle; Mesh mesh; } g_wall_cache[WALL_CACHE_MAX];
+static int g_wall_cache_n = 0;
+
+static void wall_cache_flush(void) {
+    int i;
+    for (i = 0; i < g_wall_cache_n; i++)
+        mesh_destroy(&g_wall_cache[i].mesh);   /* no-op for zero-id entries */
+    g_wall_cache_n = 0;
+}
+
+/* one flat inner-face quad; position-based UVs (u = s/TILE, v = y/TILE) so planks
+   tile at constant size and align across doorway gaps. runx: 1 = wall runs along
+   X (s=X, face plane at z=f); 0 = runs along Z (s=Z, face plane at x=f). */
+static void wall_panel_quad(MeshBuilder *b, int runx, float f, float ns,
+                            float slo, float shi, float y0, float y1) {
+    float   u0 = slo / WALL_TILE_M, u1 = shi / WALL_TILE_M;
+    float   v0 = y0  / WALL_TILE_M, v1 = y1  / WALL_TILE_M;
+    sol_u32 a, c, e, g;
+    if (runx) {
+        a = mb_push_vertex(b, slo, y0, f, 0.0f, 0.0f, ns, u0, v0);
+        c = mb_push_vertex(b, shi, y0, f, 0.0f, 0.0f, ns, u1, v0);
+        e = mb_push_vertex(b, shi, y1, f, 0.0f, 0.0f, ns, u1, v1);
+        g = mb_push_vertex(b, slo, y1, f, 0.0f, 0.0f, ns, u0, v1);
+    } else {
+        a = mb_push_vertex(b, f, y0, slo, ns, 0.0f, 0.0f, u0, v0);
+        c = mb_push_vertex(b, f, y0, shi, ns, 0.0f, 0.0f, u1, v0);
+        e = mb_push_vertex(b, f, y1, shi, ns, 0.0f, 0.0f, u1, v1);
+        g = mb_push_vertex(b, f, y1, slo, ns, 0.0f, 0.0f, u0, v1);
+    }
+    mb_push_triangle(b, a, c, e);                  /* consistent winding (engine */
+    mb_push_triangle(b, a, e, g);                  /* never culls; normals are set) */
+}
+
+/* one wall's inner-face panels: mirror emit_doored_wall's opening-walk, emitting
+   a flat pier between openings and a header above each opening (oy < h). */
+static void wall_panels(MeshBuilder *b, int runx, float f, float ns,
+                        float s0, float s1, float h,
+                        const RoomOpening *ops, int n_ops, int wall_id) {
+    float lo[ROOM_MAX_OPENINGS_PER_WALL];
+    float hi[ROOM_MAX_OPENINGS_PER_WALL];
+    float oy[ROOM_MAX_OPENINGS_PER_WALL];
+    int   k = 0, i, j;
+    float cur;
+    for (i = 0; i < n_ops; i++) {
+        float c, hwid;
+        if (ops[i].wall != wall_id) continue;
+        if (k >= ROOM_MAX_OPENINGS_PER_WALL) break;
+        c = ops[i].center; hwid = ops[i].width * 0.5f;
+        lo[k] = c - hwid; hi[k] = c + hwid; oy[k] = ops[i].height;
+        k++;
+    }
+    for (i = 1; i < k; i++) {                       /* insertion sort by lo */
+        float plo = lo[i], phi = hi[i], poy = oy[i];
+        j = i - 1;
+        while (j >= 0 && lo[j] > plo) {
+            lo[j + 1] = lo[j]; hi[j + 1] = hi[j]; oy[j + 1] = oy[j]; j--;
+        }
+        lo[j + 1] = plo; hi[j + 1] = phi; oy[j + 1] = poy;
+    }
+    cur = s0;
+    for (i = 0; i <= k; i++) {
+        float gL = (i < k) ? lo[i] : s1;
+        float gR = (i < k) ? hi[i] : s1;
+        if (gL < s0) gL = s0;
+        if (gR > s1) gR = s1;
+        if (gL > cur)                              /* solid pier [cur, gL] x [0, h] */
+            wall_panel_quad(b, runx, f, ns, cur, gL, 0.0f, h);
+        if (i < k) {
+            if (oy[i] < h)                         /* header [gL, gR] x [oy, h] */
+                wall_panel_quad(b, runx, f, ns, gL, gR, oy[i], h);
+            cur = gR;
+        }
+    }
+}
+
+/* build a room shell's wall-overlay mesh from its openings and store it in the
+   handle-keyed cache (replacing any prior entry). no-op if planks disabled. */
+static void wall_overlay_store(SceneObject *shell, const RoomOpening *ops, int no) {
+    MeshBuilder mb;
+    Mesh        m;
+    float       w, d, h, hw, hd;
+    int         i;
+    if (g_wall_mat.albedo_tex.id == 0) return;
+    w  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
+    d  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
+    h  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
+    hw = w * 0.5f; hd = d * 0.5f;
+    memset(&m, 0, sizeof m);
+    mb_init(&mb);
+    if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "wn") > 0.5f)
+        wall_panels(&mb, 1, -hd + WALL_EPS,  1.0f, -hw, hw, h, ops, no, ROOM_WALL_N);
+    if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ws") > 0.5f)
+        wall_panels(&mb, 1,  hd - WALL_EPS, -1.0f, -hw, hw, h, ops, no, ROOM_WALL_S);
+    if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "we") > 0.5f)
+        wall_panels(&mb, 0,  hw - WALL_EPS, -1.0f, -hd, hd, h, ops, no, ROOM_WALL_E);
+    if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f)
+        wall_panels(&mb, 0, -hw + WALL_EPS,  1.0f, -hd, hd, h, ops, no, ROOM_WALL_W);
+    if (mb.index_count > 0) m = mesh_from_builder(&mb);
+    mb_free(&mb);
+    for (i = 0; i < g_wall_cache_n; i++)
+        if (g_wall_cache[i].handle == shell->handle) {
+            mesh_destroy(&g_wall_cache[i].mesh);
+            g_wall_cache[i].mesh = m;
+            return;
+        }
+    if (g_wall_cache_n >= WALL_CACHE_MAX) {
+        static int warned = 0;
+        if (!warned) { printf("wall overlay: cache full (%d rooms)\n",
+                              WALL_CACHE_MAX); warned = 1; }
+        mesh_destroy(&m);
+        return;
+    }
+    g_wall_cache[g_wall_cache_n].handle = shell->handle;
+    g_wall_cache[g_wall_cache_n].mesh   = m;
+    g_wall_cache_n++;
+}
+
 static void connections_rebuild(AppState *st) {
     Scene  *s = &st->scene;
     Route   routes[ROUTE_MAX];
     int     n = route_all(s, routes, ROUTE_MAX), i;
     sol_u32 j;
+
+    wall_cache_flush();   /* full pass is authoritative: drop stranded entries, repopulate below */
 
     /* 1. walkways: anchor at the lower door, mesh in local coords */
     for (i = 0; i < n; i++) {
@@ -4242,6 +4361,7 @@ static void connections_rebuild(AppState *st) {
                              ops, no);
             if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
             mb_free(&mb);
+            wall_overlay_store(shell, ops, no);   /* matching plank overlay */
         }
     }
 }
@@ -4323,6 +4443,7 @@ static void connections_rebuild_focus(AppState *st, sol_u32 focus) {
                              ops, no);
             if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
             mb_free(&mb);
+            wall_overlay_store(shell, ops, no);   /* matching plank overlay */
         }
     }
 }
