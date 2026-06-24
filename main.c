@@ -5880,6 +5880,16 @@ static float ground_under(AppState *st, vec3 p, sol_u32 *out_plot) {
             best_plot = o->handle;
         }
     }
+    if (g_campus.enabled) {                              /* the derived campus ground */
+        float lx = p.x - g_campus.center.x;
+        float lz = p.z - g_campus.center.z;
+        float hw = g_campus.w * 0.5f, hd = g_campus.d * 0.5f;
+        if (lx >= -hw && lx <= hw && lz >= -hd && lz <= hd) {
+            float gy = campus_height(g_campus.pads, g_campus.npads, g_campus.w,
+                                     g_campus.d, CAMPUS_HILL_AMP, CAMPUS_SEED, lx, lz);
+            if (gy <= p.y + COLLIDE_STEP_UP && gy > best) { best = gy; best_plot = 0; }
+        }
+    }
     if (out_plot) *out_plot = best_plot;
     return best;
 }
