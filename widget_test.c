@@ -74,6 +74,90 @@ int main(void) {
         widget_end(&c);
         CHECK(v > 6.9f && v < 7.1f);
     }
+    /* checkbox toggles on a press+release over the box (box x[0,0.1] y[0.9,1.0]) */
+    {
+        WidgetCtx c; sol_bool v = SOL_FALSE; memset(&c, 0, sizeof c);
+        widget_begin(&c, 0.05f, 0.95f, SOL_TRUE, SOL_TRUE);   /* press on box */
+        widget_checkbox(&c, 1, 0.0f, 1.0f, 0.1f, &v, "x");
+        widget_end(&c);
+        CHECK(!v);                                             /* not yet */
+        widget_begin(&c, 0.05f, 0.95f, SOL_TRUE, SOL_FALSE);  /* release on box */
+        CHECK(widget_checkbox(&c, 1, 0.0f, 1.0f, 0.1f, &v, "x"));
+        widget_end(&c);
+        CHECK(v);                                              /* toggled on */
+    }
+    /* checkbox does NOT toggle when released off the box */
+    {
+        WidgetCtx c; sol_bool v = SOL_FALSE; memset(&c, 0, sizeof c);
+        widget_begin(&c, 0.05f, 0.95f, SOL_TRUE, SOL_TRUE);
+        widget_checkbox(&c, 1, 0.0f, 1.0f, 0.1f, &v, "x");
+        widget_end(&c);
+        widget_begin(&c, 5.0f, 5.0f, SOL_TRUE, SOL_FALSE);    /* release off */
+        CHECK(!widget_checkbox(&c, 1, 0.0f, 1.0f, 0.1f, &v, "x"));
+        widget_end(&c);
+        CHECK(!v);
+    }
+    /* radio selects the clicked cell (bar x[0,0.3] y[0.7,0.9], 3 cells of 0.1) */
+    {
+        WidgetCtx c; int sel; const char *labels[3];
+        memset(&c, 0, sizeof c);
+        labels[0] = "a"; labels[1] = "b"; labels[2] = "c";
+        widget_begin(&c, 0.25f, 0.8f, SOL_TRUE, SOL_TRUE);    /* press cell 2 */
+        widget_radio(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, labels, 3, 0);
+        widget_end(&c);
+        widget_begin(&c, 0.25f, 0.8f, SOL_TRUE, SOL_FALSE);   /* release cell 2 */
+        sel = widget_radio(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, labels, 3, 0);
+        widget_end(&c);
+        CHECK(sel == 2);
+    }
+    /* radio: a release outside the bar keeps the value; it emits count cells */
+    {
+        WidgetCtx c; int sel, i, rects = 0, texts = 0; const char *labels[3];
+        memset(&c, 0, sizeof c);
+        labels[0] = "a"; labels[1] = "b"; labels[2] = "c";
+        widget_begin(&c, 0.25f, 0.8f, SOL_TRUE, SOL_TRUE);    /* press in bar */
+        widget_radio(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, labels, 3, 1);
+        widget_end(&c);
+        widget_begin(&c, 5.0f, 5.0f, SOL_TRUE, SOL_FALSE);    /* release off */
+        sel = widget_radio(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, labels, 3, 1);
+        widget_end(&c);
+        CHECK(sel == 1);
+        for (i = 0; i < c.cmd_count; i++)
+            if (c.cmds[i].type == WIDGET_CMD_RECT) rects++; else texts++;
+        CHECK(rects == 3 && texts == 3);
+    }
+    /* stepper: minus decrements; plus clamps at hi; middle release is a no-op
+       (bar x[0,0.3] y[0.7,0.9]; minus x[0,0.084], plus x[0.216,0.3]) */
+    {
+        WidgetCtx c; int v; memset(&c, 0, sizeof c);
+        widget_begin(&c, 0.02f, 0.8f, SOL_TRUE, SOL_TRUE);    /* press minus */
+        widget_stepper(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, "5", 5, 0, 16);
+        widget_end(&c);
+        widget_begin(&c, 0.02f, 0.8f, SOL_TRUE, SOL_FALSE);   /* release minus */
+        v = widget_stepper(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, "5", 5, 0, 16);
+        widget_end(&c);
+        CHECK(v == 4);
+    }
+    {
+        WidgetCtx c; int v; memset(&c, 0, sizeof c);
+        widget_begin(&c, 0.28f, 0.8f, SOL_TRUE, SOL_TRUE);    /* press plus at hi */
+        widget_stepper(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, "16", 16, 0, 16);
+        widget_end(&c);
+        widget_begin(&c, 0.28f, 0.8f, SOL_TRUE, SOL_FALSE);
+        v = widget_stepper(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, "16", 16, 0, 16);
+        widget_end(&c);
+        CHECK(v == 16);                                        /* clamped */
+    }
+    {
+        WidgetCtx c; int v; memset(&c, 0, sizeof c);
+        widget_begin(&c, 0.15f, 0.8f, SOL_TRUE, SOL_TRUE);    /* press middle */
+        widget_stepper(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, "8", 8, 0, 16);
+        widget_end(&c);
+        widget_begin(&c, 0.15f, 0.8f, SOL_TRUE, SOL_FALSE);
+        v = widget_stepper(&c, 1, 0.0f, 0.9f, 0.3f, 0.2f, "8", 8, 0, 16);
+        widget_end(&c);
+        CHECK(v == 8);                                         /* no-op */
+    }
     if (fails == 0) printf("widget_test: OK\n");
     return fails ? 1 : 0;
 }

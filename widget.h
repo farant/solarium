@@ -43,6 +43,22 @@ sol_bool widget_slider(WidgetCtx *c, int id, float x, float y, float w, float h,
                        float *value, float lo, float hi);
 void     widget_label(WidgetCtx *c, float x, float y, const char *text,
                       float size);
+/* toggles *value on a press+release over the box (a square of side `size` at
+   top-left (x,y)); `label` is drawn to its right and is non-interactive.
+   returns SOL_TRUE on the one frame it flips. */
+sol_bool widget_checkbox(WidgetCtx *c, int id, float x, float y, float size,
+                         sol_bool *value, const char *label);
+/* a horizontal segmented bar of `count` labelled cells filling (w,h) from
+   top-left (x,y); the cell == value is highlit. A press+release inside selects
+   the cell under the release point. returns the selected index. */
+int      widget_radio(WidgetCtx *c, int id, float x, float y, float w, float h,
+                      const char *const *labels, int count, int value);
+/* a [ - value + ] stepper filling (w,h): minus button | value_text | plus
+   button. A press+release over the minus/plus end yields value-/+1, clamped to
+   [lo,hi]. `value_text` is drawn in the middle (caller-owned, must outlive the
+   render walk). returns the new value. */
+int      widget_stepper(WidgetCtx *c, int id, float x, float y, float w, float h,
+                        const char *value_text, int value, int lo, int hi);
 void     widget_end(WidgetCtx *c);
 
 #endif /* WIDGET_H */

@@ -95,6 +95,100 @@ sol_bool widget_slider(WidgetCtx *c, int id, float x, float y, float w, float h,
     return changed;
 }
 
+sol_bool widget_checkbox(WidgetCtx *c, int id, float x, float y, float size,
+                         sol_bool *value, const char *label) {
+    int      hover;
+    sol_bool fired = SOL_FALSE;
+    float    lum, inset;
+    if (id == 0) return SOL_FALSE;           /* 0 is the idle sentinel */
+    hover = c->ptr_in && point_in(c->ptr_x, c->ptr_y, x, y, size, size);
+    if (hover) c->hot_id = id;
+    if (c->active_id == id) {
+        if (!c->down) {                      /* release */
+            if (hover) { *value = (sol_bool)!*value; fired = SOL_TRUE; }
+            c->active_id = 0;
+        }
+    } else if (hover && c->down && !c->down_prev) {
+        c->active_id = id;
+    }
+    lum = (c->active_id == id) ? 0.30f : (hover ? 0.55f : 0.42f);
+    push_rect(c, x, y, size, size, lum, lum, lum * 1.05f);   /* the box */
+    if (*value) {                                            /* the check */
+        inset = size * 0.22f;
+        push_rect(c, x + inset, y - inset,
+                  size - 2.0f * inset, size - 2.0f * inset, 0.85f, 0.62f, 0.30f);
+    }
+    push_text(c, x + size * 1.25f, y - size * 0.10f, label, size * 0.85f,
+              0.13f, 0.10f, 0.08f);                          /* label, ink */
+    return fired;
+}
+
+int widget_radio(WidgetCtx *c, int id, float x, float y, float w, float h,
+                 const char *const *labels, int count, int value) {
+    int   i, sel = value, hovcell = -1;
+    float cw;
+    if (id == 0 || count <= 0) return value;
+    cw = w / (float)count;
+    if (c->ptr_in && point_in(c->ptr_x, c->ptr_y, x, y, w, h)) {
+        hovcell = (int)((c->ptr_x - x) / cw);
+        if (hovcell < 0) hovcell = 0;
+        if (hovcell >= count) hovcell = count - 1;
+        c->hot_id = id;
+    }
+    if (c->active_id == id) {
+        if (!c->down) {                      /* release in the bar selects */
+            if (hovcell >= 0) sel = hovcell;
+            c->active_id = 0;
+        }
+    } else if (hovcell >= 0 && c->down && !c->down_prev) {
+        c->active_id = id;
+    }
+    for (i = 0; i < count; i++) {
+        float cx = x + (float)i * cw;
+        if (i == sel)
+            push_rect(c, cx, y, cw, h, 0.80f, 0.62f, 0.30f);   /* selected: amber */
+        else if (i == hovcell)
+            push_rect(c, cx, y, cw, h, 0.55f, 0.55f, 0.58f);   /* hovered */
+        else
+            push_rect(c, cx, y, cw, h, 0.40f, 0.40f, 0.42f);   /* idle */
+        push_text(c, cx + cw * 0.12f, y - h * 0.18f, labels[i], h * 0.50f,
+                  0.96f, 0.94f, 0.88f);
+    }
+    return sel;
+}
+
+int widget_stepper(WidgetCtx *c, int id, float x, float y, float w, float h,
+                   const char *value_text, int value, int lo, int hi) {
+    int   v = value, hover, rel_minus, rel_plus;
+    float mw = w * 0.28f;
+    if (id == 0) return value;
+    hover     = c->ptr_in && point_in(c->ptr_x, c->ptr_y, x, y, w, h);
+    rel_minus = c->ptr_in && point_in(c->ptr_x, c->ptr_y, x, y, mw, h);
+    rel_plus  = c->ptr_in && point_in(c->ptr_x, c->ptr_y, x + w - mw, y, mw, h);
+    if (hover) c->hot_id = id;
+    if (c->active_id == id) {
+        if (!c->down) {                      /* release: which end? */
+            if (rel_minus)     v = value - 1;
+            else if (rel_plus) v = value + 1;
+            if (v < lo) v = lo;
+            if (v > hi) v = hi;
+            c->active_id = 0;
+        }
+    } else if (hover && c->down && !c->down_prev) {
+        c->active_id = id;
+    }
+    push_rect(c, x, y, mw, h,
+              rel_minus ? 0.55f : 0.42f, rel_minus ? 0.55f : 0.42f, 0.45f);
+    push_text(c, x + mw * 0.30f, y - h * 0.18f, "-", h * 0.55f, 0.96f, 0.94f, 0.88f);
+    push_text(c, x + mw + (w - 2.0f * mw) * 0.18f, y - h * 0.18f, value_text,
+              h * 0.50f, 0.13f, 0.10f, 0.08f);
+    push_rect(c, x + w - mw, y, mw, h,
+              rel_plus ? 0.55f : 0.42f, rel_plus ? 0.55f : 0.42f, 0.45f);
+    push_text(c, x + w - mw + mw * 0.30f, y - h * 0.18f, "+", h * 0.55f,
+              0.96f, 0.94f, 0.88f);
+    return v;
+}
+
 void widget_label(WidgetCtx *c, float x, float y, const char *text, float size) {
     push_text(c, x, y, text, size, 0.13f, 0.10f, 0.08f);   /* ink */
 }
