@@ -126,7 +126,7 @@ void    make_terrain(MeshBuilder *b, sol_f32 w, sol_f32 d, int sub,
 /* A campus pad: one room's footprint + its floor height, in campus-LOCAL coords
    (relative to the campus rectangle centre). floor_y is absolute world Y. */
 typedef struct { float cx, cz, hw, hd, floor_y; } CampusPad;
-#define CAMPUS_MAX_PADS 256
+#define CAMPUS_MAX_PADS 1024
 
 /* Campus heightfield: per-room flat pads (footprint at floor_y) blended with
    fBm hills, lowest-pad-wins at overlaps, faded to 0 at the rim (so the skirt

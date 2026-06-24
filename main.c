@@ -4194,6 +4194,10 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define CAMPUS_SUB      72        /* campus tessellation (clamped 2..96 in make_campus) */
 #define CAMPUS_HILL_AMP 2.0f      /* hill amplitude between rooms (m) */
 #define CAMPUS_SEED     7u        /* campus noise identity */
+#define CAMPUS_PAD_GROW  0.6f     /* expand a room pad past its walls (m) */
+#define CAMPUS_PAD_SINK  0.15f    /* sink a pad below the floor/deck so the solid covers it (m) */
+#define CAMPUS_PATH_HALF 0.85f    /* half-width of a walkway corridor pad (m) */
+#define CAMPUS_PATH_STEP 1.2f     /* sample spacing along a walkway leg (m) */
 
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
@@ -4616,35 +4620,72 @@ static void walk_trim_store(sol_u32 handle, Mesh trim) {
 
 /* fill g_campus.pads from the active world's ROOM anchors (not islands), and
    return the footprint bounding box via lo/hi. Returns the pad count. */
-static int campus_gather_pads(AppState *st, vec3 *lo, vec3 *hi) {
+/* store one pad into g_campus.pads (capped) and grow the bbox by its footprint. */
+static void campus_add_pad(int *n, float cx, float cz, float hw, float hd, float fy,
+                           float *minx, float *maxx, float *minz, float *maxz) {
+    if (*n >= CAMPUS_MAX_PADS) return;
+    g_campus.pads[*n].cx = cx; g_campus.pads[*n].cz = cz;
+    g_campus.pads[*n].hw = hw; g_campus.pads[*n].hd = hd;
+    g_campus.pads[*n].floor_y = fy;
+    if (*n == 0) { *minx = cx - hw; *maxx = cx + hw; *minz = cz - hd; *maxz = cz + hd; }
+    else {
+        if (cx - hw < *minx) *minx = cx - hw;
+        if (cx + hw > *maxx) *maxx = cx + hw;
+        if (cz - hd < *minz) *minz = cz - hd;
+        if (cz + hd > *maxz) *maxz = cz + hd;
+    }
+    (*n)++;
+}
+
+/* fill g_campus.pads from the active world's room footprints (grown past the
+   walls, sunk under the floor) AND a corridor of pads sampled along each
+   walkway route (sunk under the deck), returning the footprint bbox via lo/hi. */
+static int campus_gather_pads(AppState *st, const Route *routes, int nroutes,
+                              vec3 *lo, vec3 *hi) {
     Scene  *s = &st->scene;
-    int     n = 0;
+    int     n = 0, ri;
     sol_u32 i;
     float   minx = 0, maxx = 0, minz = 0, maxz = 0;
+    /* room pads: grown past the walls, sunk under the floor */
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         const char  *rt;
         RoomRect     r;
-        if (o->mesh_ref) continue;                       /* room parents are empties */
+        if (o->mesh_ref) continue;
         rt = scene_meta_get(s, o->handle, "room_type");
         if (!rt) continue;
         if (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0) continue;
-        if (!scene_object_active(s, o->handle)) continue; /* this world only */
-        if (n >= CAMPUS_MAX_PADS) break;
+        if (!scene_object_active(s, o->handle)) continue;
         r = editor_room_rect(s, o->handle);
-        g_campus.pads[n].cx = r.cx; g_campus.pads[n].cz = r.cz;
-        g_campus.pads[n].hw = r.hw; g_campus.pads[n].hd = r.hd;
-        g_campus.pads[n].floor_y = r.floor_y;
-        if (n == 0) {
-            minx = r.cx - r.hw; maxx = r.cx + r.hw;
-            minz = r.cz - r.hd; maxz = r.cz + r.hd;
-        } else {
-            if (r.cx - r.hw < minx) minx = r.cx - r.hw;
-            if (r.cx + r.hw > maxx) maxx = r.cx + r.hw;
-            if (r.cz - r.hd < minz) minz = r.cz - r.hd;
-            if (r.cz + r.hd > maxz) maxz = r.cz + r.hd;
+        campus_add_pad(&n, r.cx, r.cz,
+                       r.hw + ROUTE_WALL_T + CAMPUS_PAD_GROW,
+                       r.hd + ROUTE_WALL_T + CAMPUS_PAD_GROW,
+                       r.floor_y - CAMPUS_PAD_SINK,
+                       &minx, &maxx, &minz, &maxz);
+    }
+    /* walkway corridor pads: sample each valid route's two legs (door_lo ->
+       corner -> door_hi), one pad per step, sunk under the deck. */
+    for (ri = 0; ri < nroutes; ri++) {
+        const Route *rt = &routes[ri];
+        vec3         pts[3];
+        int          leg;
+        if (!rt->valid) continue;
+        pts[0] = rt->door_lo; pts[1] = rt->corner; pts[2] = rt->door_hi;
+        for (leg = 0; leg < 2; leg++) {
+            vec3  a = pts[leg], b = pts[leg + 1];
+            float dx = b.x - a.x, dz = b.z - a.z;
+            float len = (float)sqrt((double)(dx * dx + dz * dz));
+            int   k = (int)(len / CAMPUS_PATH_STEP) + 1, sgi;
+            if (len < 0.05f) continue;                 /* degenerate leg (straight path) */
+            if (k > 64) k = 64;
+            for (sgi = 0; sgi <= k; sgi++) {
+                float t  = (float)sgi / (float)k;
+                float px = a.x + dx * t, pz = a.z + dz * t;
+                float py = a.y + (b.y - a.y) * t;
+                campus_add_pad(&n, px, pz, CAMPUS_PATH_HALF, CAMPUS_PATH_HALF,
+                               py - CAMPUS_PAD_SINK, &minx, &maxx, &minz, &maxz);
+            }
         }
-        n++;
     }
     *lo = vec3_make(minx, 0.0f, minz);
     *hi = vec3_make(maxx, 0.0f, maxz);
@@ -4653,7 +4694,7 @@ static int campus_gather_pads(AppState *st, vec3 *lo, vec3 *hi) {
 
 /* (re)build the active world's campus terrain into g_campus, or disable it.
    Derived: called at the end of connections_rebuild (every structural change). */
-static void campus_rebuild(AppState *st) {
+static void campus_rebuild(AppState *st, const Route *routes, int nroutes) {
     const char *wsname = st->scene.active_ws[0] ? st->scene.active_ws : "home";
     sol_u32     anchor = workspace_anchor_find(&st->scene, wsname);
     const char *flag   = anchor ? scene_meta_get(&st->scene, anchor, "campus") : (const char *)0;
@@ -4665,7 +4706,7 @@ static void campus_rebuild(AppState *st) {
     g_campus.enabled = (flag && strcmp(flag, "1") == 0);
     g_campus.npads   = 0;
     if (!g_campus.enabled) return;
-    g_campus.npads = campus_gather_pads(st, &lo, &hi);
+    g_campus.npads = campus_gather_pads(st, routes, nroutes, &lo, &hi);
     if (g_campus.npads == 0) { g_campus.enabled = 0; return; }    /* nothing to ground */
     /* rubber-band rectangle: footprint bbox + a margin proportional to its size
        (so rooms stay inside the un-faded rim zone). */
@@ -4777,7 +4818,7 @@ static void connections_rebuild(AppState *st) {
         }
     }
 
-    campus_rebuild(st);   /* derived: the active world's grounding terrain */
+    campus_rebuild(st, routes, n);   /* derived: the active world's grounding terrain */
 }
 
 /* Incident rebuild for the LIVE editor drag: re-thread only the walkways that
