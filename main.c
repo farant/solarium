@@ -4177,18 +4177,21 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
    built where the doorway openings are already computed (connections_rebuild). */
 #define WALL_TILE_M    3.0f      /* meters per texture-repeat (the plank-size knob) */
 #define WALL_EPS       0.01f     /* inward lift off the wall face (anti z-fight) */
-#define WALL_CACHE_MAX 128
+#define ROOM_FRAME_MAX 128
 
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 
-static struct { sol_u32 handle; Mesh mesh; } g_wall_cache[WALL_CACHE_MAX];
-static int g_wall_cache_n = 0;
+typedef struct { sol_u32 handle; Mesh wall, wood; } RoomFrame;
+static RoomFrame g_room_frame[ROOM_FRAME_MAX];
+static int       g_room_frame_n = 0;
 
-static void wall_cache_flush(void) {
+static void room_frame_flush(void) {
     int i;
-    for (i = 0; i < g_wall_cache_n; i++)
-        mesh_destroy(&g_wall_cache[i].mesh);   /* no-op for zero-id entries */
-    g_wall_cache_n = 0;
+    for (i = 0; i < g_room_frame_n; i++) {
+        mesh_destroy(&g_room_frame[i].wall);
+        mesh_destroy(&g_room_frame[i].wood);
+    }
+    g_room_frame_n = 0;
 }
 
 /* one flat inner-face quad; position-based UVs (u = s/TILE, v = y/TILE) so planks
@@ -4256,19 +4259,20 @@ static void wall_panels(MeshBuilder *b, int runx, float f, float ns,
     }
 }
 
-/* build a room shell's wall-overlay mesh from its openings and store it in the
-   handle-keyed cache (replacing any prior entry). no-op if planks disabled. */
-static void wall_overlay_store(SceneObject *shell, const RoomOpening *ops, int no) {
+/* build a RoomFrame (wall + timber) for a room shell from its openings and
+   store it by handle (replacing any prior entry). no-op if planks disabled. */
+static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no) {
     MeshBuilder mb;
-    Mesh        m;
+    Mesh        wall, wood;
     float       w, d, h, hw, hd;
     int         i;
-    if (g_wall_mat.albedo_tex.id == 0) return;
+    if (g_wall_mat.albedo_tex.id == 0) return;     /* (a later task widens this) */
     w  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
     d  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
     h  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
     hw = w * 0.5f; hd = d * 0.5f;
-    memset(&m, 0, sizeof m);
+    memset(&wall, 0, sizeof wall);
+    memset(&wood, 0, sizeof wood);
     mb_init(&mb);
     if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "wn") > 0.5f)
         wall_panels(&mb, 1, -hd + WALL_EPS,  1.0f, -hw, hw, h, ops, no, ROOM_WALL_N);
@@ -4278,31 +4282,34 @@ static void wall_overlay_store(SceneObject *shell, const RoomOpening *ops, int n
         wall_panels(&mb, 0,  hw - WALL_EPS, -1.0f, -hd, hd, h, ops, no, ROOM_WALL_E);
     if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f)
         wall_panels(&mb, 0, -hw + WALL_EPS,  1.0f, -hd, hd, h, ops, no, ROOM_WALL_W);
-    if (mb.index_count > 0) m = mesh_from_builder(&mb);
+    if (mb.index_count > 0) wall = mesh_from_builder(&mb);
     mb_free(&mb);
-    for (i = 0; i < g_wall_cache_n; i++)
-        if (g_wall_cache[i].handle == shell->handle) {
-            mesh_destroy(&g_wall_cache[i].mesh);
-            g_wall_cache[i].mesh = m;
+    for (i = 0; i < g_room_frame_n; i++)
+        if (g_room_frame[i].handle == shell->handle) {
+            mesh_destroy(&g_room_frame[i].wall);
+            mesh_destroy(&g_room_frame[i].wood);
+            g_room_frame[i].wall = wall;
+            g_room_frame[i].wood = wood;
             return;
         }
-    if (g_wall_cache_n >= WALL_CACHE_MAX) {
+    if (g_room_frame_n >= ROOM_FRAME_MAX) {
         static int warned = 0;
-        if (!warned) { printf("wall overlay: cache full (%d rooms)\n",
-                              WALL_CACHE_MAX); warned = 1; }
-        mesh_destroy(&m);
+        if (!warned) { printf("room frame: cache full (%d rooms)\n",
+                              ROOM_FRAME_MAX); warned = 1; }
+        mesh_destroy(&wall); mesh_destroy(&wood);
         return;
     }
-    g_wall_cache[g_wall_cache_n].handle = shell->handle;
-    g_wall_cache[g_wall_cache_n].mesh   = m;
-    g_wall_cache_n++;
+    g_room_frame[g_room_frame_n].handle = shell->handle;
+    g_room_frame[g_room_frame_n].wall   = wall;
+    g_room_frame[g_room_frame_n].wood   = wood;
+    g_room_frame_n++;
 }
 
-static Mesh *wall_overlay_get(sol_u32 handle) {
+static RoomFrame *room_frame_get(sol_u32 handle) {
     int i;
-    for (i = 0; i < g_wall_cache_n; i++)
-        if (g_wall_cache[i].handle == handle) return &g_wall_cache[i].mesh;
-    return (Mesh *)0;
+    for (i = 0; i < g_room_frame_n; i++)
+        if (g_room_frame[i].handle == handle) return &g_room_frame[i];
+    return (RoomFrame *)0;
 }
 
 static void connections_rebuild(AppState *st) {
@@ -4311,7 +4318,7 @@ static void connections_rebuild(AppState *st) {
     int     n = route_all(s, routes, ROUTE_MAX), i;
     sol_u32 j;
 
-    wall_cache_flush();   /* full pass is authoritative: drop stranded entries, repopulate below */
+    room_frame_flush();   /* full pass is authoritative: drop stranded entries, repopulate below */
 
     /* 1. walkways: anchor at the lower door, mesh in local coords */
     for (i = 0; i < n; i++) {
@@ -4368,7 +4375,7 @@ static void connections_rebuild(AppState *st) {
                              ops, no);
             if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
             mb_free(&mb);
-            wall_overlay_store(shell, ops, no);   /* matching plank overlay */
+            room_frame_build(shell, ops, no);   /* the room's timber frame */
         }
     }
 }
@@ -4450,7 +4457,7 @@ static void connections_rebuild_focus(AppState *st, sol_u32 focus) {
                              ops, no);
             if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
             mb_free(&mb);
-            wall_overlay_store(shell, ops, no);   /* matching plank overlay */
+            room_frame_build(shell, ops, no);   /* the room's timber frame */
         }
     }
 }
@@ -12083,20 +12090,22 @@ static void render(AppState *state) {
         }
     }
 
-    /* plank walls overlay (sourced experiment): each active room's cached
-       wall-panel mesh, drawn over its inner wall faces. render-only. */
-    if (g_wall_mat.albedo_tex.id != 0) {
+    /* room frame overlay: each active room's cached wall-panel mesh, drawn
+       over its inner wall faces. render-only. */
+    {
         sol_u32 wi;
         for (wi = 0; wi < state->scene.count; wi++) {
             SceneObject *o = &state->scene.objects[wi];
-            Mesh        *wm;
+            RoomFrame   *rf;
+            mat4         rm;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "room") != 0) continue;
             if (!scene_object_active(&state->scene, o->handle)) continue;
             if (vis && !vis[o->handle]) continue;
-            wm = wall_overlay_get(o->handle);
-            if (!wm || wm->index_count == 0) continue;
-            draw_mesh(state, *wm, scene_world_matrix(&state->scene, o),
-                      view, proj, eye, 0.0f, g_wall_mat);
+            rf = room_frame_get(o->handle);
+            if (!rf) continue;
+            rm = scene_world_matrix(&state->scene, o);
+            if (g_wall_mat.albedo_tex.id != 0 && rf->wall.index_count > 0)
+                draw_mesh(state, rf->wall, rm, view, proj, eye, 0.0f, g_wall_mat);
         }
     }
 
