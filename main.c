@@ -4205,6 +4205,7 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define CAMPUS_TREE_MAX     128
 #define CAMPUS_GRASS_CLEAR  0.4f      /* keep grass this far off pads (m) */
 #define CAMPUS_TREE_CLEAR   1.6f      /* keep trees this far off pads (m) */
+#define CAMPUS_SCREE_MAX    400
 
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
@@ -4231,6 +4232,8 @@ typedef struct {
     RhiBuffer grass;                          int grass_n;
     RhiBuffer wood[FOREST_VARIANT_COUNT];      int wood_n[FOREST_VARIANT_COUNT];
     RhiBuffer canopy[2];                       int canopy_n[2];
+    RhiBuffer flowers;                          int flower_n;
+    RhiBuffer scree;                            int scree_n;
 } CampusFlora;
 static CampusFlora g_campus_flora;             /* derived, drawn explicitly when g_campus.enabled */
 
@@ -5657,6 +5660,8 @@ static void campus_flora_free(void) {
         if (g_campus_flora.wood_n[v]) rhi_destroy_buffer(g_campus_flora.wood[v]);
     if (g_campus_flora.canopy_n[0]) rhi_destroy_buffer(g_campus_flora.canopy[0]);
     if (g_campus_flora.canopy_n[1]) rhi_destroy_buffer(g_campus_flora.canopy[1]);
+    if (g_campus_flora.flower_n) rhi_destroy_buffer(g_campus_flora.flowers);
+    if (g_campus_flora.scree_n)  rhi_destroy_buffer(g_campus_flora.scree);
     memset(&g_campus_flora, 0, sizeof g_campus_flora);
 }
 
@@ -5708,11 +5713,45 @@ static void campus_flora_rebuild(AppState *st) {
     }
     free(buf);
 
+    /* --- flowers (world-space; reuse flower_patch clustering + flower_color) --- */
+    {
+        sol_u32 fseed = CAMPUS_SEED * 2654435761u + 101u;
+        sol_u32 frng  = CAMPUS_SEED * 2654435761u + 23u;
+        int     ftarget = (int)(w * d * 0.5f), fk, fn = 0;
+        float  *fbuf;
+        if (ftarget > CAMPUS_GRASS_MAX) ftarget = CAMPUS_GRASS_MAX;
+        fbuf = (float *)malloc((size_t)(ftarget > 0 ? ftarget : 1) * 8 * sizeof(float));
+        for (fk = 0; fbuf && fk < ftarget; fk++) {
+            float lx, lz, h, sx, sz, slope, cr, cg, cb;
+            lx = (meadow_rnd(&frng) - 0.5f) * (w - 1.5f);
+            lz = (meadow_rnd(&frng) - 0.5f) * (d - 1.5f);
+            if (flower_patch(fseed, lx, lz) < 0.62f) continue;
+            if (campus_point_blocked(g_campus.pads, g_campus.npads, lx, lz, CAMPUS_GRASS_CLEAR)) continue;
+            h  = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz);
+            sx = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx + 0.5f, lz);
+            sz = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz + 0.5f);
+            slope = (float)sqrt((double)((sx - h) * (sx - h) + (sz - h) * (sz - h))) * 2.0f;
+            if (slope > 0.4f) continue;
+            flower_color(&frng, &cr, &cg, &cb);
+            fbuf[fn * 8 + 0] = cx + lx; fbuf[fn * 8 + 1] = h; fbuf[fn * 8 + 2] = cz + lz;
+            fbuf[fn * 8 + 3] = 0.14f + 0.10f * meadow_rnd(&frng);
+            fbuf[fn * 8 + 4] = cr; fbuf[fn * 8 + 5] = cg; fbuf[fn * 8 + 6] = cb; fbuf[fn * 8 + 7] = 1.0f;
+            fn++;
+        }
+        if (fbuf && fn > 0) {
+            g_campus_flora.flowers = rhi_create_buffer(RHI_BUFFER_VERTEX, fbuf, (size_t)fn * 8 * sizeof(float));
+            g_campus_flora.flower_n = fn;
+        }
+        free(fbuf);
+    }
+
     /* --- trees (local-to-centre via forest_place; needs the canopy slots) --- */
     if (g_forest_built) {
         float *wood[FOREST_VARIANT_COUNT];
         float *can[2];
         int    wn[FOREST_VARIANT_COUNT], cn[2], v, ok = 1, darts;
+        float  tree_xz[CAMPUS_TREE_MAX * 2];
+        int    ntree = 0;
         rng    = CAMPUS_SEED * 2246822519u + 13u;
         target = (int)(w * d * CAMPUS_TREE_PER_M2);
         if (target > CAMPUS_TREE_MAX) target = CAMPUS_TREE_MAX;
@@ -5742,7 +5781,38 @@ static void campus_flora_rebuild(AppState *st) {
                 yaw = forest_rnd(&rng) * 6.2831853f;
                 sc  = FOREST_VARIANTS[v].scale * (0.82f + 0.36f * forest_rnd(&rng));
                 forest_place(v, lx, lz, h, yaw, sc, wood, wn, can, cn);
+                if (ntree < CAMPUS_TREE_MAX) {
+                    tree_xz[ntree * 2 + 0] = lx;
+                    tree_xz[ntree * 2 + 1] = lz;
+                    ntree++;
+                }
                 placed++;
+            }
+            {   /* shrubs (variant 5), biased UNDER the canopy like the islands */
+                int stgt = (int)((float)placed * 1.6f), sdarts, splaced = 0;
+                if (stgt > CAMPUS_TREE_MAX) stgt = CAMPUS_TREE_MAX;
+                for (sdarts = 0; sdarts < stgt * 8 && splaced < stgt; sdarts++) {
+                    float lx, lz, h, sx, sz, slope, yaw, sc, near2 = 1e30f;
+                    int   ti;
+                    lx = (forest_rnd(&rng) - 0.5f) * (w - 2.0f);
+                    lz = (forest_rnd(&rng) - 0.5f) * (d - 2.0f);
+                    if (campus_point_blocked(g_campus.pads, g_campus.npads, lx, lz, CAMPUS_GRASS_CLEAR)) continue;
+                    h  = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz);
+                    sx = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx + 0.5f, lz);
+                    sz = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz + 0.5f);
+                    slope = (float)sqrt((double)((sx - h) * (sx - h) + (sz - h) * (sz - h))) * 2.0f;
+                    if (slope > 0.45f) continue;
+                    for (ti = 0; ti < ntree; ti++) {
+                        float ddx = lx - tree_xz[ti * 2], ddz = lz - tree_xz[ti * 2 + 1];
+                        float d2 = ddx * ddx + ddz * ddz;
+                        if (d2 < near2) near2 = d2;
+                    }
+                    if (near2 > 3.2f * 3.2f && forest_rnd(&rng) > 0.18f) continue;  /* under crown, sparse open */
+                    yaw = forest_rnd(&rng) * 6.2831853f;
+                    sc  = FOREST_VARIANTS[5].scale * (0.7f + 0.5f * forest_rnd(&rng));
+                    forest_place(5, lx, lz, h, yaw, sc, wood, wn, can, cn);
+                    splaced++;
+                }
             }
             for (v = 0; v < FOREST_VARIANT_COUNT; v++) {
                 g_campus_flora.wood_n[v] = wn[v];
@@ -5759,6 +5829,32 @@ static void campus_flora_rebuild(AppState *st) {
         }
         for (v = 0; v < FOREST_VARIANT_COUNT; v++) free(wood[v]);
         free(can[0]); free(can[1]);
+    }
+
+    /* --- scree (pebbles, local-to-centre; reuse the scree mesh) --- */
+    {
+        sol_u32 srng = CAMPUS_SEED * 2246822519u + 29u;
+        int     starget = (int)(w * d * 0.045f), sn = 0, sk;
+        float  *scr;
+        if (starget > CAMPUS_SCREE_MAX) starget = CAMPUS_SCREE_MAX;
+        scr = (float *)malloc((size_t)(starget > 0 ? starget : 1) * 8 * sizeof(float));
+        for (sk = 0; scr && sk < starget; sk++) {
+            float lx, lz, h, ps;
+            lx = (forest_rnd(&srng) - 0.5f) * (w - 1.0f);
+            lz = (forest_rnd(&srng) - 0.5f) * (d - 1.0f);
+            if (campus_point_blocked(g_campus.pads, g_campus.npads, lx, lz, CAMPUS_GRASS_CLEAR)) continue;
+            h  = campus_height(g_campus.pads, g_campus.npads, w, d, amp, CAMPUS_SEED, lx, lz);
+            ps = 0.10f + 0.28f * forest_rnd(&srng);
+            scr[sn * 8 + 0] = lx; scr[sn * 8 + 1] = h + ps * 0.35f; scr[sn * 8 + 2] = lz;
+            scr[sn * 8 + 3] = forest_rnd(&srng) * 6.2831853f;
+            scr[sn * 8 + 4] = ps; scr[sn * 8 + 5] = ps; scr[sn * 8 + 6] = 0.0f; scr[sn * 8 + 7] = 0.0f;
+            sn++;
+        }
+        if (scr && sn > 0) {
+            g_campus_flora.scree = rhi_create_buffer(RHI_BUFFER_VERTEX, scr, (size_t)sn * 8 * sizeof(float));
+            g_campus_flora.scree_n = sn;
+        }
+        free(scr);
     }
 }
 
@@ -12943,6 +13039,17 @@ static void render(AppState *state) {
         rhi_bind_instance_buffer(g_campus_flora.grass);
         rhi_draw_indexed_instanced(0, 12, g_campus_flora.grass_n);
     }
+    if (g_campus.enabled && g_campus_flora.flower_n > 0 && state->meadow_pipeline.id && state->flower_vbuf.id) {
+        rhi_set_pipeline(state->meadow_pipeline);
+        rhi_set_uniform_mat4("uView", view.m);
+        rhi_set_uniform_mat4("uProj", proj.m);
+        rhi_set_uniform_float("uTime", (float)glfwGetTime());
+        rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
+        rhi_bind_vertex_buffer(state->flower_vbuf);
+        rhi_bind_index_buffer(state->flower_ibuf);
+        rhi_bind_instance_buffer(g_campus_flora.flowers);
+        rhi_draw_indexed_instanced(0, 12, g_campus_flora.flower_n);
+    }
     if (g_campus.enabled && state->ornament_pipeline.id) {
         mat4     cmodel = mat4_translate(g_campus.center);
         Material leafmat[2];
@@ -12970,6 +13077,16 @@ static void render(AppState *state) {
             rhi_bind_instance_buffer(g_campus_flora.canopy[lk]);
             rhi_bind_index_buffer(um->ibuffer);
             rhi_draw_indexed_instanced(0, um->index_count, g_campus_flora.canopy_n[lk]);
+        }
+        if (g_campus_flora.scree_n > 0 && state->scree_mesh.index_count > 0) {
+            Mesh *um = &state->scree_mesh;
+            bind_scene_uniforms(state, state->ornament_pipeline, cmodel, view, proj, eye, 0.0f, forest_scree_material());
+            rhi_set_uniform_float("uTime", (float)glfwGetTime());
+            rhi_set_uniform_vec3("uWind", state->wind_dx, state->wind_dz, state->wind_gust);
+            rhi_bind_vertex_buffer(um->vbuffer);
+            rhi_bind_instance_buffer(g_campus_flora.scree);
+            rhi_bind_index_buffer(um->ibuffer);
+            rhi_draw_indexed_instanced(0, um->index_count, g_campus_flora.scree_n);
         }
     }
 
