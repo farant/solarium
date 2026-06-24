@@ -4184,11 +4184,13 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define FRAME_PITCH_DEG    35.0f     /* roof / truss pitch (degrees) */
 #define FRAME_BENT_SPACING 2.5f      /* meters between scissor-truss bents */
 #define FRAME_SCISSOR_FRAC 0.6f      /* lower chord meets the opposite rafter this far up */
+#define ROOF_TILE_M  2.0f        /* meters per roof texture-repeat */
 
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
+static Material g_roof_mat;       /* pitched roof; albedo_tex.id == 0 => no roof */
 
-typedef struct { sol_u32 handle; Mesh wall, wood; } RoomFrame;
+typedef struct { sol_u32 handle; Mesh wall, wood, roof, gable; } RoomFrame;
 static RoomFrame g_room_frame[ROOM_FRAME_MAX];
 static int       g_room_frame_n = 0;
 
@@ -4197,6 +4199,8 @@ static void room_frame_flush(void) {
     for (i = 0; i < g_room_frame_n; i++) {
         mesh_destroy(&g_room_frame[i].wall);
         mesh_destroy(&g_room_frame[i].wood);
+        mesh_destroy(&g_room_frame[i].roof);
+        mesh_destroy(&g_room_frame[i].gable);
     }
     g_room_frame_n = 0;
 }
@@ -4316,16 +4320,27 @@ static void frame_beam(MeshBuilder *mb, vec3 a, vec3 b, float t) {
    store it by handle (replacing any prior entry). no-op if planks disabled. */
 static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no) {
     MeshBuilder mb;
-    Mesh        wall, wood;
+    Mesh        wall, wood, roof, gable;
     float       w, d, h, hw, hd;
     int         i;
-    if (g_wall_mat.albedo_tex.id == 0 && g_dark_wood.albedo_tex.id == 0) return;
+    int         rax;
+    float       rlen, along_h, sh, dy, ridge_y;
+    if (g_wall_mat.albedo_tex.id == 0 && g_dark_wood.albedo_tex.id == 0 &&
+        g_roof_mat.albedo_tex.id == 0) return;
     w  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
     d  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
     h  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
     hw = w * 0.5f; hd = d * 0.5f;
     memset(&wall, 0, sizeof wall);
     memset(&wood, 0, sizeof wood);
+    memset(&roof,  0, sizeof roof);
+    memset(&gable, 0, sizeof gable);
+    rax     = (w >= d) ? 1 : 0;     /* 1 = ridge along X (span = Z) */
+    rlen    = rax ? w : d;          /* ridge length */
+    along_h = rax ? hw : hd;        /* half the ridge length */
+    sh      = rax ? hd : hw;        /* half-span (eave -> centre) */
+    dy      = sh * (float)tan((double)sol_radians(FRAME_PITCH_DEG));
+    ridge_y = h + dy;               /* ridge peak above the floor */
     if (g_wall_mat.albedo_tex.id != 0) {
         mb_init(&mb);
         if (mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "wn") > 0.5f)
@@ -4349,12 +4364,6 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
         frame_beam(&mb, vec3_make(-cx, 0.0f,  cz), vec3_make(-cx, h,  cz), FRAME_COL_T);
         /* scissor trusses: bents spaced along the ridge axis (the longer dim) */
         {
-            int   rax     = (w >= d) ? 1 : 0;      /* 1 = ridge along X (span = Z) */
-            float rlen    = rax ? w : d;           /* ridge length */
-            float along_h = rax ? hw : hd;         /* half the ridge length */
-            float sh      = rax ? hd : hw;         /* half-span (eave -> centre) */
-            float dy      = sh * (float)tan((double)sol_radians(FRAME_PITCH_DEG));
-            float ridge_y = h + dy;                /* ridge peak above the floor */
             float f       = FRAME_SCISSOR_FRAC;
             float cross_y = h + dy * f / (2.0f - f);  /* where the lower chords cross */
             int   bents   = (int)(rlen / FRAME_BENT_SPACING + 0.5f);
@@ -4375,12 +4384,33 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
         if (mb.index_count > 0) wood = mesh_from_builder(&mb);
         mb_free(&mb);
     }
+    if (g_roof_mat.albedo_tex.id != 0) {
+        float slope_l = (float)sqrt((double)(sh * sh + dy * dy));
+        float uL = rlen / ROOF_TILE_M, uS = slope_l / ROOF_TILE_M;
+        int   side;
+        mb_init(&mb);
+        for (side = 0; side < 2; side++) {
+            float sg  = side ? -1.0f : 1.0f;
+            vec3  en  = bent_pt(rax, -along_h, sg * sh, h);        /* eave near */
+            vec3  ef  = bent_pt(rax,  along_h, sg * sh, h);        /* eave far  */
+            vec3  rdf = bent_pt(rax,  along_h, 0.0f,    ridge_y);  /* ridge far */
+            vec3  rdn = bent_pt(rax, -along_h, 0.0f,    ridge_y);  /* ridge near*/
+            vec3  nrm = vec3_normalize(bent_pt(rax, 0.0f, sg * dy, sh));
+            frame_quad(&mb, en, ef, rdf, rdn, nrm, 0.0f, 0.0f, uL, uS);
+        }
+        if (mb.index_count > 0) roof = mesh_from_builder(&mb);
+        mb_free(&mb);
+    }
     for (i = 0; i < g_room_frame_n; i++)
         if (g_room_frame[i].handle == shell->handle) {
             mesh_destroy(&g_room_frame[i].wall);
             mesh_destroy(&g_room_frame[i].wood);
             g_room_frame[i].wall = wall;
             g_room_frame[i].wood = wood;
+            mesh_destroy(&g_room_frame[i].roof);
+            mesh_destroy(&g_room_frame[i].gable);
+            g_room_frame[i].roof = roof;
+            g_room_frame[i].gable = gable;
             return;
         }
     if (g_room_frame_n >= ROOM_FRAME_MAX) {
@@ -4388,11 +4418,14 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
         if (!warned) { printf("room frame: cache full (%d rooms)\n",
                               ROOM_FRAME_MAX); warned = 1; }
         mesh_destroy(&wall); mesh_destroy(&wood);
+        mesh_destroy(&roof); mesh_destroy(&gable);
         return;
     }
     g_room_frame[g_room_frame_n].handle = shell->handle;
     g_room_frame[g_room_frame_n].wall   = wall;
     g_room_frame[g_room_frame_n].wood   = wood;
+    g_room_frame[g_room_frame_n].roof   = roof;
+    g_room_frame[g_room_frame_n].gable  = gable;
     g_room_frame_n++;
 }
 
@@ -9883,6 +9916,13 @@ static void dark_wood_mat_init(void) {
         "dark_wood/dark_wood_arm_1k.png");
 }
 
+static void roof_mat_init(void) {
+    g_roof_mat = load_pbr_material(
+        "distressed_painted_planks/distressed_painted_planks_diff_1k.png",
+        "distressed_painted_planks/distressed_painted_planks_nor_gl_1k.png",
+        "distressed_painted_planks/distressed_painted_planks_arm_1k.png");
+}
+
 /* a w x d floor quad (XZ, +Y up) with meter-based tiling UVs, cached by size so a
    tile is the same physical size in every room. empty mesh on cache overflow. */
 static Mesh floor_quad_for(float w, float d) {
@@ -11037,6 +11077,7 @@ static int init_scene(AppState *state) {
     floor_mat_init();   /* sandstone floor overlay (sourced experiment, flagged) */
     wall_mat_init();    /* plank walls overlay (sourced experiment, flagged) */
     dark_wood_mat_init();   /* timber halls: corner columns + trusses */
+    roof_mat_init();    /* timber halls: pitched roof */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
        loaded and brought fully to life. The home scene builds only on first
@@ -12212,6 +12253,8 @@ static void render(AppState *state) {
                 draw_mesh(state, rf->wall, rm, view, proj, eye, 0.0f, g_wall_mat);
             if (g_dark_wood.albedo_tex.id != 0 && rf->wood.index_count > 0)
                 draw_mesh(state, rf->wood, rm, view, proj, eye, 0.0f, g_dark_wood);
+            if (g_roof_mat.albedo_tex.id != 0 && rf->roof.index_count > 0)
+                draw_mesh(state, rf->roof, rm, view, proj, eye, 0.0f, g_roof_mat);
         }
     }
 
