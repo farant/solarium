@@ -39,6 +39,7 @@
 /dark_wood/
 /distressed_painted_planks/
 /marble_rock/
+/rocky_terrain/
 
 # Editor / tooling
 compile_commands.json

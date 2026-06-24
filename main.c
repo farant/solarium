@@ -4192,6 +4192,7 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define ROOF_TILE_M  2.0f        /* meters per roof texture-repeat */
 
 #define CAMPUS_SUB      72        /* campus tessellation (clamped 2..96 in make_campus) */
+#define CAMPUS_TILE_M   2.0f      /* meters per ground-texture repeat (bigger = less tiling) */
 #define CAMPUS_HILL_AMP 2.0f      /* hill amplitude between rooms (m) */
 #define CAMPUS_SEED     7u        /* campus noise identity */
 #define CAMPUS_PAD_GROW  0.6f     /* expand a room pad past its walls (m) */
@@ -4209,6 +4210,7 @@ static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disab
 static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
 static Material g_roof_mat;       /* pitched roof; albedo_tex.id == 0 => no roof */
 static Material g_path_mat;       /* sandstone walkway deck; albedo_tex.id == 0 => default */
+static Material g_campus_mat;      /* rocky campus ground (experiment); id 0 => palette */
 
 typedef struct { sol_u32 handle; Mesh wall, wood, roof, gable, door_floor, door_trim; } RoomFrame;
 static RoomFrame g_room_frame[ROOM_FRAME_MAX];
@@ -4744,6 +4746,7 @@ static void campus_rebuild(AppState *st, const Route *routes, int nroutes) {
     mb_init(&mb);
     make_campus(&mb, g_campus.pads, g_campus.npads, g_campus.w, g_campus.d,
                 CAMPUS_SUB, CAMPUS_HILL_AMP, CAMPUS_SEED);
+    mb_scale_uvs(&mb, 1.0f / CAMPUS_TILE_M);   /* larger ground tiles, less repetition */
     if (mb.index_count > 0) g_campus.mesh = mesh_from_builder(&mb);
     mb_free(&mb);
 }
@@ -10414,6 +10417,13 @@ static void path_mat_init(void) {
         "red_sandstone_tiles/red_sandstone_tiles_arm_1k.png");
 }
 
+static void campus_mat_init(void) {
+    g_campus_mat = load_pbr_material(
+        "rocky_terrain/rocky_terrain_02_diff_1k.png",
+        "rocky_terrain/rocky_terrain_02_nor_gl_1k.png",
+        "rocky_terrain/rocky_terrain_02_arm_1k.png");
+}
+
 /* a w x d floor quad (XZ, +Y up) with meter-based tiling UVs, cached by size so a
    tile is the same physical size in every room. empty mesh on cache overflow. */
 static Mesh floor_quad_for(float w, float d) {
@@ -11570,6 +11580,7 @@ static int init_scene(AppState *state) {
     dark_wood_mat_init();   /* timber halls: corner columns + trusses */
     roof_mat_init();    /* timber halls: pitched roof */
     path_mat_init();    /* sandstone walkway deck + steps between rooms */
+    campus_mat_init();  /* rocky campus ground (experiment) */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
        loaded and brought fully to life. The home scene builds only on first
@@ -12761,13 +12772,16 @@ static void render(AppState *state) {
 
     /* the campus ground (derived; drawn with the terrain slope/height palette) */
     if (g_campus.enabled && g_campus.mesh.index_count > 0) {
-        mat4     cm   = mat4_translate(g_campus.center);   /* heights are world-absolute */
-        Material cmat = material_default();
-        state->terrain_blend = SOL_TRUE;
-        state->terrain_y0    = g_campus.y0;
-        state->terrain_amp   = g_campus.amp_range;
-        draw_mesh(state, g_campus.mesh, cm, view, proj, eye, 0.0f, cmat);
-        state->terrain_blend = SOL_FALSE;
+        mat4 cm = mat4_translate(g_campus.center);        /* heights are world-absolute */
+        if (g_campus_mat.albedo_tex.id != 0) {            /* sourced rock ground (experiment) */
+            draw_mesh(state, g_campus.mesh, cm, view, proj, eye, 0.0f, g_campus_mat);
+        } else {                                          /* fallback: the slope/height palette */
+            state->terrain_blend = SOL_TRUE;
+            state->terrain_y0    = g_campus.y0;
+            state->terrain_amp   = g_campus.amp_range;
+            draw_mesh(state, g_campus.mesh, cm, view, proj, eye, 0.0f, material_default());
+            state->terrain_blend = SOL_FALSE;
+        }
     }
 
     /* dark-wood curb trim along the marble walkways (its own cached mesh, since
