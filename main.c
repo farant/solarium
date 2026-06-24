@@ -5032,6 +5032,7 @@ static void apply_time_of_day(AppState *st);   /* P8 item 9: `-toggle's sky + su
 static void apply_kind_materials(Scene *s);    /* likewise */
 static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
+static void world_rebuild(AppState *st);       /* shared tail of load_palace; defined below */
 static void adopt_legacy_motion(AppState *st); /* P4 item 6: motion becomes data */
 static void note_edit_end(AppState *st);       /* defined with on_key below */
 static void place_confirm(AppState *st);       /* Furniture: Task 8 fills this in */
@@ -7188,6 +7189,18 @@ static void mint_tag_ws(AppState *st, sol_u32 h) {
    press it while flying and the island FLOATS there — vertical
    placement for free. room_type meta makes it LAND (architecture is
    never draggable); the seed makes it THIS island forever. */
+/* toggle the active world's persistent campus flag, then re-derive. */
+static void cmd_toggle_campus(AppState *st) {
+    const char *wsname = st->scene.active_ws[0] ? st->scene.active_ws : "home";
+    sol_u32     anchor = workspace_anchor_add(&st->scene, wsname);   /* find-or-create */
+    const char *cur    = scene_meta_get(&st->scene, anchor, "campus");
+    int         on     = !(cur && strcmp(cur, "1") == 0);
+    scene_meta_set(&st->scene, anchor, "campus", on ? "1" : "0");
+    scene_save(&st->scene, "scene.stml");
+    world_rebuild(st);                                  /* re-derive incl. campus_rebuild */
+    printf("campus %s for world '%s'\n", on ? "on" : "off", wsname);
+}
+
 static void cmd_mint_island(AppState *st) {
     static const char *isle[] = { "the heath", "the tor", "the fell",
                                   "the moor", "the downs", "the crag" };
@@ -8798,7 +8811,8 @@ static Command g_commands[] = {
     { "Top-down editor",             NULL, 0,          cmd_toggle_editor,     NULL,                  SOL_FALSE },
     { "Disconnect selected",         NULL, 0,          cmd_disconnect,        can_disconnect,        SOL_FALSE },
     { "Add room",                    NULL, 0,          cmd_add_room,          NULL,                  SOL_FALSE },
-    { "Toggle stats card",           NULL, 0,          cmd_toggle_hud,        NULL,                  SOL_FALSE }
+    { "Toggle stats card",           NULL, 0,          cmd_toggle_hud,        NULL,                  SOL_FALSE },
+    { "Campus mode",                 NULL, 0,          cmd_toggle_campus,     NULL,                  SOL_FALSE }
 };
 
 #define G_COMMAND_COUNT ((int)(sizeof g_commands / sizeof g_commands[0]))
