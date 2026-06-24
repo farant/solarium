@@ -592,6 +592,90 @@ float terrain_height(const float *params, int count, float lx, float lz) {
                                     lz / TERRAIN_FEATURE_M, seed);
 }
 
+#define CAMPUS_APRON 3.0f     /* m: flatten radius around each room footprint */
+#define CAMPUS_RIM   0.12f    /* rim-fade fraction of min(w,d) */
+
+/* distance from (lx,lz) to a pad's footprint rectangle; 0 if inside. */
+static float campus_rect_dist(float lx, float lz, const CampusPad *p) {
+    float ax = (lx > p->cx ? lx - p->cx : p->cx - lx) - p->hw;   /* >0 outside in x */
+    float az = (lz > p->cz ? lz - p->cz : p->cz - lz) - p->hd;
+    float ex = ax > 0.0f ? ax : 0.0f;
+    float ez = az > 0.0f ? az : 0.0f;
+    return (float)sqrt((double)(ex * ex + ez * ez));
+}
+
+float campus_height(const CampusPad *pads, int npads,
+                    float w, float d, float amp, unsigned seed,
+                    float lx, float lz) {
+    float hw = w * 0.5f, hd = d * 0.5f;
+    float sumw = 0.0f, sumwh = 0.0f, infl = 0.0f;
+    float base, floor_ctrl, flat, hills, edge, ez2, margin, rim, inside_min = 0.0f;
+    int   i, any_inside = 0;
+    if (lx < -hw || lx > hw || lz < -hd || lz > hd) return 0.0f;
+    for (i = 0; i < npads; i++) {
+        float dr = campus_rect_dist(lx, lz, &pads[i]);
+        float wi = 1.0f / (dr * dr + 0.01f);                  /* inverse-distance weight */
+        float fi = 1.0f - sol_smoothstep(dr / CAMPUS_APRON);  /* 1 on footprint -> 0 past apron */
+        sumw  += wi;
+        sumwh += wi * pads[i].floor_y;
+        if (fi > infl) infl = fi;
+        if (dr <= 0.0f) {                                     /* inside this footprint */
+            if (!any_inside || pads[i].floor_y < inside_min) inside_min = pads[i].floor_y;
+            any_inside = 1;                                   /* lowest pad wins */
+        }
+    }
+    base       = (sumw > 0.0f) ? sumwh / sumw : 0.0f;         /* smooth pad-height interpolation */
+    floor_ctrl = any_inside ? inside_min : base;
+    flat       = base + (floor_ctrl - base) * infl;           /* -> floor near rooms, base between */
+    hills      = amp * terrain_fbm(lx / TERRAIN_FEATURE_M, lz / TERRAIN_FEATURE_M, seed);
+    edge = hw - (lx < 0.0f ? -lx : lx);                       /* rim fade (mirror terrain_height) */
+    ez2  = hd - (lz < 0.0f ? -lz : lz);
+    if (ez2 < edge) edge = ez2;
+    margin = (w < d ? w : d) * CAMPUS_RIM;
+    rim    = sol_smoothstep(edge / margin);
+    return (flat + hills * (1.0f - infl)) * rim;              /* fade whole height to 0 at the rim */
+}
+
+void make_campus(MeshBuilder *b, const CampusPad *pads, int npads,
+                 float w, float d, int sub, float amp, unsigned seed) {
+    sol_f32 hw = w * 0.5f, hd = d * 0.5f, bt;
+    int     i, j;
+    if (sub < 2)  sub = 2;
+    if (sub > 96) sub = 96;
+    bt = 0.4f + amp * 0.2f;
+    for (j = 0; j <= sub; j++) {
+        for (i = 0; i <= sub; i++) {
+            sol_f32 x = -hw + w * (sol_f32)i / (sol_f32)sub;
+            sol_f32 z = -hd + d * (sol_f32)j / (sol_f32)sub;
+            sol_f32 e = w / (sol_f32)sub;
+            sol_f32 h  = campus_height(pads, npads, w, d, amp, seed, x, z);
+            sol_f32 nx = campus_height(pads, npads, w, d, amp, seed, x - e, z)
+                       - campus_height(pads, npads, w, d, amp, seed, x + e, z);
+            sol_f32 nz = campus_height(pads, npads, w, d, amp, seed, x, z - e)
+                       - campus_height(pads, npads, w, d, amp, seed, x, z + e);
+            sol_f32 ny = 2.0f * e;
+            sol_f32 nl = (sol_f32)sqrt((double)(nx * nx + ny * ny + nz * nz));
+            if (nl < 1e-6f) nl = 1.0f;
+            mb_push_vertex(b, x, h, z, nx / nl, ny / nl, nz / nl, x, z);
+        }
+    }
+    for (j = 0; j < sub; j++) {
+        for (i = 0; i < sub; i++) {
+            sol_u32 v0 = (sol_u32)(j * (sub + 1) + i);
+            sol_u32 v1 = v0 + 1;
+            sol_u32 v2 = v0 + (sol_u32)(sub + 1);
+            sol_u32 v3 = v2 + 1;
+            mb_push_triangle(b, v0, v2, v3);
+            mb_push_triangle(b, v0, v3, v1);
+        }
+    }
+    face_x(b, -hw, -bt, 0.0f, -hd, hd, -1);     /* skirt + base (rim is 0, like make_terrain) */
+    face_x(b,  hw, -bt, 0.0f, -hd, hd,  1);
+    face_z(b, -hw, hw, -bt, 0.0f, -hd, -1);
+    face_z(b, -hw, hw, -bt, 0.0f,  hd,  1);
+    face_y(b, -hw, hw, -bt, -hd, hd, -1);
+}
+
 void make_terrain(MeshBuilder *b, sol_f32 w, sol_f32 d, int sub,
                   sol_f32 amp, unsigned seed) {
     float   p[5];

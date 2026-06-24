@@ -145,6 +145,17 @@ if [ "$MODE" = "furnituretest" ]; then
     exit 0
 fi
 
+# campustest: the campus heightfield (scene-free). Links mesh.c for
+# campus_height/make_campus + sol_math.
+if [ "$MODE" = "campustest" ]; then
+    set -x
+    clang -std=c89 -pedantic-errors -Werror -g -fsanitize=address,undefined \
+        campus_test.c mesh.c flora.c rock.c gothic.c sweep.c sol_math.c \
+        -o campus_test
+    echo "built ./campus_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
 # inventorytest: the inventory grid math (scene-free C89). Links nothing but libc.
 if [ "$MODE" = "inventorytest" ]; then
     set -x

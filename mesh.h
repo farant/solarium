@@ -123,6 +123,23 @@ void    make_book_open_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
 void    make_terrain(MeshBuilder *b, sol_f32 w, sol_f32 d, int sub,
                      sol_f32 amp, unsigned seed);
 
+/* A campus pad: one room's footprint + its floor height, in campus-LOCAL coords
+   (relative to the campus rectangle centre). floor_y is absolute world Y. */
+typedef struct { float cx, cz, hw, hd, floor_y; } CampusPad;
+#define CAMPUS_MAX_PADS 256
+
+/* Campus heightfield: per-room flat pads (footprint at floor_y) blended with
+   fBm hills, lowest-pad-wins at overlaps, faded to 0 at the rim (so the skirt
+   works like make_terrain). w/d = rectangle size; amp = hill amplitude. */
+float campus_height(const CampusPad *pads, int npads,
+                    float w, float d, float amp, unsigned seed,
+                    float lx, float lz);
+
+/* Build the campus terrain mesh (top grid + skirt + base), sampling
+   campus_height. sub = tessellation (clamped 2..96). */
+void  make_campus(MeshBuilder *b, const CampusPad *pads, int npads,
+                  float w, float d, int sub, float amp, unsigned seed);
+
 /* THE height function — the one source of truth the emitter's vertices,
    their finite-difference normals, AND the standing/placement queries all
    evaluate (geometry and physics agree by construction). Params follow
