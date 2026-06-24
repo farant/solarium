@@ -4316,6 +4316,17 @@ static void frame_beam(MeshBuilder *mb, vec3 a, vec3 b, float t) {
     frame_quad(mb, a00, a10, a11, a01, vec3_scale(dir,  -1.0f), 0.0f, 0.0f, vT, vT);  /* -end  */
 }
 
+/* one triangle a,b,c with per-vertex normal n and explicit UVs (for the gable
+   ends, whose UVs are position-based to line up with the wall planks below). */
+static void gable_tri(MeshBuilder *mb, vec3 a, vec3 b, vec3 c, vec3 n,
+                      float ua, float va, float ub, float vb, float uc, float vc) {
+    sol_u32 ia, ib, ic;
+    ia = mb_push_vertex(mb, a.x, a.y, a.z, n.x, n.y, n.z, ua, va);
+    ib = mb_push_vertex(mb, b.x, b.y, b.z, n.x, n.y, n.z, ub, vb);
+    ic = mb_push_vertex(mb, c.x, c.y, c.z, n.x, n.y, n.z, uc, vc);
+    mb_push_triangle(mb, ia, ib, ic);
+}
+
 /* build a RoomFrame (wall + timber) for a room shell from its openings and
    store it by handle (replacing any prior entry). no-op if planks disabled. */
 static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no) {
@@ -4399,6 +4410,24 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
             frame_quad(&mb, en, ef, rdf, rdn, nrm, 0.0f, 0.0f, uL, uS);
         }
         if (mb.index_count > 0) roof = mesh_from_builder(&mb);
+        mb_free(&mb);
+    }
+    if (g_roof_mat.albedo_tex.id != 0 && g_wall_mat.albedo_tex.id != 0) {
+        int gi;
+        mb_init(&mb);
+        for (gi = 0; gi < 2; gi++) {
+            float ge  = gi ? along_h : -along_h;       /* the two ridge ends */
+            float gn  = gi ? 1.0f : -1.0f;             /* outward along the ridge axis */
+            vec3  eL  = bent_pt(rax, ge, -sh,  h);
+            vec3  eR  = bent_pt(rax, ge,  sh,  h);
+            vec3  ap  = bent_pt(rax, ge, 0.0f, ridge_y);
+            vec3  nrm = vec3_normalize(bent_pt(rax, gn, 0.0f, 0.0f));
+            gable_tri(&mb, eL, eR, ap, nrm,
+                      -sh / WALL_TILE_M, h / WALL_TILE_M,
+                       sh / WALL_TILE_M, h / WALL_TILE_M,
+                      0.0f,              ridge_y / WALL_TILE_M);
+        }
+        if (mb.index_count > 0) gable = mesh_from_builder(&mb);
         mb_free(&mb);
     }
     for (i = 0; i < g_room_frame_n; i++)
@@ -12255,6 +12284,8 @@ static void render(AppState *state) {
                 draw_mesh(state, rf->wood, rm, view, proj, eye, 0.0f, g_dark_wood);
             if (g_roof_mat.albedo_tex.id != 0 && rf->roof.index_count > 0)
                 draw_mesh(state, rf->roof, rm, view, proj, eye, 0.0f, g_roof_mat);
+            if (g_wall_mat.albedo_tex.id != 0 && rf->gable.index_count > 0)
+                draw_mesh(state, rf->gable, rm, view, proj, eye, 0.0f, g_wall_mat);
         }
     }
 
