@@ -4176,6 +4176,11 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
    Tiled planks on room inner-wall faces, split around doorways. Render-time;
    built where the doorway openings are already computed (connections_rebuild). */
 #define WALL_TILE_M    3.0f      /* meters per texture-repeat (the plank-size knob) */
+#define PATH_TILE_M    1.5f      /* meters per marble-repeat on walkways/steps */
+#define CURB_W         0.14f     /* walkway trim: curb rail cross-section thickness (m) */
+#define CURB_H         0.10f     /* walkway trim: curb height above the deck top (m) */
+#define CURB_OVER      0.04f     /* walkway trim: how far the curb juts past the deck edge (m) */
+#define DOOR_LINE_T    0.05f     /* doorway wood casing: how far it stands proud into the opening (m) */
 #define WALL_EPS       0.01f     /* inward lift off the wall face (anti z-fight) */
 #define ROOM_FRAME_MAX 128
 #define FRAME_COL_T  0.24f       /* corner column cross-section (m) */
@@ -4189,8 +4194,9 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 static Material g_wall_mat;       /* planks; albedo_tex.id == 0 => overlay disabled */
 static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood */
 static Material g_roof_mat;       /* pitched roof; albedo_tex.id == 0 => no roof */
+static Material g_path_mat;       /* sandstone walkway deck; albedo_tex.id == 0 => default */
 
-typedef struct { sol_u32 handle; Mesh wall, wood, roof, gable; } RoomFrame;
+typedef struct { sol_u32 handle; Mesh wall, wood, roof, gable, door_floor, door_trim; } RoomFrame;
 static RoomFrame g_room_frame[ROOM_FRAME_MAX];
 static int       g_room_frame_n = 0;
 
@@ -4201,6 +4207,8 @@ static void room_frame_flush(void) {
         mesh_destroy(&g_room_frame[i].wood);
         mesh_destroy(&g_room_frame[i].roof);
         mesh_destroy(&g_room_frame[i].gable);
+        mesh_destroy(&g_room_frame[i].door_floor);
+        mesh_destroy(&g_room_frame[i].door_trim);
     }
     g_room_frame_n = 0;
 }
@@ -4327,17 +4335,61 @@ static void gable_tri(MeshBuilder *mb, vec3 a, vec3 b, vec3 c, vec3 n,
     mb_push_triangle(mb, ia, ib, ic);
 }
 
+/* an axis-aligned solid box (all six faces, explicit outward normals, position-
+   based UVs at `tl` scale) — for door casings/trim. Buried faces are occluded;
+   abutting the shell back-to-back never z-fights (GL_LESS, first-drawn wins). */
+static void trim_box(MeshBuilder *mb, float x0, float x1, float y0, float y1,
+                     float z0, float z1, float tl) {
+    frame_quad(mb, vec3_make(x0,y0,z1), vec3_make(x1,y0,z1), vec3_make(x1,y1,z1), vec3_make(x0,y1,z1), vec3_make(0,0,1),  x0/tl,y0/tl, x1/tl,y1/tl);  /* +z */
+    frame_quad(mb, vec3_make(x1,y0,z0), vec3_make(x0,y0,z0), vec3_make(x0,y1,z0), vec3_make(x1,y1,z0), vec3_make(0,0,-1), x1/tl,y0/tl, x0/tl,y1/tl);  /* -z */
+    frame_quad(mb, vec3_make(x1,y0,z1), vec3_make(x1,y0,z0), vec3_make(x1,y1,z0), vec3_make(x1,y1,z1), vec3_make(1,0,0),  z1/tl,y0/tl, z0/tl,y1/tl);  /* +x */
+    frame_quad(mb, vec3_make(x0,y0,z0), vec3_make(x0,y0,z1), vec3_make(x0,y1,z1), vec3_make(x0,y1,z0), vec3_make(-1,0,0), z0/tl,y0/tl, z1/tl,y1/tl);  /* -x */
+    frame_quad(mb, vec3_make(x0,y1,z1), vec3_make(x1,y1,z1), vec3_make(x1,y1,z0), vec3_make(x0,y1,z0), vec3_make(0,1,0),  x0/tl,z1/tl, x1/tl,z0/tl);  /* +y */
+    frame_quad(mb, vec3_make(x0,y0,z0), vec3_make(x1,y0,z0), vec3_make(x1,y0,z1), vec3_make(x0,y0,z1), vec3_make(0,-1,0), x0/tl,z0/tl, x1/tl,z1/tl);  /* -y */
+}
+
+/* doorway reveal overlays for one opening (the faces of the thick wall you see
+   through a doorway): a sandstone THRESHOLD quad into mbf, and dark-wood JAMB +
+   lintel CASINGS into mbt. The casings are SOLID boxes standing proud into the
+   opening (not floating veneer sheets) so there's no gap behind their edges. */
+static void emit_door_reveal(MeshBuilder *mbf, MeshBuilder *mbt, int wall,
+                             float center, float width, float oh,
+                             float hw, float hd, float t) {
+    float gL = center - width * 0.5f, gR = center + width * 0.5f;
+    float e  = WALL_EPS, lt = DOOR_LINE_T;
+    float ft = PATH_TILE_M, wt = WOOD_TILE_M;   /* sandstone threshold / dark-wood casing */
+    if (wall == ROOM_WALL_N || wall == ROOM_WALL_S) {     /* opening spans X, thickness in Z */
+        float z0 = (wall == ROOM_WALL_N) ? -hd - t : hd;
+        float z1 = (wall == ROOM_WALL_N) ? -hd     : hd + t;
+        frame_quad(mbf, vec3_make(gL, e, z0), vec3_make(gR, e, z0),            /* threshold (+y) */
+                        vec3_make(gR, e, z1), vec3_make(gL, e, z1),
+                        vec3_make(0.0f, 1.0f, 0.0f), gL / ft, z0 / ft, gR / ft, z1 / ft);
+        trim_box(mbt, gL,      gL + lt, 0.0f,    oh, z0, z1, wt);   /* left jamb casing */
+        trim_box(mbt, gR - lt, gR,      0.0f,    oh, z0, z1, wt);   /* right jamb casing */
+        trim_box(mbt, gL,      gR,      oh - lt, oh, z0, z1, wt);   /* lintel casing */
+    } else {                                              /* opening spans Z, thickness in X */
+        float x0 = (wall == ROOM_WALL_W) ? -hw - t : hw;
+        float x1 = (wall == ROOM_WALL_W) ? -hw     : hw + t;
+        frame_quad(mbf, vec3_make(x0, e, gL), vec3_make(x1, e, gL),            /* threshold (+y) */
+                        vec3_make(x1, e, gR), vec3_make(x0, e, gR),
+                        vec3_make(0.0f, 1.0f, 0.0f), x0 / ft, gL / ft, x1 / ft, gR / ft);
+        trim_box(mbt, x0, x1, 0.0f,    oh, gL,      gL + lt, wt);   /* jamb casing z=gL */
+        trim_box(mbt, x0, x1, 0.0f,    oh, gR - lt, gR,      wt);   /* jamb casing z=gR */
+        trim_box(mbt, x0, x1, oh - lt, oh, gL,      gR,      wt);   /* lintel casing */
+    }
+}
+
 /* build a RoomFrame (wall + timber) for a room shell from its openings and
    store it by handle (replacing any prior entry). no-op if planks disabled. */
 static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no) {
     MeshBuilder mb;
-    Mesh        wall, wood, roof, gable;
+    Mesh        wall, wood, roof, gable, door_floor, door_trim;
     float       w, d, h, hw, hd;
     int         i;
     int         rax;
     float       rlen, along_h, sh, dy, ridge_y;
     if (g_wall_mat.albedo_tex.id == 0 && g_dark_wood.albedo_tex.id == 0 &&
-        g_roof_mat.albedo_tex.id == 0) return;
+        g_roof_mat.albedo_tex.id == 0 && g_path_mat.albedo_tex.id == 0) return;
     w  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
     d  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
     h  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
@@ -4346,6 +4398,8 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
     memset(&wood, 0, sizeof wood);
     memset(&roof,  0, sizeof roof);
     memset(&gable, 0, sizeof gable);
+    memset(&door_floor, 0, sizeof door_floor);
+    memset(&door_trim,  0, sizeof door_trim);
     rax     = (w >= d) ? 1 : 0;     /* 1 = ridge along X (span = Z) */
     rlen    = rax ? w : d;          /* ridge length */
     along_h = rax ? hw : hd;        /* half the ridge length */
@@ -4454,6 +4508,19 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
         if (mb.index_count > 0) gable = mesh_from_builder(&mb);
         mb_free(&mb);
     }
+    if (g_path_mat.albedo_tex.id != 0 || g_dark_wood.albedo_tex.id != 0) {
+        MeshBuilder mbf, mbt;     /* threshold (sandstone) + jambs/lintel (dark wood) */
+        int         oi;
+        mb_init(&mbf);
+        mb_init(&mbt);
+        for (oi = 0; oi < no; oi++)
+            emit_door_reveal(&mbf, &mbt, ops[oi].wall, ops[oi].center,
+                             ops[oi].width, ops[oi].height, hw, hd, ROUTE_WALL_T);
+        if (mbf.index_count > 0) door_floor = mesh_from_builder(&mbf);
+        if (mbt.index_count > 0) door_trim  = mesh_from_builder(&mbt);
+        mb_free(&mbf);
+        mb_free(&mbt);
+    }
     for (i = 0; i < g_room_frame_n; i++)
         if (g_room_frame[i].handle == shell->handle) {
             mesh_destroy(&g_room_frame[i].wall);
@@ -4464,6 +4531,10 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
             mesh_destroy(&g_room_frame[i].gable);
             g_room_frame[i].roof = roof;
             g_room_frame[i].gable = gable;
+            mesh_destroy(&g_room_frame[i].door_floor);
+            mesh_destroy(&g_room_frame[i].door_trim);
+            g_room_frame[i].door_floor = door_floor;
+            g_room_frame[i].door_trim  = door_trim;
             return;
         }
     if (g_room_frame_n >= ROOM_FRAME_MAX) {
@@ -4472,6 +4543,7 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
                               ROOM_FRAME_MAX); warned = 1; }
         mesh_destroy(&wall); mesh_destroy(&wood);
         mesh_destroy(&roof); mesh_destroy(&gable);
+        mesh_destroy(&door_floor); mesh_destroy(&door_trim);
         return;
     }
     g_room_frame[g_room_frame_n].handle = shell->handle;
@@ -4479,6 +4551,8 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
     g_room_frame[g_room_frame_n].wood   = wood;
     g_room_frame[g_room_frame_n].roof   = roof;
     g_room_frame[g_room_frame_n].gable  = gable;
+    g_room_frame[g_room_frame_n].door_floor = door_floor;
+    g_room_frame[g_room_frame_n].door_trim  = door_trim;
     g_room_frame_n++;
 }
 
@@ -4489,6 +4563,42 @@ static RoomFrame *room_frame_get(sol_u32 handle) {
     return (RoomFrame *)0;
 }
 
+/* dark-wood curb trim for marble walkways: a derived mesh per walkway (its own
+   material, so it can't ride the deck's mesh), cached by walkway handle exactly
+   like RoomFrame. flush on the full rebuild; replace-by-handle on the incremental
+   one. The draw gates on the deck being non-empty, so a stale entry from a now-
+   invalid walkway simply isn't drawn (and the next full flush clears it). */
+typedef struct { sol_u32 handle; Mesh trim; } WalkwayTrim;
+static WalkwayTrim g_walk_trim[ROUTE_MAX];
+static int         g_walk_trim_n = 0;
+
+static void walk_trim_flush(void) {
+    int i;
+    for (i = 0; i < g_walk_trim_n; i++) mesh_destroy(&g_walk_trim[i].trim);
+    g_walk_trim_n = 0;
+}
+
+static WalkwayTrim *walk_trim_get(sol_u32 handle) {
+    int i;
+    for (i = 0; i < g_walk_trim_n; i++)
+        if (g_walk_trim[i].handle == handle) return &g_walk_trim[i];
+    return (WalkwayTrim *)0;
+}
+
+static void walk_trim_store(sol_u32 handle, Mesh trim) {
+    int i;
+    for (i = 0; i < g_walk_trim_n; i++)
+        if (g_walk_trim[i].handle == handle) {
+            mesh_destroy(&g_walk_trim[i].trim);
+            g_walk_trim[i].trim = trim;
+            return;
+        }
+    if (g_walk_trim_n >= ROUTE_MAX) { mesh_destroy(&trim); return; }
+    g_walk_trim[g_walk_trim_n].handle = handle;
+    g_walk_trim[g_walk_trim_n].trim   = trim;
+    g_walk_trim_n++;
+}
+
 static void connections_rebuild(AppState *st) {
     Scene  *s = &st->scene;
     Route   routes[ROUTE_MAX];
@@ -4496,6 +4606,7 @@ static void connections_rebuild(AppState *st) {
     sol_u32 j;
 
     room_frame_flush();   /* full pass is authoritative: drop stranded entries, repopulate below */
+    walk_trim_flush();    /* same for the walkway curb trim */
 
     /* 1. walkways: anchor at the lower door, mesh in local coords */
     for (i = 0; i < n; i++) {
@@ -4515,8 +4626,24 @@ static void connections_rebuild(AppState *st) {
                        r->door_hi.x - r->door_lo.x, r->door_hi.z - r->door_lo.z,
                        r->door_hi.y - r->door_lo.y,
                        ROUTE_DECK_W, ROUTE_DECK_T);
+        mb_scale_uvs(&mb, 1.0f / PATH_TILE_M);   /* marble tile size on the walkway */
         if (mb.index_count > 0) o->mesh = mesh_from_builder(&mb);
         mb_free(&mb);
+        {   /* dark-wood curb trim: its own mesh (own material), cached by handle */
+            MeshBuilder tb;
+            Mesh        tm;
+            mb_init(&tb);
+            make_walkway_trim(&tb,
+                              r->corner.x - r->door_lo.x, r->corner.z - r->door_lo.z,
+                              r->corner.y - r->door_lo.y,
+                              r->door_hi.x - r->door_lo.x, r->door_hi.z - r->door_lo.z,
+                              r->door_hi.y - r->door_lo.y,
+                              ROUTE_DECK_W, CURB_W, CURB_H, CURB_OVER, ROUTE_DECK_T);
+            memset(&tm, 0, sizeof tm);
+            if (tb.index_count > 0) tm = mesh_from_builder(&tb);
+            mb_free(&tb);
+            walk_trim_store(o->handle, tm);
+        }
     }
 
     /* 2. rooms: rebuild each shell child with its doorways */
@@ -4594,8 +4721,24 @@ static void connections_rebuild_focus(AppState *st, sol_u32 focus) {
                        r->door_hi.x - r->door_lo.x, r->door_hi.z - r->door_lo.z,
                        r->door_hi.y - r->door_lo.y,
                        ROUTE_DECK_W, ROUTE_DECK_T);
+        mb_scale_uvs(&mb, 1.0f / PATH_TILE_M);   /* marble tile size on the walkway */
         if (mb.index_count > 0) o->mesh = mesh_from_builder(&mb);
         mb_free(&mb);
+        {   /* dark-wood curb trim: rebuilt with the deck, replace-by-handle */
+            MeshBuilder tb;
+            Mesh        tm;
+            mb_init(&tb);
+            make_walkway_trim(&tb,
+                              r->corner.x - r->door_lo.x, r->corner.z - r->door_lo.z,
+                              r->corner.y - r->door_lo.y,
+                              r->door_hi.x - r->door_lo.x, r->door_hi.z - r->door_lo.z,
+                              r->door_hi.y - r->door_lo.y,
+                              ROUTE_DECK_W, CURB_W, CURB_H, CURB_OVER, ROUTE_DECK_T);
+            memset(&tm, 0, sizeof tm);
+            if (tb.index_count > 0) tm = mesh_from_builder(&tb);
+            mb_free(&tb);
+            walk_trim_store(o->handle, tm);
+        }
     }
     if (nt < ROUTE_MAX * 2) touched[nt++] = focus;
 
@@ -9976,6 +10119,13 @@ static void roof_mat_init(void) {
         "distressed_painted_planks/distressed_painted_planks_arm_1k.png");
 }
 
+static void path_mat_init(void) {
+    g_path_mat = load_pbr_material(
+        "red_sandstone_tiles/red_sandstone_tiles_diff_1k.png",
+        "red_sandstone_tiles/red_sandstone_tiles_nor_gl_1k.png",
+        "red_sandstone_tiles/red_sandstone_tiles_arm_1k.png");
+}
+
 /* a w x d floor quad (XZ, +Y up) with meter-based tiling UVs, cached by size so a
    tile is the same physical size in every room. empty mesh on cache overflow. */
 static Mesh floor_quad_for(float w, float d) {
@@ -11131,6 +11281,7 @@ static int init_scene(AppState *state) {
     wall_mat_init();    /* plank walls overlay (sourced experiment, flagged) */
     dark_wood_mat_init();   /* timber halls: corner columns + trusses */
     roof_mat_init();    /* timber halls: pitched roof */
+    path_mat_init();    /* sandstone walkway deck + steps between rooms */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
        loaded and brought fully to life. The home scene builds only on first
@@ -12255,6 +12406,9 @@ static void render(AppState *state) {
         }
         {
             Material dm = o->material;
+            if (g_path_mat.albedo_tex.id != 0 && o->mesh_ref &&
+                strcmp(o->mesh_ref, "walkway") == 0)
+                dm = g_path_mat;                  /* sandstone deck + steps (sourced experiment) */
             dm.emissive.x *= o->overlay_glow;     /* the heart and the pool of
                                                      light breathe TOGETHER —
                                                      same channel, two consumers */
@@ -12310,6 +12464,30 @@ static void render(AppState *state) {
                 draw_mesh(state, rf->roof, rm, view, proj, eye, 0.0f, g_roof_mat);
             if (g_wall_mat.albedo_tex.id != 0 && rf->gable.index_count > 0)
                 draw_mesh(state, rf->gable, rm, view, proj, eye, 0.0f, g_wall_mat);
+            if (g_path_mat.albedo_tex.id != 0 && rf->door_floor.index_count > 0)
+                draw_mesh(state, rf->door_floor, rm, view, proj, eye, 0.0f, g_path_mat);
+            if (g_dark_wood.albedo_tex.id != 0 && rf->door_trim.index_count > 0)
+                draw_mesh(state, rf->door_trim, rm, view, proj, eye, 0.0f, g_dark_wood);
+        }
+    }
+
+    /* dark-wood curb trim along the marble walkways (its own cached mesh, since
+       it wears a different material than the deck). gated on the deck mesh so a
+       stale entry for a now-invalid walkway isn't drawn. */
+    if (g_dark_wood.albedo_tex.id != 0) {
+        sol_u32 ti;
+        for (ti = 0; ti < state->scene.count; ti++) {
+            SceneObject *o = &state->scene.objects[ti];
+            WalkwayTrim *wt;
+            mat4         tmw;
+            if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
+            if (o->mesh.index_count == 0) continue;            /* invalid/empty walkway */
+            if (!scene_object_active(&state->scene, o->handle)) continue;
+            if (vis && !vis[o->handle]) continue;
+            wt = walk_trim_get(o->handle);
+            if (!wt || wt->trim.index_count == 0) continue;
+            tmw = scene_world_matrix(&state->scene, o);
+            draw_mesh(state, wt->trim, tmw, view, proj, eye, 0.0f, g_dark_wood);
         }
     }
 

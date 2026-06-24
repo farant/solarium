@@ -28,6 +28,10 @@ void    mb_push_triangle(MeshBuilder *b, sol_u32 a, sol_u32 i, sol_u32 c);
 /* fill each vertex's tangent (xyz + handedness w) from positions + UVs + topology */
 void    mb_compute_tangents(MeshBuilder *b);
 
+/* scale every vertex's UV by s (post-build tiling control: smaller s => the
+   texture covers more world space => bigger apparent tiles) */
+void    mb_scale_uvs(MeshBuilder *b, sol_f32 s);
+
 /* primitive emitters (more to come: arch, column, vault, stair — the gothic kit) */
 void    make_box(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 d);
 void    make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d);
@@ -79,6 +83,16 @@ void make_room_doored(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h, sol_f32 t
    caps the corner (skipped when a leg is zero-length, i.e. a straight path). */
 void make_walkway_L(MeshBuilder *b, sol_f32 cx, sol_f32 cz, sol_f32 cy,
                     sol_f32 ex, sol_f32 ez, sol_f32 ey, sol_f32 w, sol_f32 t);
+
+/* An edge fascia/curb running along both sides of the same L-walkway (same
+   local space + leg/step structure as make_walkway_L): it juts `over` past the
+   deck edge, rises `ch` above the deck top, and wraps DOWN the full block side
+   (deck thickness `dt`) so it covers the deck's side faces. cw = rail cross-
+   section thickness. Its OWN mesh, so it can wear a different (dark-wood)
+   material than the marble deck. */
+void make_walkway_trim(MeshBuilder *b, sol_f32 cx, sol_f32 cz, sol_f32 cy,
+                       sol_f32 ex, sol_f32 ez, sol_f32 ey,
+                       sol_f32 w, sol_f32 cw, sol_f32 ch, sol_f32 over, sol_f32 dt);
 
 /* An index card (P3 item 6): a FILE/ALIAS/NOTE's body — an upright slab
    standing on its bottom edge, facing +/-Z. */

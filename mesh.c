@@ -435,6 +435,54 @@ void make_walkway_L(MeshBuilder *b, sol_f32 cx, sol_f32 cz, sol_f32 cy,
     walkway_leg(b, cx, cz, cy, ex, ez, ey, w, t);
 }
 
+/* one leg's edge fascia: mirror walkway_leg's stepping, but per step emit two
+   boxes along the leg's two edges. Each juts `over` past the deck edge, rises
+   `ch` above the deck top, and runs DOWN past the deck bottom (deck thickness
+   dt + a small reveal) so it covers the deck's side face. The rail's inner face
+   sits inside the deck edge (cw - over) so the deck's side/top/bottom faces in
+   the overlap are buried -> no coplanar faces -> no z-fight. cw = rail thickness. */
+static void walkway_trim_leg(MeshBuilder *b, sol_f32 x0, sol_f32 z0, sol_f32 y0,
+                             sol_f32 x1, sol_f32 z1, sol_f32 y1,
+                             sol_f32 w, sol_f32 cw, sol_f32 ch,
+                             sol_f32 over, sol_f32 dt) {
+    sol_f32 dx = x1 - x0, dz = z1 - z0, dy = y1 - y0;
+    sol_f32 hw = w * 0.5f, ady = (dy < 0.0f) ? -dy : dy;
+    sol_f32 rev = 0.015f;                      /* curb dips this far below the deck bottom */
+    int     n, i, run_x;
+    if (dx * dx + dz * dz < 1e-8f) return;
+    run_x = ((dx < 0.0f ? -dx : dx) >= (dz < 0.0f ? -dz : dz));
+    n = (ady < 0.02f) ? 1 : (int)(ady / WALKWAY_STEP_RISE) + 1;
+    if (n < 1) n = 1;
+    if (n > 128) n = 128;
+    for (i = 0; i < n; i++) {
+        sol_f32 a0 = (sol_f32)i / (sol_f32)n, a1 = (sol_f32)(i + 1) / (sol_f32)n;
+        sol_f32 sx = x0 + dx * a0, sz = z0 + dz * a0;
+        sol_f32 tx = x0 + dx * a1, tz = z0 + dz * a1;
+        sol_f32 yd = y0 + dy * a1;             /* this step's deck top */
+        sol_f32 yb = yd - dt - rev, yt = yd + ch;   /* wrap the side: below the block .. above the deck */
+        if (run_x) {
+            /* extend past the step's front/back faces so the wood OCCLUDES them
+               (the fascia overlaps the deck, so flush ends would be coplanar -> z-fight) */
+            sol_f32 bx0 = ((sx < tx) ? sx : tx) - over, bx1 = ((sx < tx) ? tx : sx) + over;
+            sol_f32 zo  = sz + hw + over, zo2 = sz - hw - over;   /* outer faces, past each edge */
+            aabb_box(b, bx0, bx1, yb, yt, zo - cw, zo);     /* +z fascia (covers the side) */
+            aabb_box(b, bx0, bx1, yb, yt, zo2, zo2 + cw);   /* -z fascia */
+        } else {
+            sol_f32 bz0 = ((sz < tz) ? sz : tz) - over, bz1 = ((sz < tz) ? tz : sz) + over;
+            sol_f32 xo  = sx + hw + over, xo2 = sx - hw - over;
+            aabb_box(b, xo - cw, xo, yb, yt, bz0, bz1);     /* +x fascia */
+            aabb_box(b, xo2, xo2 + cw, yb, yt, bz0, bz1);   /* -x fascia */
+        }
+    }
+}
+
+void make_walkway_trim(MeshBuilder *b, sol_f32 cx, sol_f32 cz, sol_f32 cy,
+                       sol_f32 ex, sol_f32 ez, sol_f32 ey,
+                       sol_f32 w, sol_f32 cw, sol_f32 ch, sol_f32 over, sol_f32 dt) {
+    walkway_trim_leg(b, 0.0f, 0.0f, 0.0f, cx, cz, cy, w, cw, ch, over, dt);
+    walkway_trim_leg(b, cx, cz, cy, ex, ez, ey, w, cw, ch, over, dt);
+}
+
 /* ------------------------------------------------------------ the registry */
 /* THE single source of truth for what each ref name means (P3 item 1) — the
    scene built at startup and the scene loaded from disk both come through
@@ -1225,6 +1273,15 @@ void mb_compute_tangents(MeshBuilder *b) {
     }
 
     free(tan); free(bitan);
+}
+
+/* scale every UV (tiling control; see mesh.h). only the UV slots, not pos/normal. */
+void mb_scale_uvs(MeshBuilder *b, sol_f32 s) {
+    sol_u32 v;
+    for (v = 0; v < b->vertex_count; v++) {
+        b->vertices[v * 12 + 6] *= s;
+        b->vertices[v * 12 + 7] *= s;
+    }
 }
 
 /* mesh_from_builder lives in mesh_gpu.c (the one function here that uploads):
