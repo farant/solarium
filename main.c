@@ -4175,7 +4175,7 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 /* ---- plank walls overlay (sourced-texture experiment, flagged) ----
    Tiled planks on room inner-wall faces, split around doorways. Render-time;
    built where the doorway openings are already computed (connections_rebuild). */
-#define WALL_TILE_M    1.5f      /* meters per texture-repeat (the plank-size knob) */
+#define WALL_TILE_M    3.0f      /* meters per texture-repeat (the plank-size knob) */
 #define WALL_EPS       0.01f     /* inward lift off the wall face (anti z-fight) */
 #define WALL_CACHE_MAX 128
 
@@ -4296,6 +4296,13 @@ static void wall_overlay_store(SceneObject *shell, const RoomOpening *ops, int n
     g_wall_cache[g_wall_cache_n].handle = shell->handle;
     g_wall_cache[g_wall_cache_n].mesh   = m;
     g_wall_cache_n++;
+}
+
+static Mesh *wall_overlay_get(sol_u32 handle) {
+    int i;
+    for (i = 0; i < g_wall_cache_n; i++)
+        if (g_wall_cache[i].handle == handle) return &g_wall_cache[i].mesh;
+    return (Mesh *)0;
 }
 
 static void connections_rebuild(AppState *st) {
@@ -12056,6 +12063,23 @@ static void render(AppState *state) {
             fm = mat4_mul(scene_world_matrix(&state->scene, o),
                           mat4_translate(vec3_make(0.0f, FLOOR_EPS, 0.0f)));
             draw_mesh(state, fq, fm, view, proj, eye, 0.0f, g_floor_mat);
+        }
+    }
+
+    /* plank walls overlay (sourced experiment): each active room's cached
+       wall-panel mesh, drawn over its inner wall faces. render-only. */
+    if (g_wall_mat.albedo_tex.id != 0) {
+        sol_u32 wi;
+        for (wi = 0; wi < state->scene.count; wi++) {
+            SceneObject *o = &state->scene.objects[wi];
+            Mesh        *wm;
+            if (!o->mesh_ref || strcmp(o->mesh_ref, "room") != 0) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;
+            if (vis && !vis[o->handle]) continue;
+            wm = wall_overlay_get(o->handle);
+            if (!wm || wm->index_count == 0) continue;
+            draw_mesh(state, *wm, scene_world_matrix(&state->scene, o),
+                      view, proj, eye, 0.0f, g_wall_mat);
         }
     }
 
