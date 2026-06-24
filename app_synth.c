@@ -34,14 +34,20 @@ void app_synth_roll(float *params, sol_u32 *rng) {
 
 SynthAction app_synth_page(WidgetCtx *ctx, float *params,
                            float x0, float y0, float w, float h) {
+    static const char *const WAVE_NAMES[5] = { "SQ", "SW", "TR", "SI", "NZ" };
+    static const char *const CRUSH_LABELS[17] = {
+        "off", "1", "2", "3", "4", "5", "6", "7", "8",
+        "9", "10", "11", "12", "13", "14", "15", "16"
+    };
     const char *const *names = synth_param_names();
     SynthAction act = SYNTH_ACT_NONE;
-    float row, y, labw, sldw, lab_sz, btn_w, btn_h;
-    int   i, id;
+    float    row, y, labw, sldw, lab_sz, btn_w, btn_h;
+    int      i, id, wv, cv;
+    sol_bool lp;
 
-    /* the page consumes 7.95*row vertically (title 1.5 + 4*1.25 + 0.4 gap + 1.05 btn);
-       keep row <= h/7.95 (~0.126*h) so nothing clips the page bottom. */
-    row = h * 0.12f;
+    /* the page consumes ~10.45*row vertically (title 1.5 + wave 1.25 + 4*1.25
+       + compact 1.25 + 0.4 gap + 1.05 btn); keep row <= h/10.45 (~0.095*h). */
+    row = h * 0.09f;
     if (row > 0.055f) row = 0.055f;
     lab_sz = row * 0.40f;
     labw   = w * 0.36f;
@@ -52,6 +58,12 @@ SynthAction app_synth_page(WidgetCtx *ctx, float *params,
     widget_label(ctx, x0, y, "synth", row * 0.55f);
     y -= row * 1.5f;
 
+    /* wave: a 5-cell radio over schema index 0 */
+    wv = (int)params[0];
+    wv = widget_radio(ctx, id++, x0, y, w, row * 0.9f, WAVE_NAMES, 5, wv);
+    params[0] = (float)wv;
+    y -= row * 1.25f;
+
     for (i = 0; i < KNOB_COUNT; i++) {
         widget_label(ctx, x0, y - (row - lab_sz) * 0.5f,
                      names[KNOBS[i].param], lab_sz);
@@ -59,6 +71,18 @@ SynthAction app_synth_page(WidgetCtx *ctx, float *params,
                       &params[KNOBS[i].param], KNOBS[i].lo, KNOBS[i].hi);
         y -= row * 1.25f;
     }
+
+    /* compact row: crush stepper (left) + low-pass checkbox (right) */
+    cv = (int)params[16];
+    if (cv < 0)  cv = 0;
+    if (cv > 16) cv = 16;
+    cv = widget_stepper(ctx, id++, x0, y, w * 0.45f, row * 0.9f,
+                        CRUSH_LABELS[cv], cv, 0, 16);
+    params[16] = (float)cv;
+    lp = (sol_bool)(params[14] > 0.0f);
+    if (widget_checkbox(ctx, id++, x0 + w * 0.55f, y, row * 0.6f, &lp, "low-pass"))
+        params[14] = lp ? 2000.0f : 0.0f;
+    y -= row * 1.25f;
 
     btn_w = w * 0.42f;
     btn_h = row * 1.05f;
