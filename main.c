@@ -2734,6 +2734,7 @@ typedef struct AppState {
     float    bv_dir;             /* +1 gliding to the board, -1 gliding back out  */
     vec3     bv_return_pos;       /* pose to restore on exit (where you stood)    */
     float    bv_return_yaw, bv_return_pitch;
+    int      hover_corner;        /* resize-corner the pointer is over; -1 = none */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -8406,14 +8407,14 @@ static void board_world_corners(Scene *s, sol_u32 h, vec3 out[4], vec3 *out_u) {
     if (out_u) *out_u = u;
 }
 
-/* On a press: if the crosshair ray passes near a corner handle of the selected
-   mounted board, begin a resize with the OPPOSITE corner anchored. 1 on a grab. */
-static int resize_corner_pick(AppState *st, GLFWwindow *w) {
+/* Index (0..3) of the selected board/note corner handle the pick ray currently
+   passes near, or -1 if none. Shared by the grab (resize_corner_pick) and the
+   hover highlight. Optionally returns the 4 world corners + the wall axis. */
+static int resize_corner_at(AppState *st, GLFWwindow *w, vec3 cor_out[4], vec3 *u_out) {
     Ray   ray = pick_ray(st, w);
     vec3  cor[4], u;
     int   i, best = -1;
     float bestd = 0.18f;                       /* grab radius (m) */
-    SceneObject *o = scene_get(&st->scene, st->selected_handle);
     ray.dir = vec3_normalize(ray.dir);
     board_world_corners(&st->scene, st->selected_handle, cor, &u);
     for (i = 0; i < 4; i++) {
@@ -8426,6 +8427,18 @@ static int resize_corner_pick(AppState *st, GLFWwindow *w) {
         d    = (float)sqrt((double)vec3_dot(perp, perp));
         if (d < bestd) { bestd = d; best = i; }
     }
+    if (cor_out) { cor_out[0] = cor[0]; cor_out[1] = cor[1];
+                   cor_out[2] = cor[2]; cor_out[3] = cor[3]; }
+    if (u_out) *u_out = u;
+    return best;
+}
+
+/* On a press: if the crosshair ray passes near a corner handle of the selected
+   mounted board, begin a resize with the OPPOSITE corner anchored. 1 on a grab. */
+static int resize_corner_pick(AppState *st, GLFWwindow *w) {
+    vec3  cor[4], u;
+    int   best = resize_corner_at(st, w, cor, &u);
+    SceneObject *o = scene_get(&st->scene, st->selected_handle);
     if (best < 0) return 0;
     st->resize_board  = st->selected_handle;
     st->resize_anchor = cor[(best + 2) % 4];   /* the opposite corner */
@@ -9346,6 +9359,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     /* board view (and its outbound glide) freezes walking and look — the camera
        is pinned to the framed pose while you work the surface with the cursor. */
     bv_active = (sol_bool)(st->board_view != 0 || st->bv_t < 1.0f);
+    st->hover_corner = -1;   /* recomputed below in the normal (non-modal) path */
 
     /* inventory: release the cursor for clicking on open, restore on close
        (edge-detect, mirroring the editor's cursor toggle). Runs every frame,
@@ -9935,6 +9949,13 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }                                               /* ---- end editor else ---- */
         st->lmb_was_down = lmb;
     }
+
+    /* hover highlight: which resize corner (if any) the pointer is over now —
+       the selected board/note shows blue on that corner so the grab reads. */
+    if (st->selected_handle != 0 && st->resize_board == 0 &&
+        (board_is_mounted(&st->scene, st->selected_handle) ||
+         note_resizable(&st->scene, st->selected_handle)))
+        st->hover_corner = resize_corner_at(st, w, (vec3 *)0, (vec3 *)0);
 
     /* Registered discrete commands: poll each hotkey, edge-trigger, honour the
        precondition. The palette dispatches these same run()s. */
@@ -13791,10 +13812,15 @@ static void render(AppState *state) {
             hm.base_color = vec3_make(1.0f, 0.85f, 0.2f);
             hm.emissive   = vec3_make(1.2f, 0.9f, 0.2f);   /* glow: reads on any wall */
             for (hk = 0; hk < 4; hk++) {
+                Material chm = hm;
                 mat4 m = mat4_mul(
                     mat4_translate(vec3_add(cor[hk], vec3_scale(n, 0.01f))),
                     quat_to_mat4(quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f), yaw)));
-                draw_mesh(state, state->resize_handle_mesh, m, view, proj, eye, 0.0f, hm);
+                if (hk == state->hover_corner) {           /* pointer over it: blue */
+                    chm.base_color = vec3_make(0.2f, 0.5f, 1.0f);
+                    chm.emissive   = vec3_make(0.3f, 0.6f, 1.5f);
+                }
+                draw_mesh(state, state->resize_handle_mesh, m, view, proj, eye, 0.0f, chm);
             }
         }
     }
@@ -14592,6 +14618,7 @@ int main(void) {
     GLFWwindow *window;
     AppState state = {0};
     state.bv_t = 1.0f;   /* board-view glide starts settled (no tween at boot) */
+    state.hover_corner = -1;   /* no resize-corner hovered yet */
     double last;
 
     asset_store_init(&g_mesh_assets,    mesh_asset_destroy,   NULL);
