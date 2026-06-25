@@ -8543,6 +8543,13 @@ static void wall_mount_gable(Scene *s, sol_u32 room, int wall, Ray ray,
 
 /* a note's body text size in metres-per-line; absent meta => the default,
    clamped to the editable range. */
+/* New-note default card: landscape and roomier than the portrait file/folder
+   card (the shared "card" registry default is 0.35 x 0.5). Notes set these
+   explicitly at spawn so other card kinds are unaffected. */
+#define NOTE_CARD_W 0.90f
+#define NOTE_CARD_H 0.55f
+#define NOTE_CARD_T 0.03f
+
 static float note_text_size(Scene *s, sol_u32 h) {
     const char *v = scene_meta_get(s, h, "text_size");
     float ts = v ? (float)atof(v) : 0.119f;   /* new-note default: 60% toward the max */
@@ -10006,11 +10013,19 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             scene_meta_set(&st->scene, h, "text",
                            "press Enter to edit me");
             scene_mesh_ref_set(&st->scene, h, "card");
+            {   /* notes get a roomy landscape card + a matching min height so
+                   autosize keeps it that tall when nearly empty */
+                float np3[3];
+                char  mhb[16];
+                np3[0] = NOTE_CARD_W; np3[1] = NOTE_CARD_H; np3[2] = NOTE_CARD_T;
+                scene_mesh_params_set(&st->scene, h, np3, 3);
+                snprintf(mhb, sizeof mhb, "%.4f", (double)NOTE_CARD_H);
+                scene_meta_set(&st->scene, h, "min_h", mhb);
+            }
             if (board != 0) {
                 SceneObject *no = scene_get(&st->scene, h);
-                float ch = mesh_ref_param("card", (const float *)0, 0, "h");
                 if (no) no->pos = board_pin_pos(&st->scene, board, h,
-                                                blocal, 0.0f, -0.5f * ch);
+                                                blocal, 0.0f, -0.5f * NOTE_CARD_H);
             }
             scene_resolve_meshes(&st->scene);
             apply_kind_materials(&st->scene);
