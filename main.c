@@ -43,6 +43,7 @@
 #include "inventory.h"           /* scene-free inventory grid layout math (the bag) */
 #include "widget.h"              /* immediate-mode widget core (TODO5 app books) */
 #include "app_synth.h"           /* the synth book's page layout (TODO5) */
+#include "boardpage.h"           /* page slugs + board page-list (Board Pages) */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -2898,6 +2899,13 @@ typedef struct AppState {
     sol_bool    plan_on;
     sol_u32     plan_plot;         /* island the overlay was built for */
     Mesh        plan_mesh;         /* DERIVED, never serialized (arrows law) */
+    /* board-pages (Board Pages Task 4): folder creation via 'd' in board view */
+    vec3        folder_place_local;  /* board-local point captured at 'd' press */
+    sol_bool    folder_place_has;    /* 0 = no board hit at press -> use center */
+    sol_bool    d_was_down;          /* edge-detect for the 'd' folder key */
+    sol_bool    page_prev_was;       /* edge-detect for arrow-cycle (Task 5) */
+    sol_bool    page_next_was;
+    sol_u32     drop_target_handle;  /* folder under a dragged card (Task 8); 0 = none */
 } AppState;
 
 #define READER_IDLE      0
@@ -7540,6 +7548,143 @@ static void cmd_mint_codex(AppState *st) {
            p[7] > 0.5f ? ", clasped" : "");
 }
 
+/* ---- board pages: folder books (Board Pages Task 4) ---- */
+
+/* Is this object a folder book pinned to a board? */
+static sol_bool object_is_folder(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    return (o && o->mesh_ref && strcmp(o->mesh_ref, "folderbook") == 0)
+               ? SOL_TRUE : SOL_FALSE;
+}
+
+/* Gather the board's navigable page list (sorted, deduped, '/' + active
+   always present) into out[cap][PAGE_SLUG_CAP]. Returns the count. */
+static int board_pages(AppState *st, sol_u32 board,
+                       char out[][PAGE_SLUG_CAP], int cap) {
+    const char *raw[BOARD_PAGE_MAX];
+    const char *active;
+    int         n = 0;
+    sol_u32     i;
+    for (i = 0; i < st->scene.count && n < BOARD_PAGE_MAX; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        const char  *pg;
+        if (o->parent != board) continue;
+        pg = scene_meta_get(&st->scene, o->handle, "page");
+        if (pg) raw[n++] = pg;
+    }
+    active = scene_meta_get(&st->scene, board, "active_page");
+    return boardpage_collect(raw, n, active, out, cap);
+}
+
+/* Does the target page already carry a folder linking back to `link`? */
+static sol_bool folder_backlink_exists(AppState *st, sol_u32 board,
+                                       const char *page, const char *link) {
+    sol_u32 i;
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        const char  *op;
+        const char  *ol;
+        if (o->parent != board) continue;
+        if (!object_is_folder(&st->scene, o->handle)) continue;
+        op = scene_meta_get(&st->scene, o->handle, "page");
+        ol = scene_meta_get(&st->scene, o->handle, "link");
+        if (op && ol && strcmp(op, page) == 0 && strcmp(ol, link) == 0)
+            return SOL_TRUE;
+    }
+    return SOL_FALSE;
+}
+
+/* Board-local point from fractions of the board's own dimensions:
+   fx in [-0.5, 0.5] maps to [-w/2, w/2], fy in [0,1] maps to [0,h]. */
+static vec3 board_local_frac(AppState *st, sol_u32 board, float fx, float fy) {
+    SceneObject *o  = scene_get(&st->scene, board);
+    float        bw = o ? mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w") : 1.8f;
+    float        bh = o ? mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h") : 1.2f;
+    return vec3_make(fx * bw, fy * bh, 0.0f);
+}
+
+/* Add a randomized folder book to `board` on `page`, linking to `link`,
+   pinned at board-local hit point `blocal`. Returns the handle. */
+static sol_u32 add_folder(AppState *st, sol_u32 board, const char *page,
+                           const char *link, vec3 blocal) {
+    Mesh         empty;
+    vec3         one = vec3_make(1.0f, 1.0f, 1.0f);
+    float        p[4];
+    int          leather;
+    sol_u32      h;
+    SceneObject *o;
+    if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
+    p[0] = mint_range(0.11f, 0.16f);             /* w */
+    p[1] = mint_range(0.17f, 0.26f);             /* h */
+    p[2] = mint_range(0.04f, 0.07f);             /* d */
+    p[3] = (float)(int)mint_range(3.0f, 5.99f);  /* bands */
+    leather = (int)mint_range(0.0f, 2.99f);
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, board, empty, vec3_make(0.0f, 0.0f, 0.0f),
+                  quat_identity(), one);
+    scene_kind_set(&st->scene, h, KIND_PLAIN);
+    scene_mesh_ref_set(&st->scene, h, "folderbook");
+    scene_mesh_params_set(&st->scene, h, p, 4);
+    scene_meta_set(&st->scene, h, "page", page);
+    scene_meta_set(&st->scene, h, "link", link);
+    scene_resolve_meshes(&st->scene);
+    /* re-fetch by handle: scene_add above may have realloced the objects array */
+    o = scene_get(&st->scene, h);
+    if (o) {
+        Material m = material_default();
+        m.base_color = (leather == 0) ? vec3_make(0.36f, 0.22f, 0.13f)
+                     : (leather == 1) ? vec3_make(0.34f, 0.12f, 0.10f)
+                                      : vec3_make(0.14f, 0.22f, 0.15f);
+        m.roughness = 0.6f;
+        o->material = m;
+        o->pos = board_pin_pos(&st->scene, board, h, blocal,
+                               0.0f, -0.5f * p[1]);  /* center on the point */
+    }
+    return h;
+}
+
+/* palette_prompt callback: slugify the name, create a forward folder on the
+   current page and an idempotent backlink folder on the target page. */
+static void create_folder_from_name(AppState *st, const char *typed) {
+    sol_u32     board = st->board_view;
+    char        target[PAGE_SLUG_CAP];
+    const char *src_raw;
+    char        src_buf[PAGE_SLUG_CAP];
+    vec3        fwd_local;
+    vec3        back_local;
+    char        pages[BOARD_PAGE_MAX][PAGE_SLUG_CAP];
+    int         np;
+    int         i;
+    sol_bool    exists = SOL_FALSE;
+    if (board == 0) return;
+    if (boardpage_slugify(typed, target, sizeof target) <= 1) return;  /* '/' = cancel */
+    src_raw = scene_meta_get(&st->scene, board, "active_page");
+    if (!src_raw) src_raw = "/";
+    /* copy src before any scene mutation: the raw pointer aliases the board's
+       meta storage, which could be freed if active_page were ever re-set mid-flight */
+    strncpy(src_buf, src_raw, PAGE_SLUG_CAP - 1);
+    src_buf[PAGE_SLUG_CAP - 1] = '\0';
+    if (strcmp(target, src_buf) == 0) {    /* self-link: ignore */
+        printf("folder: already on %s\n", target);
+        return;
+    }
+    np = board_pages(st, board, pages, BOARD_PAGE_MAX);
+    for (i = 0; i < np; i++)
+        if (strcmp(pages[i], target) == 0) { exists = SOL_TRUE; break; }
+    fwd_local  = st->folder_place_has ? st->folder_place_local
+                                      : board_local_frac(st, board, 0.0f, 0.6f);
+    back_local = board_local_frac(st, board, -0.32f, 0.85f);  /* top-left */
+    /* forward folder on the current page */
+    st->selected_handle = add_folder(st, board, src_buf, target, fwd_local);
+    /* backlink on the target page -- idempotent */
+    if (!folder_backlink_exists(st, board, target, src_buf))
+        (void)add_folder(st, board, target, src_buf, back_local);
+    st->folder_place_has = SOL_FALSE;
+    scene_save(&st->scene, "scene.stml");
+    printf("folder %s -> %s%s\n", src_buf, target,
+           exists ? " (link to existing)" : " (new page)");
+}
+
 /* A synth book (TODO5): an ordinary codex tagged as an app. Reuses the whole
    codex mint (cover + page block + workspace tag), then stamps meta["app"] so
    the reader routes it to the widget UI. Unknown apps degrade to plain books. */
@@ -10866,6 +11011,25 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->bs_was_down = bs_now;
     }
 
+    /* 'd' in board view: open a prompt, then create a folder book linking the
+       current page to the named target; only fires in board view (board_view!=0)
+       and only on the leading edge of the key press. The palette/edit early-return
+       above already suppresses this while typing. */
+    {
+        sol_bool d_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_D) == GLFW_PRESS);
+        if (d_now && !st->d_was_down && st->board_view != 0) {
+            vec3 bl;
+            if (board_under_ray(st, pick_ray(st, w), &bl) != 0) {
+                st->folder_place_local = bl;
+                st->folder_place_has   = SOL_TRUE;
+            } else {
+                st->folder_place_has   = SOL_FALSE;
+            }
+            palette_prompt(&st->palette, "/folder name", create_folder_from_name);
+        }
+        st->d_was_down = d_now;
+    }
+
     /* +/- resize the SELECTED note's body text. read_input has already returned
        above if a note is being edited or the palette is open, so these keys are
        free here. =/+ grows, -/_ shrinks; numpad +/- too. A press gives one clear
@@ -11496,6 +11660,12 @@ static void bind_runtime_handles(AppState *st) {
     st->place_yaw    = 0.0f;
     st->place_label_target = 0;
     memset(&st->place_ghost, 0, sizeof st->place_ghost);
+    st->folder_place_has   = SOL_FALSE;
+    st->d_was_down         = SOL_FALSE;
+    /* page_*_was: Task 5 arrow-cycle; drop_target_handle: Task 8 */
+    st->page_prev_was      = SOL_FALSE;
+    st->page_next_was      = SOL_FALSE;
+    st->drop_target_handle = 0;
 }
 
 /* Reconcile every mirror against disk + validate aliases (6c/6d): resolves
