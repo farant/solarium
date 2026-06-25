@@ -10354,6 +10354,23 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 st->move_board = 0;
             } else if (st->drag_handle != 0 && st->drag_moved) {
                 SceneObject *o = scene_get(&st->scene, st->drag_handle);
+                sol_bool filed = SOL_FALSE;
+                if (st->drop_target_handle != 0) {
+                    SceneObject *fold = scene_get(&st->scene, st->drop_target_handle);
+                    const char  *link = fold ? scene_meta_get(&st->scene,
+                                                   st->drop_target_handle, "link")
+                                             : (const char *)0;
+                    if (o && o->kind == KIND_NOTE && link && link[0]) {
+                        scene_meta_set(&st->scene, st->drag_handle, "page", link);
+                        scene_save(&st->scene, "scene.stml");
+                        printf("filed note #%u onto %s\n",
+                               (unsigned)st->drag_handle, link);
+                        filed = SOL_TRUE;            /* skip the ordinary placement save */
+                        st->selected_handle = 0;     /* note is paged out; drop the stale selection */
+                    }
+                    st->drop_target_handle = 0;
+                }
+                if (!filed) {
                 if (o && o->kind != KIND_PLAIN) {       /* a dragged card is PLACED:
                                                            the tray's claim ends here */
                     const char *u = scene_meta_get(&st->scene, st->drag_handle, "unplaced");
@@ -10422,6 +10439,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 collide_rebuild(&st->colliders, &st->scene);  /* walls and
                                        paths are draggable props — the
                                        architecture may just have moved */
+                }                                                 /* end if (!filed) */
             } else if (!fp) {
                 double ddx = mx - st->press_x;
                 double ddy = my - st->press_y;
