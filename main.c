@@ -11015,6 +11015,23 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 scene_remove(&st->scene, doomed);
                 scene_save(&st->scene, "scene.stml");
                 printf("deleted picture #%u\n", (unsigned)doomed);
+            } else if (o && o->mesh_ref != NULL &&
+                       strcmp(o->mesh_ref, "folderbook") == 0) {
+                /* delete ONLY this folder link. The target page and its
+                   contents survive (still reachable by arrow-cycle); the
+                   backlink on the other page is left intact. */
+                char    akey[160];
+                sol_u32 doomed = st->selected_handle;
+                if (mesh_asset_key(o, akey))
+                    asset_release(&g_mesh_assets, akey);
+                st->selected_handle = 0;
+                if (st->resize_board       == doomed) st->resize_board       = 0;
+                if (st->move_board         == doomed) st->move_board         = 0;
+                if (st->drag_handle        == doomed) st->drag_handle        = 0;
+                if (st->drop_target_handle == doomed) st->drop_target_handle = 0;
+                scene_remove(&st->scene, doomed);
+                scene_save(&st->scene, "scene.stml");
+                printf("deleted folder #%u - its page survives\n", (unsigned)doomed);
             } else if (o && o->kind == KIND_NOTE) {
                 /* a selected note (not in edit mode — read_input returns above
                    while typing): delete it. Release its keyed card mesh, drop any
