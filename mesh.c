@@ -522,10 +522,8 @@ static void emit_gate(MeshBuilder *b, const float *p) {
     /* left + right posts */
     aabb_box(b, -hw - pw, -hw,     0.0f, h,      -hz, hz);
     aabb_box(b,  hw,       hw + pw, 0.0f, h,      -hz, hz);
-    /* lintel across the top */
+    /* lintel across the top (the opening's energy pane is drawn separately) */
     aabb_box(b, -hw - pw,  hw + pw, h - pw, h,    -hz, hz);
-    /* the shimmer pane: thin slab filling the opening */
-    aabb_box(b, -hw, hw, 0.0f, h - pw, -0.02f, 0.02f);
 }
 /* ---- terrain (item 10): the floating plot ----
    A heightfield top over a skirt and base slab — an ISLAND, not a world:

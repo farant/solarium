@@ -11200,8 +11200,7 @@ static void apply_kind_materials(Scene *s) {
             case KIND_ALIAS:     m.base_color = vec3_make(0.55f, 0.68f, 0.92f); m.roughness = 0.80f; break;
             case KIND_NOTE:      m.base_color = vec3_make(0.95f, 0.90f, 0.55f); m.roughness = 0.90f; break;
             case KIND_TOMBSTONE: m.base_color = vec3_make(0.32f, 0.32f, 0.36f); m.roughness = 0.95f; break;
-            case KIND_PORTAL:    m.base_color = vec3_make(0.20f, 0.32f, 0.55f); m.roughness = 0.30f;
-                                 m.emissive   = vec3_make(0.25f, 0.55f, 0.95f); break;
+            case KIND_PORTAL:    m.base_color = vec3_make(0.32f, 0.22f, 0.13f); m.roughness = 0.60f; break;
             default: break;
         }
         /* a STALE alias (target gone from disk) flags itself dull red —
@@ -13143,6 +13142,9 @@ static void render(AppState *state) {
             if (g_dark_wood.albedo_tex.id != 0 && o->mesh_ref &&
                 strcmp(o->mesh_ref, "bookshelf") == 0)
                 dm = g_dark_wood;                 /* dark-wood bookshelves */
+            if (g_dark_wood.albedo_tex.id != 0 && o->mesh_ref &&
+                strcmp(o->mesh_ref, "gate") == 0)
+                dm = g_dark_wood;                 /* portal frame */
             if (g_oak_mat.albedo_tex.id != 0 && o->mesh_ref &&
                 strcmp(o->mesh_ref, "card") == 0 &&
                 (o->kind == KIND_FILE || o->kind == KIND_FOLDER)) {
