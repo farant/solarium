@@ -1275,6 +1275,91 @@ static const char *DECAL_FRAGMENT_SRC =
     "}\n";
 #endif /* SOL_RHI_METAL — the decal pair */
 
+/* the portal energy pane (Portal Material): an UNLIT, opaque procedural membrane
+   — domain-warped value-noise swirl animated by uTime, dark->bright by the swirl,
+   with a bright glow toward the frame edge. Modeled on the water twin. */
+#ifdef SOL_RHI_METAL
+static const char *PORTAL_VERTEX_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct VIn { float3 pos [[attribute(0)]]; float3 normal [[attribute(1)]];\n"
+    "             float2 uv [[attribute(2)]]; float4 tangent [[attribute(3)]]; };\n"
+    "struct VU { float4x4 uModel; float4x4 uView; float4x4 uProj; };\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "vertex VOut vmain(VIn v [[stage_in]], constant VU &u [[buffer(2)]]) {\n"
+    "    VOut o;\n"
+    "    float4 wp = u.uModel * float4(v.pos, 1.0);\n"
+    "    o.uv = v.uv;\n"
+    "    o.pos = u.uProj * (u.uView * wp);\n"
+    "    o.pos.z = (o.pos.z + o.pos.w) * 0.5;\n"
+    "    return o;\n"
+    "}\n";
+static const char *PORTAL_FRAGMENT_SRC =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct FU { float3 uPortalColor; float uTime; };\n"
+    "struct VOut { float4 pos [[position]]; float2 uv; };\n"
+    "static float phash(float2 p){ p = fract(p*float2(123.34,456.21));\n"
+    "    p += dot(p, p+45.32); return fract(p.x*p.y); }\n"
+    "static float pnoise(float2 p){\n"
+    "    float2 i = floor(p), f = fract(p);\n"
+    "    float a = phash(i), b = phash(i+float2(1.0,0.0));\n"
+    "    float c = phash(i+float2(0.0,1.0)), d = phash(i+float2(1.0,1.0));\n"
+    "    float2 u = f*f*(3.0-2.0*f);\n"
+    "    return mix(mix(a,b,u.x), mix(c,d,u.x), u.y); }\n"
+    "static float pfbm(float2 p){ return 0.6*pnoise(p) + 0.4*pnoise(p*2.03 + 7.1); }\n"
+    "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]]) {\n"
+    "    float2 p = v.uv * 3.0;\n"
+    "    float t = u.uTime * 0.3;\n"
+    "    float2 warp = float2(pnoise(p + t), pnoise(p - t*0.8 + 5.2));\n"
+    "    float n = pfbm(p + warp*1.5 + t*0.5);\n"
+    "    float2 c = v.uv - 0.5;\n"
+    "    float edge = smoothstep(0.20, 0.50, max(abs(c.x), abs(c.y)));\n"
+    "    float3 col = u.uPortalColor * mix(0.25, 1.0, n);\n"
+    "    col += float3(0.30, 0.50, 0.95) * edge * 0.8;\n"
+    "    return float4(col, 1.0);\n"
+    "}\n";
+#else /* GLSL */
+static const char *PORTAL_VERTEX_SRC =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 1) in vec3 aNormal;\n"
+    "layout (location = 2) in vec2 aUV;\n"
+    "layout (location = 3) in vec4 aTangent;\n"
+    "uniform mat4 uModel; uniform mat4 uView; uniform mat4 uProj;\n"
+    "out vec2 vUV;\n"
+    "void main() {\n"
+    "    vUV = aUV;\n"
+    "    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);\n"
+    "}\n";
+static const char *PORTAL_FRAGMENT_SRC =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform vec3 uPortalColor;\n"
+    "uniform float uTime;\n"
+    "out vec4 FragColor;\n"
+    "float phash(vec2 p){ p = fract(p*vec2(123.34,456.21));\n"
+    "    p += dot(p, p+45.32); return fract(p.x*p.y); }\n"
+    "float pnoise(vec2 p){\n"
+    "    vec2 i = floor(p), f = fract(p);\n"
+    "    float a = phash(i), b = phash(i+vec2(1.0,0.0));\n"
+    "    float c = phash(i+vec2(0.0,1.0)), d = phash(i+vec2(1.0,1.0));\n"
+    "    vec2 u = f*f*(3.0-2.0*f);\n"
+    "    return mix(mix(a,b,u.x), mix(c,d,u.x), u.y); }\n"
+    "float pfbm(vec2 p){ return 0.6*pnoise(p) + 0.4*pnoise(p*2.03 + 7.1); }\n"
+    "void main() {\n"
+    "    vec2 p = vUV * 3.0;\n"
+    "    float t = uTime * 0.3;\n"
+    "    vec2 warp = vec2(pnoise(p + t), pnoise(p - t*0.8 + 5.2));\n"
+    "    float n = pfbm(p + warp*1.5 + t*0.5);\n"
+    "    vec2 c = vUV - 0.5;\n"
+    "    float edge = smoothstep(0.20, 0.50, max(abs(c.x), abs(c.y)));\n"
+    "    vec3 col = uPortalColor * mix(0.25, 1.0, n);\n"
+    "    col += vec3(0.30, 0.50, 0.95) * edge * 0.8;\n"
+    "    FragColor = vec4(col, 1.0);\n"
+    "}\n";
+#endif /* SOL_RHI_METAL — the portal energy pane */
+
 /* --- god-rays (P8 item 3): march the view ray through the spot-light's
    shadow volume, accumulating in-scatter wherever the ray is LIT. The medium
    is the SAME height-fog field as item 2 (lit, not ambient). Crude on purpose
@@ -2498,6 +2583,7 @@ typedef struct AppState {
     RhiPipeline post_pipeline;  /* fullscreen tonemap/encode pass (item 7b) */
     RhiPipeline glass_pipeline; /* P9 item 2: church_glass — alpha-blend, depth-write-off */
     RhiPipeline decal_pipeline; /* P9 item 3: church_decals — unlit alpha quads */
+    RhiPipeline portal_pipeline;/* Portal Material: the energy-pane shader */
     RhiTexture  decal_atlas;    /* P9 item 3: synthesized stain (left) + moss (right) */
     RhiTexture  albedo_tex;     /* decoded page image (item 5b); 0 if load failed */
     Scene       scene;
@@ -2702,6 +2788,7 @@ typedef struct AppState {
     vec3        resize_u;          /* the wall's horizontal in-plane axis       */
     sol_u32     resize_room;       /* the board's parent room (wall clamp)      */
     Mesh        resize_handle_mesh;/* small corner quad; built once on first use */
+    Mesh        gate_pane;        /* portal energy pane: a unit quad, built once on first use */
     sol_u32     picture_aim;       /* image card aimed at a wall/board this frame */
     sol_u32     picture_target;    /* the room (wall) or board to parent the picture */
     vec3        picture_local;     /* the picture's local pos under the target */
@@ -11549,6 +11636,12 @@ static int init_scene(AppState *state) {
         dd.blend           = RHI_BLEND_ALPHA;
         dd.depth_write_off = SOL_TRUE;
         if (dd.shader.id) state->decal_pipeline = rhi_create_pipeline(&dd);
+    }
+    {   /* Portal Material: the energy-pane pipeline — same vertex layout, the
+           procedural energy shader, opaque (depth-tested, writes depth). */
+        RhiPipelineDesc pp = desc;
+        pp.shader = rhi_create_shader(PORTAL_VERTEX_SRC, PORTAL_FRAGMENT_SRC);
+        if (pp.shader.id) state->portal_pipeline = rhi_create_pipeline(&pp);
     }
 
     /* the skinned twins (item 9): the canonical 12 floats + joints4 +
