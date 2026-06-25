@@ -311,6 +311,7 @@ static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
     }
 }
 
+#define ROOM_SHELL_TILE_M 3.0f   /* meters per shell-texture repeat (the stone-wall tile size) */
 void make_room_doored(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h, sol_f32 t,
                       int wn, int we, int ws, int ww, int ceil,
                       const RoomOpening *ops, int n_ops) {
@@ -322,6 +323,7 @@ void make_room_doored(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h, sol_f32 t
     if (ws) emit_doored_wall(b, 1,  hd, hd + t, -hw, hw, h, ops, n_ops, ROOM_WALL_S);
     if (we) emit_doored_wall(b, 0,  hw, hw + t, -hd - t, hd + t, h, ops, n_ops, ROOM_WALL_E);
     if (ww) emit_doored_wall(b, 0, -hw - t, -hw, -hd - t, hd + t, h, ops, n_ops, ROOM_WALL_W);
+    mb_scale_uvs(b, 1.0f / ROOM_SHELL_TILE_M);   /* larger shell-stone tiles (less repetition) */
 }
 
 /* An index card (P3 item 6): a small upright slab standing on its bottom
@@ -973,7 +975,11 @@ void make_arrow(MeshBuilder *b, sol_f32 x0, sol_f32 y0,
 
 static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 static void emit_picture(MeshBuilder *b, const float *p) { make_picture(b, p[0], p[1], p[2]); }
-static void emit_board(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
+#define BOARD_TILE_M 3.0f   /* meters per board-texture repeat (the plaster tile size) */
+static void emit_board(MeshBuilder *b, const float *p) {
+    make_card(b, p[0], p[1], p[2]);
+    mb_scale_uvs(b, 1.0f / BOARD_TILE_M);   /* larger plaster tiles (less repetition) */
+}
 /* a table: a top slab + 4 legs. params: w (width X), d (depth Z), h (height).
    origin at floor center; the top's upper face (y=h) is the filing surface. */
 static void emit_table(MeshBuilder *b, const float *p) {

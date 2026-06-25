@@ -4212,6 +4212,9 @@ static Material g_dark_wood;      /* timber frame; albedo_tex.id == 0 => no wood
 static Material g_roof_mat;       /* pitched roof; albedo_tex.id == 0 => no roof */
 static Material g_path_mat;       /* sandstone walkway deck; albedo_tex.id == 0 => default */
 static Material g_campus_mat;      /* rocky campus ground (experiment); id 0 => palette */
+static Material g_stone_mat;       /* stone-wall room shell; id 0 => default material */
+static Material g_plaster_mat;     /* painted-plaster whiteboard; id 0 => default material */
+static Material g_oak_mat;         /* oak-veneer file/folder tablets; id 0 => default material */
 
 typedef struct { sol_u32 handle; Mesh wall, wood, roof, gable, door_floor, door_trim; } RoomFrame;
 static RoomFrame g_room_frame[ROOM_FRAME_MAX];
@@ -10520,6 +10523,27 @@ static void campus_mat_init(void) {
         "rocky_terrain/rocky_terrain_02_arm_1k.png");
 }
 
+static void stone_mat_init(void) {
+    g_stone_mat = load_pbr_material(
+        "stone_wall/japanese_stone_wall_diff_1k.png",
+        "stone_wall/japanese_stone_wall_nor_gl_1k.png",
+        "stone_wall/japanese_stone_wall_arm_1k.png");
+}
+
+static void plaster_mat_init(void) {
+    g_plaster_mat = load_pbr_material(
+        "painted_plaster_wall/painted_plaster_wall_diff_1k.png",
+        "painted_plaster_wall/painted_plaster_wall_nor_gl_1k.png",
+        "painted_plaster_wall/painted_plaster_wall_arm_1k.png");
+}
+
+static void oak_mat_init(void) {
+    g_oak_mat = load_pbr_material(
+        "oak_veneer/oak_veneer_01_diff_1k.png",
+        "oak_veneer/oak_veneer_01_nor_gl_1k.png",
+        "oak_veneer/oak_veneer_01_arm_1k.png");
+}
+
 /* a w x d floor quad (XZ, +Y up) with meter-based tiling UVs, cached by size so a
    tile is the same physical size in every room. empty mesh on cache overflow. */
 static Mesh floor_quad_for(float w, float d) {
@@ -11677,6 +11701,9 @@ static int init_scene(AppState *state) {
     roof_mat_init();    /* timber halls: pitched roof */
     path_mat_init();    /* sandstone walkway deck + steps between rooms */
     campus_mat_init();  /* rocky campus ground (experiment) */
+    stone_mat_init();   /* stone-wall room shell (veneers cover the rest) */
+    plaster_mat_init(); /* painted-plaster whiteboard */
+    oak_mat_init();     /* oak-veneer file/folder tablets */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
        loaded and brought fully to life. The home scene builds only on first
@@ -12829,6 +12856,26 @@ static void render(AppState *state) {
             if (g_path_mat.albedo_tex.id != 0 && o->mesh_ref &&
                 strcmp(o->mesh_ref, "walkway") == 0)
                 dm = g_path_mat;                  /* sandstone deck + steps (sourced experiment) */
+            if (g_stone_mat.albedo_tex.id != 0 && o->mesh_ref &&
+                strcmp(o->mesh_ref, "room") == 0)
+                dm = g_stone_mat;                 /* stone-wall shell (the veneers cover the rest) */
+            if (g_plaster_mat.albedo_tex.id != 0 && o->mesh_ref &&
+                strcmp(o->mesh_ref, "board") == 0)
+                dm = g_plaster_mat;               /* painted-plaster whiteboard (writing draws on top) */
+            if (g_dark_wood.albedo_tex.id != 0 && o->mesh_ref &&
+                strcmp(o->mesh_ref, "bookshelf") == 0)
+                dm = g_dark_wood;                 /* dark-wood bookshelves */
+            if (g_oak_mat.albedo_tex.id != 0 && o->mesh_ref &&
+                strcmp(o->mesh_ref, "card") == 0 &&
+                (o->kind == KIND_FILE || o->kind == KIND_FOLDER)) {
+                dm = g_oak_mat;                   /* oak-veneer tablets, split LIGHT/DARK by kind so
+                                                     files and folders read apart even over the oak,
+                                                     and the per-kind label ink stays high-contrast */
+                if (o->kind == KIND_FOLDER)
+                    dm.base_color = vec3_make(0.42f, 0.30f, 0.18f);   /* dark walnut-toned oak */
+                else
+                    dm.base_color = vec3_make(1.00f, 0.95f, 0.85f);   /* light honey oak */
+            }
             dm.emissive.x *= o->overlay_glow;     /* the heart and the pool of
                                                      light breathe TOGETHER —
                                                      same channel, two consumers */
@@ -13349,6 +13396,9 @@ static void render(AppState *state) {
                             mat4_translate(vec3_make(0.0f, 0.0f, ct * 0.5f + 0.0008f)));
             if (o->kind == KIND_TOMBSTONE) {                /* light ink on slate */
                 ink_r = 0.82f; ink_g = 0.82f; ink_b = 0.86f;
+            } else if ((o->kind == KIND_FOLDER || o->kind == KIND_FILE) &&
+                       g_oak_mat.albedo_tex.id != 0) {
+                ink_r = 0.93f; ink_g = 0.90f; ink_b = 0.82f;  /* light ink on the oak tablets */
             } else {                                        /* dark ink on paper */
                 ink_r = 0.10f; ink_g = 0.09f; ink_b = 0.08f;
             }

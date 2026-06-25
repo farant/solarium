@@ -40,6 +40,9 @@
 /distressed_painted_planks/
 /marble_rock/
 /rocky_terrain/
+/stone_wall/
+/painted_plaster_wall/
+/oak_veneer/
 
 # Editor / tooling
 compile_commands.json
