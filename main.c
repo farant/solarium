@@ -2736,6 +2736,7 @@ typedef struct AppState {
     float    bv_return_yaw, bv_return_pitch;
     int      hover_corner;        /* resize-corner the pointer is over; -1 = none */
     int      resize_corner;       /* corner grabbed for the active resize (stays lit) */
+    vec3     resize_grab;         /* grabbed-corner minus cursor-hit: no jump on grab */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -8446,6 +8447,20 @@ static int resize_corner_pick(AppState *st, GLFWwindow *w) {
     st->resize_u      = u;
     st->resize_room   = o ? o->parent : 0;
     st->resize_corner = best;                  /* grabbed corner: stays lit while dragging */
+    {   /* no-jump grab: remember (grabbed corner - cursor hit) on the card plane,
+           so the drag tracks (hit + offset) and the first frame reproduces the
+           corner exactly (you clicked up to the grab radius off it). */
+        Ray   ray = pick_ray(st, w);
+        float yaw = board_yaw(&st->scene, st->selected_handle);
+        vec3  n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+        float tt;
+        ray.dir = vec3_normalize(ray.dir);
+        st->resize_grab = vec3_make(0.0f, 0.0f, 0.0f);
+        if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
+            vec3 hit = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+            st->resize_grab = vec3_sub(cor[best], hit);
+        }
+    }
     return 1;
 }
 
@@ -9705,7 +9720,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 float tt;
                 ray.dir = vec3_normalize(ray.dir);
                 if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
-                    vec3  hit = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+                    vec3  hit = vec3_add(vec3_add(ray.origin, vec3_scale(ray.dir, tt)),
+                                         st->resize_grab);   /* no jump on grab */
                     vec3  origin, cur_bottom, nb;
                     float nw, nh, p3[3];
                     float ct  = mesh_ref_param("card", o->mesh_params,
@@ -9747,7 +9763,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                               o->mesh_params, o->mesh_param_count, "t");
                 float    tt;
                 if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
-                    vec3  hit   = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+                    vec3  hit   = vec3_add(vec3_add(ray.origin, vec3_scale(ray.dir, tt)),
+                                           st->resize_grab);   /* no jump on grab */
                     float ih    = room_interior_height(&st->scene, st->resize_room);
                     float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
                     float runH  = (n.z * n.z > 0.25f) ? r.hw : r.hd;
