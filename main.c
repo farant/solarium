@@ -8471,6 +8471,21 @@ static void cmd_carry_toggle(AppState *st) {
                         co->parent = 0;                                 /* leave the wall/furniture */
                         co->pos    = wp;
                         if (was_shelf) shelf_repack(st, src);           /* reflow the rest */
+                        {   /* un-shelve/un-mount the orientation: a filed card is
+                               spine-out and a mounted picture is surface-facing, so
+                               hold it FACE-ON, turned to face you (like a fresh card)
+                               — else you see only its thin edge in front of you */
+                            vec3  f = camera_forward(&st->camera);
+                            float yaw;
+                            f.y = 0.0f;
+                            if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+                            yaw = (float)atan2((double)(-f.x), (double)(-f.z));
+                            co  = scene_get(&st->scene, t);             /* re-fetch (be safe) */
+                            if (co) {
+                                co->rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw);
+                                st->carry_prev_rot = co->rot;
+                            }
+                        }
                     }
                 }
             }
