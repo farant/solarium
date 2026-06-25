@@ -8337,6 +8337,32 @@ static void inventory_take(AppState *st, sol_u32 item) {
     printf("took an item from the bag\n");
 }
 
+/* Spawn a "picture" of `content` (an image path) parented to `parent` at local
+   `pos`/`rot`, sized to the image's aspect (fit into a 1.6 x 1.2 box). Returns
+   the new handle. Shared by the carry-drop and click-drag-drop paths so both
+   build an identical picture. */
+static sol_u32 spawn_image_picture(AppState *st, sol_u32 parent,
+                                   vec3 pos, quat rot, const char *content) {
+    Mesh    empty;
+    vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+    float   pw  = 1.2f, ph = 0.9f, pp[3];
+    Image   img;
+    sol_u32 a;
+    memset(&empty, 0, sizeof empty);
+    if (content && image_load(content, &img)) {     /* size the frame to the image's aspect */
+        image_fit_box(img.w, img.h, 1.6f, 1.2f, &pw, &ph);
+        image_free(&img);
+    }
+    a = scene_add(&st->scene, parent, empty, pos, rot, one);
+    scene_mesh_ref_set(&st->scene, a, "picture");
+    if (content) scene_content_set(&st->scene, a, content);
+    pp[0] = pw; pp[1] = ph; pp[2] = 0.03f;
+    scene_mesh_params_set(&st->scene, a, pp, 3);
+    scene_resolve_meshes(&st->scene);               /* builds the mesh + loads the albedo */
+    apply_kind_materials(&st->scene);               /* skips KIND_PLAIN -> keeps the image */
+    return a;
+}
+
 /* E: put down what you're carrying, else pick up the selected movable object.
    A carried FOLDER, dropped while aiming at a wall, OPENS the folder as a real
    sub-room (door + walkway + its contents) — and the folder card snaps back to
@@ -8365,33 +8391,23 @@ static void cmd_carry_toggle(AppState *st) {
                 scene_save(&st->scene, "scene.stml");
             } else if (st->picture_aim && st->picture_target != 0 &&
                        scene_get(&st->scene, st->picture_target) != 0) {
-                const char *path = o->content;       /* heap ptr survives scene_add */
-                Mesh        empty;
-                vec3        one    = vec3_make(1.0f, 1.0f, 1.0f);
+                const char *path   = o->content;      /* heap ptr survives scene_add */
+                float       defh   = mesh_ref_param("picture", (const float *)0, 0, "h");
                 vec3        plocal = st->picture_local;
-                float       pw = 1.2f, ph = 0.9f;
-                float       defh = mesh_ref_param("picture", (const float *)0, 0, "h");
                 sol_u32     a;
-                Image       img;
-                memset(&empty, 0, sizeof empty);
-                if (path && image_load(path, &img)) { /* size the frame to the image's aspect */
-                    image_fit_box(img.w, img.h, 1.6f, 1.2f, &pw, &ph);
-                    image_free(&img);
-                }
-                plocal.y += (defh - ph) * 0.5f;       /* keep the previewed CENTER as h changes */
                 o->parent = st->carry_prev_parent;    /* the image card RETURNS to where it was */
                 o->pos    = st->carry_origin;          /*   (e.g. back onto its shelf) */
                 o->rot    = st->carry_prev_rot;
-                a = scene_add(&st->scene, st->picture_target, empty,
-                              plocal, st->picture_rot, one);
-                scene_mesh_ref_set(&st->scene, a, "picture");
-                if (path) scene_content_set(&st->scene, a, path);
-                {
-                    float pp[3]; pp[0] = pw; pp[1] = ph; pp[2] = 0.03f;
-                    scene_mesh_params_set(&st->scene, a, pp, 3);
+                a = spawn_image_picture(st, st->picture_target, plocal, st->picture_rot, path);
+                {   /* keep the previewed CENTRE as the height changes from the
+                       default to the image's aspect (the preview pinned at defh) */
+                    SceneObject *ao = scene_get(&st->scene, a);
+                    if (ao) {
+                        float ph = mesh_ref_param("picture", ao->mesh_params,
+                                                  ao->mesh_param_count, "h");
+                        ao->pos.y += (defh - ph) * 0.5f;
+                    }
                 }
-                scene_resolve_meshes(&st->scene);     /* builds mesh + loads albedo */
-                apply_kind_materials(&st->scene);     /* skips KIND_PLAIN -> image kept */
                 scene_save(&st->scene, "scene.stml");
                 printf("hung a picture\n");
             } else if (st->file_aim && st->file_target != 0 &&
