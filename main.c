@@ -14273,6 +14273,58 @@ static void render(AppState *state) {
             }
         }
 
+        /* folder labels: meta["link"] (the target path) floating above each
+           folderbook, workspace+page filtered like everything else. */
+        {
+            sol_u32 fi;
+            for (fi = 0; fi < state->scene.count; fi++) {
+                const SceneObject *o = &state->scene.objects[fi];
+                const char *lnk, *mr = o->mesh_ref;
+                float lpx, nw, x0, fh;
+                mat4  m;
+                if (!mr || strcmp(mr, "folderbook") != 0) continue;
+                if (!scene_object_active(&state->scene, o->handle)) continue;
+                lnk = scene_meta_get(&state->scene, o->handle, "link");
+                if (!lnk || !lnk[0]) continue;
+                fh  = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "h");
+                lpx = 0.045f / lh;                       /* ~4.5 cm letters */
+                text_measure(uf, lnk, 1.0f, &nw, (float *)0);
+                x0  = -nw * lpx * 0.5f;
+                m   = mat4_mul(scene_world_matrix(&state->scene, o),
+                               mat4_translate(vec3_make(0.0f,
+                                   fh + 2.0f * lpx * lh, 0.06f)));
+                wtext_block(uf, vp, m, lnk, x0, 0.0f, lpx, 0.0f,
+                            0.225f, 0.325f, 0.5f);       /* deep blue */
+            }
+        }
+
+        /* board page title: the active_page path above a board, shown in
+           board view, and in the world whenever the board is off its root. */
+        {
+            sol_u32 ti;
+            for (ti = 0; ti < state->scene.count; ti++) {
+                const SceneObject *o = &state->scene.objects[ti];
+                const char *ap, *mr = o->mesh_ref;
+                float lpx, nw, x0, bh;
+                mat4  m;
+                if (!mr || strcmp(mr, "board") != 0) continue;
+                if (!scene_object_active(&state->scene, o->handle)) continue;
+                ap = scene_meta_get(&state->scene, o->handle, "active_page");
+                if (!ap) ap = "/";
+                if (state->board_view != o->handle && strcmp(ap, "/") == 0)
+                    continue;                            /* plain root board: stay clean */
+                bh  = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h");
+                lpx = 0.12f / lh;                        /* ~12 cm letters */
+                text_measure(uf, ap, 1.0f, &nw, (float *)0);
+                x0  = -nw * lpx * 0.5f;
+                m   = mat4_mul(scene_world_matrix(&state->scene, o),
+                               mat4_translate(vec3_make(0.0f,
+                                   bh + 0.04f + 2.0f * lpx * lh, 0.04f)));
+                wtext_block(uf, vp, m, ap, x0, 0.0f, lpx, 0.0f,
+                            0.20f, 0.20f, 0.24f);         /* near-black ink */
+            }
+        }
+
         /* resize handles (whiteboard resize): a selected wall-mounted board
            shows a small glowing quad at each of its 4 corners. */
         if (state->selected_handle != 0 &&
