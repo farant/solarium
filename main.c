@@ -7558,6 +7558,29 @@ static sol_bool object_is_folder(Scene *s, sol_u32 h) {
                ? SOL_TRUE : SOL_FALSE;
 }
 
+/* A board card that drag-to-file can move between pages: notes and pictures. */
+static sol_bool is_fileable_card(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    if (!o) return SOL_FALSE;
+    if (o->kind == KIND_NOTE) return SOL_TRUE;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "picture") == 0) return SOL_TRUE;
+    return SOL_FALSE;
+}
+
+/* Tag a board-pinned card with its board's CURRENT page, so a card created or
+   dropped while viewing a sub-page belongs to that page, not the root "/".
+   No-op unless `handle` is a direct child of a "board". */
+static void board_card_tag_page(AppState *st, sol_u32 handle) {
+    SceneObject *o = scene_get(&st->scene, handle);
+    SceneObject *par;
+    const char  *ap;
+    if (!o || o->parent == 0) return;
+    par = scene_get(&st->scene, o->parent);
+    if (!par || !par->mesh_ref || strcmp(par->mesh_ref, "board") != 0) return;
+    ap = scene_meta_get(&st->scene, o->parent, "active_page");
+    scene_meta_set(&st->scene, handle, "page", ap ? ap : "/");
+}
+
 /* The folder pinned on `board` nearest board-local point `bl`, within a
    small radius; 0 if none. Used by the drag-to-file drop test. */
 static sol_u32 folder_at_board_point(AppState *st, sol_u32 board, vec3 bl) {
@@ -8567,6 +8590,7 @@ static sol_u32 spawn_image_picture(AppState *st, sol_u32 parent,
     scene_mesh_params_set(&st->scene, a, pp, 3);
     scene_resolve_meshes(&st->scene);               /* builds the mesh + loads the albedo */
     apply_kind_materials(&st->scene);               /* skips KIND_PLAIN -> keeps the image */
+    board_card_tag_page(st, a);                     /* lands on the page you're viewing */
     return a;
 }
 
@@ -9753,6 +9777,7 @@ static sol_u32 spawn_note(AppState *st, GLFWwindow *w) {
         SceneObject *no = scene_get(&st->scene, h);
         if (no) no->pos = board_pin_pos(&st->scene, board, h,
                                         blocal, 0.0f, -0.5f * NOTE_CARD_H);
+        board_card_tag_page(st, h);     /* belongs to the page you're viewing */
     }
     scene_resolve_meshes(&st->scene);
     apply_kind_materials(&st->scene);
@@ -10095,6 +10120,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 float pw  = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "w");
                 float ph  = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "h");
                 float tt;
+                st->drop_target_handle = 0;     /* recompute the drop target each frame */
                 ray.dir = vec3_normalize(ray.dir);
                 if (ray_vs_plane(ray, anchor, n, &tt) && tt > 0.0f) {
                     vec3 hit = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
@@ -10112,6 +10138,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                         if (lp.y < 0.0f)      lp.y = 0.0f;
                         if (lp.y > bh - ph)   lp.y = bh - ph;
                         o->pos = lp;
+                        if (is_fileable_card(&st->scene, st->move_board))
+                            st->drop_target_handle = folder_at_board_point(
+                                st, st->resize_room,
+                                vec3_make(lp.x, lp.y + ph * 0.5f, 0.0f));
                     } else {
                         /* on a room wall: slide along u + y, clamp to the wall +
                            gable, keep proud (t/2) */
@@ -10324,7 +10354,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                         st->drag_moved = SOL_TRUE;     /* a reparent is a real move */
                         arrows_rebuild(st);            /* its arrows follow live */
                         st->drop_target_handle =
-                            (o->kind == KIND_NOTE)
+                            is_fileable_card(&st->scene, st->drag_handle)
                                 ? folder_at_board_point(st, board, blocal) : 0;
                     } else {                           /* ---- ground mode ---- */
                         float t;
@@ -10369,6 +10399,17 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 scene_save(&st->scene, "scene.stml");
                 st->resize_board = 0;
             } else if (st->move_board != 0) {           /* finished a picture slide */
+                if (st->drop_target_handle != 0 &&
+                    is_fileable_card(&st->scene, st->move_board)) {
+                    const char *link = scene_meta_get(&st->scene,
+                                           st->drop_target_handle, "link");
+                    if (link && link[0]) {              /* slid onto a folder: file it */
+                        scene_meta_set(&st->scene, st->move_board, "page", link);
+                        st->selected_handle = 0;        /* paged out: drop the selection */
+                        printf("filed #%u onto %s\n", (unsigned)st->move_board, link);
+                    }
+                }
+                st->drop_target_handle = 0;
                 scene_save(&st->scene, "scene.stml");
                 st->move_board = 0;
             } else if (st->drag_handle != 0 && st->drag_moved) {
@@ -10379,13 +10420,14 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     const char  *link = fold ? scene_meta_get(&st->scene,
                                                    st->drop_target_handle, "link")
                                              : (const char *)0;
-                    if (o && o->kind == KIND_NOTE && link && link[0]) {
+                    if (o && is_fileable_card(&st->scene, st->drag_handle) &&
+                        link && link[0]) {
                         scene_meta_set(&st->scene, st->drag_handle, "page", link);
                         scene_save(&st->scene, "scene.stml");
-                        printf("filed note #%u onto %s\n",
+                        printf("filed #%u onto %s\n",
                                (unsigned)st->drag_handle, link);
                         filed = SOL_TRUE;            /* skip the ordinary placement save */
-                        st->selected_handle = 0;     /* note is paged out; drop the stale selection */
+                        st->selected_handle = 0;     /* card is paged out; drop the stale selection */
                     }
                     st->drop_target_handle = 0;
                 }
@@ -10443,12 +10485,15 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                             }
                             scene_resolve_meshes(&st->scene);
                             apply_kind_materials(&st->scene);
+                            board_card_tag_page(st, a);     /* lands on the current page */
                             st->selected_handle = a;
                             printf("pinned alias '%s' to the board — the record stays home\n", nm);
                         }
                         o = scene_get(&st->scene, st->drag_handle);  /* re-fetch after scene_add */
                     }
                 }
+                board_card_tag_page(st, st->drag_handle);   /* a card dropped on a
+                                                board joins the page you're viewing */
                 if (scene_save(&st->scene, "scene.stml"))
                     printf("placed #%u at (%.2f, %.2f, %.2f) — saved\n",
                            (unsigned)st->drag_handle,
