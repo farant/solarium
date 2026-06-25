@@ -3097,9 +3097,11 @@ static sol_u32 group_root(Scene *s, sol_u32 handle) {
         SceneObject *par = scene_get(s, o->parent);
         if (scene_meta_get(s, o->parent, "room_type")) break;  /* the room boundary */
         if (par && par->mesh_ref &&
-            (furniture_is_shelf(par->mesh_ref) || furniture_is_table(par->mesh_ref)))
-            break;                              /* furniture: a FILED item (book/card)
-                                                   is its own group, only placed on it */
+            (furniture_is_shelf(par->mesh_ref) || furniture_is_table(par->mesh_ref) ||
+             strcmp(par->mesh_ref, "board") == 0))
+            break;                              /* furniture / whiteboard: a PINNED item
+                                                   (book/card/picture/note) is its own
+                                                   group, only placed on its host */
         handle = o->parent;
         o = scene_get(s, handle);
     }
