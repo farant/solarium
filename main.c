@@ -8554,6 +8554,53 @@ static void wall_mount_gable(Scene *s, sol_u32 room, int wall, Ray ray,
     center->y  = cy;
 }
 
+/* Enter board view: frame the selected whiteboard head-on and begin the glide.
+   Returns 0 (and does nothing) if the selection isn't a board, board view is
+   already active, or another mode owns the keyboard/cursor. */
+static int board_view_enter(AppState *st) {
+    SceneObject *o = scene_get(&st->scene, st->selected_handle);
+    vec3  cor[4], center, normal;
+    float yaw, half_w, half_h, aspect;
+    CameraPose pose;
+    if (st->board_view != 0) return 0;
+    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) return 0;
+    if (st->carried != 0 || st->place_active || st->editor.active ||
+        st->palette.open || st->inv_open || st->edit_handle != 0 ||
+        st->reader_state != READER_IDLE) return 0;
+    board_world_corners(&st->scene, st->selected_handle, cor, NULL);
+    center = vec3_scale(vec3_add(vec3_add(cor[0], cor[1]),
+                                 vec3_add(cor[2], cor[3])), 0.25f);
+    yaw    = board_yaw(&st->scene, st->selected_handle);
+    normal = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+    half_w = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w") * 0.5f;
+    half_h = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h") * 0.5f;
+    aspect = (st->fb_height > 0) ? (float)st->fb_width / (float)st->fb_height : 1.7778f;
+    pose   = camera_frame_pose(center, normal, half_w, half_h,
+                               st->camera.fov, aspect, BOARD_VIEW_MARGIN);
+    st->bv_return_pos   = st->camera.pos;
+    st->bv_return_yaw   = st->camera.yaw;
+    st->bv_return_pitch = st->camera.pitch;
+    st->bv_from_pos = st->camera.pos;   st->bv_to_pos = pose.pos;
+    st->bv_from_yaw = st->camera.yaw;   st->bv_to_yaw = pose.yaw;
+    st->bv_from_pitch = st->camera.pitch; st->bv_to_pitch = pose.pitch;
+    st->bv_t   = 0.0f;
+    st->bv_dir = 1.0f;
+    st->board_view = st->selected_handle;
+    return 1;
+}
+
+/* Leave board view: glide the camera back to the stored return pose. Safe to
+   call when already out. */
+static void board_view_exit(AppState *st) {
+    if (st->board_view == 0) return;
+    st->bv_from_pos = st->camera.pos;   st->bv_to_pos = st->bv_return_pos;
+    st->bv_from_yaw = st->camera.yaw;   st->bv_to_yaw = st->bv_return_yaw;
+    st->bv_from_pitch = st->camera.pitch; st->bv_to_pitch = st->bv_return_pitch;
+    st->bv_t   = 0.0f;
+    st->bv_dir = -1.0f;
+    st->board_view = 0;
+}
+
 /* a note's body text size in metres-per-line; absent meta => the default,
    clamped to the editable range. */
 /* New-note default card: landscape and roomier than the portrait file/folder
@@ -14466,7 +14513,9 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     }
 
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        if (st && st->reader_state != READER_IDLE)
+        if (st && st->board_view != 0)
+            board_view_exit(st);                /* leave board view first */
+        else if (st && st->reader_state != READER_IDLE)
             reader_close(st);                   /* put the book back first */
         else
             glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -14478,6 +14527,10 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         SceneObject *o = scene_get(&st->scene, st->selected_handle);
         if (o && o->kind == KIND_NOTE)
             note_edit_begin(st, st->selected_handle);
+        else if (object_is_board(&st->scene, st->selected_handle)) {
+            if (st->board_view == 0) board_view_enter(st);
+            /* already in board view: Enter on the board itself does nothing */
+        }
         else if (o)
             reader_open(st, st->selected_handle);
     }
