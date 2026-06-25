@@ -9498,7 +9498,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
     /* Tab toggles first-person <-> orbit (edge); cursor mode follows */
     tab_now = glfwGetKey(w, GLFW_KEY_TAB) == GLFW_PRESS;
-    if (tab_now && !st->tab_was_down) {
+    if (tab_now && !st->tab_was_down && !st->board_view) {
         if (st->camera.mode == CAMERA_ORBIT) {
             camera_enter_fp(&st->camera);
             glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -9944,8 +9944,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             Command *cmd = &g_commands[ci];
             sol_bool now;
             if (cmd->key == 0) continue;
-            if (st->editor.active)
-                { cmd->was_down = SOL_FALSE; continue; }       /* editor: hotkeys off; use the palette */
+            if (st->editor.active || st->board_view != 0)
+                { cmd->was_down = SOL_FALSE; continue; }       /* editor / board view: hotkeys off */
             now = glfwGetKey(w, cmd->key) == GLFW_PRESS;
             if (now && !cmd->was_down && (cmd->can_run == NULL || cmd->can_run(st)))
                 cmd->run(st);
@@ -14519,7 +14519,7 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
 
     /* ':' (Shift+;) opens the palette when nothing else owns the keyboard. */
     if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && (mods & GLFW_MOD_SHIFT)
-        && st->edit_handle == 0 && st->reader_state == READER_IDLE) {
+        && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0) {
         palette_open_now(&st->palette);
         return;
     }
@@ -14527,7 +14527,7 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     /* 'i' opens the inventory when nothing else owns the keyboard. */
     if (action == GLFW_PRESS && key == GLFW_KEY_I && st->carried == 0 &&
         st->edit_handle == 0 && st->reader_state == READER_IDLE &&
-        !st->place_active && !st->palette.open && !st->editor.active) {
+        !st->place_active && !st->palette.open && !st->editor.active && st->board_view == 0) {
         cmd_inventory_open(st);
         return;
     }
@@ -14564,8 +14564,8 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     }
 
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        if (st && st->board_view != 0)
-            board_view_exit(st);                /* leave board view first */
+        if (st && (st->board_view != 0 || st->bv_t < 1.0f))
+            board_view_exit(st);                /* leave board view (or absorb Esc mid-glide-out) */
         else if (st && st->reader_state != READER_IDLE)
             reader_close(st);                   /* put the book back first */
         else
@@ -14582,7 +14582,7 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
             if (st->board_view == 0) board_view_enter(st);
             /* already in board view: Enter on the board itself does nothing */
         }
-        else if (o)
+        else if (o && st->board_view == 0)
             reader_open(st, st->selected_handle);
     }
 }
