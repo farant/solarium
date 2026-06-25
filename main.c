@@ -8428,7 +8428,16 @@ static int picture_move_pick(AppState *st, GLFWwindow *w) {
     SceneObject *o = scene_get(&st->scene, st->selected_handle);
     float yaw, tt;
     vec3  n, p0, h0;
-    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "picture") != 0) return 0;
+    /* slide a mounted board OR a picture (a body click — resize_corner_pick
+       already claimed it if the click was on a corner). A picture slides on its
+       wall or whiteboard; a board slides only when wall-mounted (a free-standing
+       board must stay carry-able, not glue itself to a phantom wall). */
+    if (!o || !o->mesh_ref) return 0;
+    if (strcmp(o->mesh_ref, "picture") != 0) {
+        if (strcmp(o->mesh_ref, "board") != 0 ||
+            !board_is_mounted(&st->scene, st->selected_handle))
+            return 0;
+    }
     yaw = board_yaw(&st->scene, st->selected_handle);
     n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
     p0  = object_world_pos(&st->scene, st->selected_handle);  /* origin (bottom-center) */
@@ -8453,11 +8462,90 @@ static float room_interior_height(Scene *s, sol_u32 room) {
     return 4.5f;
 }
 
+/* The mountable region of a room wall: the rectangle (floor..wall_top, full
+   half-span) plus, on the two ridge-END walls, the roof gable triangle above it.
+   `normal_x` = this wall's inward normal points along X (the E/W walls). The
+   gable is on the walls perpendicular to the ridge, which runs along the longer
+   dimension (room_frame_build's `rax`). */
+typedef struct { float floor_y, wall_top, apex_y, half_span; int is_gable; } WallMount;
+
+static WallMount wall_gable_geom(RoomRect r, float ih, int normal_x) {
+    WallMount m;
+    int   rax  = (r.hw >= r.hd) ? 1 : 0;        /* ridge runs along the longer dim */
+    float span = normal_x ? r.hd : r.hw;        /* this wall's run half-length */
+    float dy   = span * (float)tan((double)sol_radians(FRAME_PITCH_DEG));
+    m.floor_y   = r.floor_y;
+    m.wall_top  = r.floor_y + ih;
+    m.half_span = span;
+    m.is_gable  = (normal_x == rax);            /* ridge-end walls carry the gable */
+    m.apex_y    = m.is_gable ? m.wall_top + dy : m.wall_top;
+    return m;
+}
+
+/* Clamp a flat wall object's centre (run = along-wall offset from the wall's
+   centre, cy = vertical centre) to the wall, plus the gable triangle above it on
+   ridge-end walls. As the object rises into the triangle its along-wall room
+   shrinks toward the apex, so it never pokes out past the sloped rake. */
+static void wall_clamp_run_cy(WallMount m, float w_half, float h_half,
+                              float *run, float *cy) {
+    float top, avail, lim;
+    if (*cy < m.floor_y + h_half) *cy = m.floor_y + h_half;     /* bottom on the floor */
+    if (m.is_gable && m.apex_y > m.wall_top) {
+        float spanh  = m.apex_y - m.wall_top;
+        float topmax = m.apex_y - w_half * spanh / m.half_span; /* highest the top fits */
+        if (topmax > m.apex_y) topmax = m.apex_y;
+        if (*cy + h_half > topmax) *cy = topmax - h_half;
+    } else if (*cy + h_half > m.wall_top) {
+        *cy = m.wall_top - h_half;                              /* top under the eave */
+    }
+    top = *cy + h_half;
+    if (m.is_gable && top > m.wall_top) {
+        float spanh = m.apex_y - m.wall_top;
+        avail = m.half_span * (m.apex_y - top) / spanh;         /* triangle half-width at top */
+        if (avail < 0.0f) avail = 0.0f;
+    } else {
+        avail = m.half_span;
+    }
+    lim = avail - w_half;
+    if (lim < 0.0f) lim = 0.0f;
+    if (*run >  lim) *run =  lim;
+    if (*run < -lim) *run = -lim;
+}
+
+/* After descend_wall_mount has picked a wall + rectangular centre, lift the
+   centre into the gable triangle if the crosshair aims there (ridge-end walls
+   only; eave walls keep descend's result untouched). */
+static void wall_mount_gable(Scene *s, sol_u32 room, int wall, Ray ray,
+                             float w_half, float h_half, float t, vec3 *center) {
+    RoomRect  r  = editor_room_rect(s, room);
+    float     ih = room_interior_height(s, room);
+    int       normal_x = (wall == ROOM_WALL_E || wall == ROOM_WALL_W);
+    WallMount m  = wall_gable_geom(r, ih, normal_x);
+    vec3      pt, n, hit;
+    int       runx;
+    float     tt, run, cy;
+    if (!m.is_gable) return;                    /* eave wall: nothing above the eave */
+    if (wall == ROOM_WALL_N)      { pt = vec3_make(r.cx, r.floor_y, r.cz - r.hd); n = vec3_make(0.0f,0.0f, 1.0f); runx = 1; }
+    else if (wall == ROOM_WALL_S) { pt = vec3_make(r.cx, r.floor_y, r.cz + r.hd); n = vec3_make(0.0f,0.0f,-1.0f); runx = 1; }
+    else if (wall == ROOM_WALL_E) { pt = vec3_make(r.cx + r.hw, r.floor_y, r.cz); n = vec3_make(-1.0f,0.0f,0.0f); runx = 0; }
+    else                          { pt = vec3_make(r.cx - r.hw, r.floor_y, r.cz); n = vec3_make( 1.0f,0.0f,0.0f); runx = 0; }
+    if (!ray_vs_plane(ray, pt, n, &tt) || tt <= 0.05f) return;
+    hit = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+    run = runx ? (hit.x - r.cx) : (hit.z - r.cz);
+    cy  = hit.y;
+    wall_clamp_run_cy(m, w_half, h_half, &run, &cy);
+    if (runx) { center->x = r.cx + run; center->z = pt.z; }
+    else      { center->z = r.cz + run; center->x = pt.x; }
+    center->x += n.x * (t * 0.5f);              /* keep the back flush, proud by t/2 */
+    center->z += n.z * (t * 0.5f);
+    center->y  = cy;
+}
+
 /* a note's body text size in metres-per-line; absent meta => the default,
    clamped to the editable range. */
 static float note_text_size(Scene *s, sol_u32 h) {
     const char *v = scene_meta_get(s, h, "text_size");
-    float ts = v ? (float)atof(v) : 0.028f;
+    float ts = v ? (float)atof(v) : 0.119f;   /* new-note default: 60% toward the max */
     if (ts < 0.015f) ts = 0.015f;
     if (ts > 0.180f) ts = 0.180f;
     return ts;
@@ -8644,7 +8732,10 @@ static void carry_update(AppState *st) {
             if (descend_wall_mount(r, ray, ceil_y, pw * 0.5f, ph * 0.5f, pt,
                                    &wall, &center)) {
                 static const float wyaw[4] = { 0.0f, -90.0f, 180.0f, 90.0f };
-                vec3 P = vec3_make(center.x, center.y - ph * 0.5f, center.z);
+                vec3 P;
+                wall_mount_gable(&st->scene, room, wall, ray,
+                                 pw * 0.5f, ph * 0.5f, pt, &center);
+                P = vec3_make(center.x, center.y - ph * 0.5f, center.z);
                 st->picture_aim    = 1;
                 st->picture_target = room;
                 st->picture_rot    = quat_from_axis_angle(vec3_make(0.0f,1.0f,0.0f),
@@ -8684,7 +8775,10 @@ static void carry_update(AppState *st) {
             if (descend_wall_mount(r, ray, r.floor_y + rh, bw * 0.5f, bh * 0.5f, bt,
                                    &wall, &center)) {
                 static const float wall_yaw[4] = { 0.0f, -90.0f, 180.0f, 90.0f };
-                vec3 P = vec3_make(center.x, center.y - bh * 0.5f, center.z);
+                vec3 P;
+                wall_mount_gable(&st->scene, room, wall, ray,
+                                 bw * 0.5f, bh * 0.5f, bt, &center);
+                P = vec3_make(center.x, center.y - bh * 0.5f, center.z);
                 st->file_aim    = SOL_TRUE;
                 st->file_target = room;
                 st->file_rot    = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
@@ -9419,8 +9513,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 float yaw = board_yaw(&st->scene, st->move_board);
                 vec3  n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
                 vec3  anchor = object_world_pos(&st->scene, st->move_board);
-                float pw  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "w");
-                float ph  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "h");
+                const char *mr = o->mesh_ref ? o->mesh_ref : "picture";
+                float pw  = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "w");
+                float ph  = mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "h");
                 float tt;
                 ray.dir = vec3_normalize(ray.dir);
                 if (ray_vs_plane(ray, anchor, n, &tt) && tt > 0.0f) {
@@ -9440,25 +9535,21 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                         if (lp.y > bh - ph)   lp.y = bh - ph;
                         o->pos = lp;
                     } else {
-                        /* on a room wall: slide along u + y, clamp, keep proud (t/2) */
+                        /* on a room wall: slide along u + y, clamp to the wall +
+                           gable, keep proud (t/2) */
                         RoomRect r  = editor_room_rect(&st->scene, st->resize_room);
+                        float ih    = room_interior_height(&st->scene, st->resize_room);
                         float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
-                        float runH  = (n.z * n.z > 0.25f) ? r.hw : r.hd;
-                        float ceil_y= r.floor_y + room_interior_height(&st->scene, st->resize_room);
+                        WallMount m = wall_gable_geom(r, ih, (n.x * n.x > 0.25f));
                         vec3  wallc = vec3_sub(vec3_make(r.cx, P.y, r.cz), vec3_scale(n, perpH));
                         float noff  = vec3_dot(vec3_sub(P, wallc), n);   /* the proud t/2 */
-                        float du    = vec3_dot(vec3_sub(P, wallc), st->resize_u);
-                        float lim   = runH - pw * 0.5f;
-                        float py    = P.y;
+                        float run   = vec3_dot(vec3_sub(P, wallc), st->resize_u);
+                        float cy    = P.y + ph * 0.5f;                   /* origin is bottom-centre */
                         vec3  np;
-                        if (lim < 0.0f) lim = 0.0f;
-                        if (du >  lim) du =  lim;
-                        if (du < -lim) du = -lim;
-                        if (py < r.floor_y)   py = r.floor_y;
-                        if (py > ceil_y - ph) py = ceil_y - ph;
-                        np.x = wallc.x + st->resize_u.x * du + n.x * noff;
-                        np.y = py;
-                        np.z = wallc.z + st->resize_u.z * du + n.z * noff;
+                        wall_clamp_run_cy(m, pw * 0.5f, ph * 0.5f, &run, &cy);
+                        np.x = wallc.x + st->resize_u.x * run + n.x * noff;
+                        np.y = cy - ph * 0.5f;
+                        np.z = wallc.z + st->resize_u.z * run + n.z * noff;
                         o->pos = scene_world_to_local(&st->scene, o->parent, np);
                     }
                 }
@@ -9523,9 +9614,11 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 float    tt;
                 if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
                     vec3  hit   = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
+                    float ih    = room_interior_height(&st->scene, st->resize_room);
                     float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
                     float runH  = (n.z * n.z > 0.25f) ? r.hw : r.hd;
-                    float ceil_y= r.floor_y + room_interior_height(&st->scene, st->resize_room);
+                    WallMount m = wall_gable_geom(r, ih, (n.x * n.x > 0.25f));
+                    float topcap= m.is_gable ? m.apex_y : r.floor_y + ih;
                     vec3  wallc = vec3_sub(vec3_make(r.cx, hit.y, r.cz), vec3_scale(n, perpH));
                     float du    = vec3_dot(vec3_sub(hit, wallc), st->resize_u);
                     float hy    = hit.y;
@@ -9535,8 +9628,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     sol_bool keyed;
                     if (du >  runH) du =  runH;          /* clamp along the wall */
                     if (du < -runH) du = -runH;
-                    if (hy < r.floor_y) hy = r.floor_y;  /* clamp floor..ceil */
-                    if (hy > ceil_y)    hy = ceil_y;
+                    if (hy < r.floor_y) hy = r.floor_y;  /* clamp floor..apex (gable) */
+                    if (hy > topcap)    hy = topcap;
                     dragged   = vec3_add(vec3_make(wallc.x, hy, wallc.z),
                                          vec3_scale(st->resize_u, du));
                     {   /* pictures lock to their image aspect; whiteboards stay free */
