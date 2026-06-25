@@ -32,9 +32,39 @@ sol_bool scene_object_stowed(Scene *s, sol_u32 handle) {
     return SOL_FALSE;
 }
 
+/* meta lookup straight off a live object pointer — avoids scene_get's
+   linear scan when the caller already holds the SceneObject*. */
+static const char *obj_meta(const SceneObject *o, const char *key) {
+    sol_u32 i;
+    for (i = 0; i < o->meta_count; i++)
+        if (strcmp(o->meta[i].key, key) == 0) return o->meta[i].value;
+    return (const char *)0;
+}
+
+/* A board-child is "paged out" (hidden) when its page tag differs from the
+   board's active page. No deep walk: we inspect only the DIRECT parent, and
+   read both pages straight off the live SceneObject* pointers (so the only
+   linear scan is the one scene_get the handle-only signature forces). */
+static sol_bool scene_object_paged_out(Scene *s, sol_u32 handle) {
+    SceneObject *o   = scene_get(s, handle);
+    SceneObject *par;
+    const char  *opage, *bpage;
+    if (!o || o->parent == 0) return SOL_FALSE;
+    par = scene_get(s, o->parent);
+    if (!par || !par->mesh_ref || strcmp(par->mesh_ref, "board") != 0)
+        return SOL_FALSE;
+    opage = obj_meta(o, "page");
+    if (!opage) opage = "/";
+    bpage = obj_meta(par, "active_page");
+    if (!bpage) bpage = "/";
+    return (sol_bool)(strcmp(opage, bpage) != 0);
+}
+
 sol_bool scene_object_active(Scene *s, sol_u32 handle) {
-    if (scene_object_stowed(s, handle)) return SOL_FALSE;   /* in the bag */
-    if (s->active_ws[0] == '\0') return SOL_TRUE;     /* unfiltered */
+    if (scene_object_stowed(s, handle)) return SOL_FALSE;          /* in the bag */
+    /* page gate: only DIRECT board-children are filtered (grandchildren are not) */
+    if (scene_object_paged_out(s, handle)) return SOL_FALSE;       /* wrong board page */
+    if (s->active_ws[0] == '\0') return SOL_TRUE;                  /* unfiltered */
     return (sol_bool)(strcmp(workspace_of(s, handle), s->active_ws) == 0);
 }
 

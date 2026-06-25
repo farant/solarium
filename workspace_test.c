@@ -160,6 +160,67 @@ int main(void) {
         CHECK(scene_object_active(&s, room) == SOL_TRUE);
         scene_free(&s);
     }
+    /* page gate: board-child whose page != board's active_page is hidden */
+    {
+        Scene   s;
+        sol_u32 board, card;
+        Mesh    empty;
+        vec3    z   = vec3_make(0.0f, 0.0f, 0.0f);
+        quat    q   = quat_identity();
+        vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+        memset(&empty, 0, sizeof empty);
+        scene_init(&s);
+        board = scene_add(&s, 0, empty, z, q, one);
+        scene_mesh_ref_set(&s, board, "board");
+        card  = scene_add(&s, board, empty, z, q, one);
+        scene_meta_set(&s, card, "page", "/chapter");
+        /* board active_page defaults to "/" -> card is paged out (hidden) */
+        CHECK(scene_object_active(&s, card) == SOL_FALSE);
+        scene_meta_set(&s, board, "active_page", "/chapter");
+        CHECK(scene_object_active(&s, card) == SOL_TRUE);
+        scene_meta_set(&s, board, "active_page", "/");
+        CHECK(scene_object_active(&s, card) == SOL_FALSE);
+        /* a card with page "/" is shown when board active_page is "/" */
+        scene_meta_set(&s, card, "page", "/");
+        CHECK(scene_object_active(&s, card) == SOL_TRUE);
+        scene_free(&s);
+    }
+    /* page gate early-out: a child under a NON-board parent is never paged out */
+    {
+        Scene   s;
+        sol_u32 shelf, child;
+        Mesh    empty;
+        vec3    z   = vec3_make(0.0f, 0.0f, 0.0f);
+        quat    q   = quat_identity();
+        vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+        memset(&empty, 0, sizeof empty);
+        scene_init(&s);
+        shelf = scene_add(&s, 0, empty, z, q, one);
+        scene_mesh_ref_set(&s, shelf, "shelf");
+        scene_meta_set(&s, shelf, "active_page", "/chapter");   /* should be ignored */
+        child = scene_add(&s, shelf, empty, z, q, one);
+        scene_meta_set(&s, child, "page", "/somewhere");        /* should be ignored */
+        CHECK(scene_object_active(&s, child) == SOL_TRUE);      /* parent is not a board */
+        scene_free(&s);
+    }
+    /* page gate page-0 contract: an UNTAGGED card defaults to "/" and is hidden
+       when the board is off-root */
+    {
+        Scene   s;
+        sol_u32 board, card;
+        Mesh    empty;
+        vec3    z   = vec3_make(0.0f, 0.0f, 0.0f);
+        quat    q   = quat_identity();
+        vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+        memset(&empty, 0, sizeof empty);
+        scene_init(&s);
+        board = scene_add(&s, 0, empty, z, q, one);
+        scene_mesh_ref_set(&s, board, "board");
+        scene_meta_set(&s, board, "active_page", "/chapter");
+        card  = scene_add(&s, board, empty, z, q, one);         /* no "page" meta */
+        CHECK(scene_object_active(&s, card) == SOL_FALSE);      /* "/" != "/chapter" */
+        scene_free(&s);
+    }
     if (fails == 0) printf("workspace_test: OK\n");
     return fails ? 1 : 0;
 }
