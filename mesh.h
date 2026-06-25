@@ -117,6 +117,12 @@ void    make_book_open_cover(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
 void    make_book_open_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
                              sol_f32 board, sol_f32 sq);
 
+/* A closed book seen cover-out, pinned to a board like a thick card:
+   width along X (centered -w/2..w/2), height along Y (bottom-origin 0..h),
+   depth along Z (0..d, +Z out of the board face). The big cover faces +Z;
+   the spine (left edge) wears `bands` raised cords. One mesh, one material. */
+void make_folderbook(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 d, int bands);
+
 /* Terrain (item 10): a floating plot — seeded-fBm heightfield top, masked
    to a ZERO RIM at the border (an island, not a world), over a skirt and
    base slab. Centered: local x in [-w/2,w/2], z in [-d/2,d/2]. */

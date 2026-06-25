@@ -859,6 +859,28 @@ void make_book_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
     box_minmax(b, 0.0f, w - sq, board, t - board, -(hh - sq), hh - sq);
 }
 
+void make_folderbook(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 d, int bands) {
+    sol_f32 hw    = w * 0.5f;
+    sol_f32 board = d * 0.18f;      /* cover-board thickness in z */
+    sol_f32 inset = h * 0.05f;      /* page block inset from top/bottom/fore-edge */
+    sol_f32 lip   = w * 0.03f;      /* covers overhang the leaves at the fore-edge */
+    int     k;
+    if (board < 1e-4f) board = 1e-4f;
+    /* the leaf block: flush at the spine (left), inset elsewhere */
+    box_minmax(b, -hw + board, hw - lip, inset, h - inset, board, d - board);
+    /* back + front cover boards (full footprint) */
+    box_minmax(b, -hw, hw, 0.0f, h, 0.0f, board);
+    box_minmax(b, -hw, hw, 0.0f, h, d - board, d);
+    /* spine slab closing the left edge across the full depth */
+    box_minmax(b, -hw, -hw + board, 0.0f, h, 0.0f, d);
+    /* raised bands: thin cords proud of the spine */
+    for (k = 1; k <= bands; k++) {
+        sol_f32 yc = h * (sol_f32)k / (sol_f32)(bands + 1);
+        sol_f32 bw = h * 0.020f;
+        box_minmax(b, -hw - board * 0.5f, -hw, yc - bw, yc + bw, 0.0f, d);
+    }
+}
+
 /* ---- the OPEN codex (the reader's book) ----
    Frame: gutter (the sewn fold) at x=0, the spread spans -w..+w, y up,
    z +-h/2. The boards lie flat as one slab; each page fan rises out of
@@ -1020,6 +1042,9 @@ static void emit_book_open_cover(MeshBuilder *b, const float *p) {
 static void emit_book_open_block(MeshBuilder *b, const float *p) {
     make_book_open_block(b, p[0], p[1], p[2], p[3], p[4]);
 }
+static void emit_folderbook(MeshBuilder *b, const float *p) {
+    make_folderbook(b, p[0], p[1], p[2], (int)(p[3] + 0.5f));
+}
 static void emit_terrain(MeshBuilder *b, const float *p) {
     make_terrain(b, p[0], p[1], (int)(p[2] + 0.5f), p[3], (unsigned)p[4]);
 }
@@ -1176,6 +1201,8 @@ static const MeshRefEntry REGISTRY[] = {
       { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f }, emit_book_open_cover },
     { "book_open_block", 5, { "w", "h", "t", "board", "sq" },
       { 0.40f, 0.56f, 0.10f, 0.014f, 0.008f }, emit_book_open_block },
+    { "folderbook", 4, { "w", "h", "d", "bands" },
+      { 0.14f, 0.20f, 0.05f, 4.0f }, emit_folderbook },
     /* terrain (item 10): a floating plot — the SEED is its identity, so a
        minted island keeps its hills forever (the codex pattern at
        landscape scale) */
