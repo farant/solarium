@@ -14037,6 +14037,44 @@ static void render(AppState *state) {
         }
     }
 
+    /* Portal Material: the energy pane — one shared unit quad, drawn per
+       active portal scaled to its opening, with the procedural swirl shader
+       (uTime-animated). Opaque, in the HDR pass so it blooms. */
+    if (state->portal_pipeline.id) {
+        sol_u32 pi;
+        if (state->gate_pane.index_count == 0) {          /* lazy-build the quad */
+            MeshBuilder mb;
+            mb_init(&mb);
+            make_page(&mb, 1.0f, 1.0f);                   /* unit XY quad, 0..1 UV */
+            state->gate_pane = mesh_from_builder(&mb);
+            mb_free(&mb);
+        }
+        rhi_set_pipeline(state->portal_pipeline);
+        rhi_set_uniform_mat4 ("uView", view.m);
+        rhi_set_uniform_mat4 ("uProj", proj.m);
+        rhi_set_uniform_float("uTime", (float)glfwGetTime());
+        rhi_set_uniform_vec3 ("uPortalColor", 0.20f, 0.45f, 0.95f);
+        for (pi = 0; pi < state->scene.count; pi++) {
+            const SceneObject *o = &state->scene.objects[pi];
+            float w, h, pw, oh;
+            mat4  model;
+            if (o->kind != KIND_PORTAL) continue;
+            if (!scene_object_active(&state->scene, o->handle)) continue;  /* workspace filter */
+            if (vis && !vis[o->handle]) continue;                          /* frustum cull */
+            w  = mesh_ref_param("gate", o->mesh_params, o->mesh_param_count, "w");
+            h  = mesh_ref_param("gate", o->mesh_params, o->mesh_param_count, "h");
+            pw = mesh_ref_param("gate", o->mesh_params, o->mesh_param_count, "post");
+            oh = h - pw;                                   /* opening height */
+            model = mat4_mul(scene_world_matrix(&state->scene, o),
+                      mat4_mul(mat4_translate(vec3_make(0.0f, oh * 0.5f, 0.0f)),
+                               mat4_scale(vec3_make(w, oh, 1.0f))));
+            rhi_set_uniform_mat4("uModel", model.m);
+            rhi_bind_vertex_buffer(state->gate_pane.vbuffer);
+            rhi_bind_index_buffer (state->gate_pane.ibuffer);
+            rhi_draw_indexed(0, state->gate_pane.index_count);
+        }
+    }
+
     /* particles (P4 item 7): LAST in the HDR pass — additive over whatever
        the frame built, depth-tested against it, writing no depth of their
        own. The whole pool is one instanced draw; the fill is arithmetic
