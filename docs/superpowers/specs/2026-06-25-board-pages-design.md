@@ -133,8 +133,10 @@ Boards have a handful of children, so the scan is cheap and called only on deman
 
 - `d` (edge-detected; movement is frozen in board view so the WASD `D` binding is inert
   here) opens the existing text-input modal, prompt shown with a leading `/`.
-- **Slugify** the submitted name: lowercase; trim; collapse whitespace runs to a single
-  `-`; ensure exactly one leading `/`. Empty result ⇒ cancel. `target == active_page`
+- **Slugify** the submitted name: lowercase; map every maximal run of non-`[a-z0-9]`
+  characters (spaces *and* punctuation, including any typed `/`) to a single `-`; trim
+  leading/trailing `-`; prepend exactly one leading `/`. So `/Chapter 1: Notes!` →
+  `/chapter-1-notes`. Empty result (`/` only) ⇒ cancel. `target == active_page`
   (self-link) ⇒ ignore.
 - **Resolve target** against `board_pages`: existing ⇒ *link to existing*; new ⇒ new page.
 - **Forward folder** on the current page: `scene_add(parent=board)`, `KIND_PLAIN`,
@@ -241,8 +243,8 @@ an explicit order when present.
 - **Build gauntlet (all three, every task):** `./build.sh c89check` (strict
   `-std=c89 -pedantic-errors`), `./build.sh` (debug), `./build.sh metal`.
 - **Pure-logic unit coverage** where a `*_test` harness fits: slugify rules
-  (lowercase / space→`-` / single leading `/` / empty), `board_pages` sort & dedupe,
-  the idempotent-backlink check.
+  (lowercase / non-`[a-z0-9]` runs → single `-` / trim / single leading `/` / empty),
+  `board_pages` sort & dedupe, the idempotent-backlink check.
 - **Human live-verify (board view):**
   - `d` → name a folder → a randomized book appears at the cursor with its `/path` label;
     a backlink folder appears on the new page.
