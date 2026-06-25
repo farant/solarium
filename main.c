@@ -5129,9 +5129,10 @@ static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
     float        t;
 
     if (!ho) return;
-    if (ho->kind != KIND_PLAIN) {
-        target = hit;       /* cards (item 6) move INDIVIDUALLY, though parented
-                               to a room or a board */
+    if (ho->kind != KIND_PLAIN ||
+        (ho->mesh_ref && strcmp(ho->mesh_ref, "folderbook") == 0)) {
+        target = hit;       /* cards (item 6) AND folder-link books move
+                               INDIVIDUALLY, though parented to a room or board */
     } else {
         if (object_is_arrow(&st->scene, hit)) return;   /* derived geometry: an
                                                            arrow follows its cards,
