@@ -7561,16 +7561,26 @@ static sol_bool object_is_folder(Scene *s, sol_u32 h) {
    small radius; 0 if none. Used by the drag-to-file drop test. */
 static sol_u32 folder_at_board_point(AppState *st, sol_u32 board, vec3 bl) {
     sol_u32 i, best = 0;
-    float   bestd = 0.10f * 0.10f;   /* ~10 cm radius (board-local, squared) */
+    float   bestd = 1e30f;
     for (i = 0; i < st->scene.count; i++) {
         SceneObject *o = &st->scene.objects[i];
-        float dx, dy, dd;
+        float fw, fh, cx, cy, dx, dy, mx, my, dd;
         if (o->parent != board) continue;
         if (!object_is_folder(&st->scene, o->handle)) continue;
         if (!scene_object_active(&st->scene, o->handle)) continue;  /* on this page */
-        dx = o->pos.x - bl.x;
-        dy = o->pos.y - bl.y;
-        dd = dx * dx + dy * dy;
+        /* the book footprint: x is centered on pos.x, y spans pos.y..pos.y+h
+           (bottom-origin mesh). Test against its visual CENTER + a small margin
+           so the whole book is a drop target (and it scales with the book). */
+        fw = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "w");
+        fh = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "h");
+        cx = o->pos.x;
+        cy = o->pos.y + fh * 0.5f;
+        dx = bl.x - cx;
+        dy = bl.y - cy;
+        mx = fw * 0.5f + 0.04f;
+        my = fh * 0.5f + 0.04f;
+        if (dx < -mx || dx > mx || dy < -my || dy > my) continue;  /* outside the book */
+        dd = dx * dx + dy * dy;                 /* nearest center among overlaps */
         if (dd < bestd) { bestd = dd; best = o->handle; }
     }
     return best;
@@ -7653,9 +7663,9 @@ static sol_u32 add_folder(AppState *st, sol_u32 board, const char *page,
     sol_u32      h;
     SceneObject *o;
     if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
-    p[0] = mint_range(0.11f, 0.16f);             /* w */
-    p[1] = mint_range(0.17f, 0.26f);             /* h */
-    p[2] = mint_range(0.04f, 0.07f);             /* d */
+    p[0] = mint_range(0.33f, 0.48f);             /* w (3x scale) */
+    p[1] = mint_range(0.51f, 0.78f);             /* h (3x scale) */
+    p[2] = mint_range(0.12f, 0.21f);             /* d (3x scale) */
     p[3] = (float)(int)mint_range(3.0f, 5.99f);  /* bands */
     leather = (int)mint_range(0.0f, 2.99f);
     memset(&empty, 0, sizeof empty);
@@ -10286,7 +10296,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     /* only freely-owned cards seek boards: a FILE/FOLDER card
                        is the mirror's record and stays in its room (§1.3) —
                        its drop pins an ALIAS instead (see release below) */
-                    if (o->kind == KIND_ALIAS || o->kind == KIND_NOTE)
+                    if (o->kind == KIND_ALIAS || o->kind == KIND_NOTE ||
+                        object_is_folder(&st->scene, st->drag_handle))
                         board = board_under_ray(st, r, &blocal);
                     if (board != 0) {                  /* ---- board mode ---- */
                         if (st->drag_board != board) { /* entering / switching */
@@ -14350,14 +14361,14 @@ static void render(AppState *state) {
                 lnk = scene_meta_get(&state->scene, o->handle, "link");
                 if (!lnk || !lnk[0]) continue;
                 fh  = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "h");
-                lpx = 0.045f / lh;                       /* ~4.5 cm letters */
+                lpx = 0.135f / lh;                       /* ~13.5 cm letters (3x) */
                 text_measure(uf, lnk, 1.0f, &nw, (float *)0);
                 x0  = -nw * lpx * 0.5f;
                 m   = mat4_mul(scene_world_matrix(&state->scene, o),
                                mat4_translate(vec3_make(0.0f,
                                    fh + 2.0f * lpx * lh, 0.06f)));
                 wtext_block(uf, vp, m, lnk, x0, 0.0f, lpx, 0.0f,
-                            0.225f, 0.325f, 0.5f);       /* deep blue */
+                            0.05f, 0.05f, 0.06f);        /* near-black */
             }
         }
 
