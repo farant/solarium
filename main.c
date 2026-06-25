@@ -7557,6 +7557,25 @@ static sol_bool object_is_folder(Scene *s, sol_u32 h) {
                ? SOL_TRUE : SOL_FALSE;
 }
 
+/* The folder pinned on `board` nearest board-local point `bl`, within a
+   small radius; 0 if none. Used by the drag-to-file drop test. */
+static sol_u32 folder_at_board_point(AppState *st, sol_u32 board, vec3 bl) {
+    sol_u32 i, best = 0;
+    float   bestd = 0.10f * 0.10f;   /* ~10 cm radius (board-local, squared) */
+    for (i = 0; i < st->scene.count; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        float dx, dy, dd;
+        if (o->parent != board) continue;
+        if (!object_is_folder(&st->scene, o->handle)) continue;
+        if (!scene_object_active(&st->scene, o->handle)) continue;  /* on this page */
+        dx = o->pos.x - bl.x;
+        dy = o->pos.y - bl.y;
+        dd = dx * dx + dy * dy;
+        if (dd < bestd) { bestd = dd; best = o->handle; }
+    }
+    return best;
+}
+
 /* Gather the board's navigable page list (sorted, deduped, '/' + active
    always present) into out[cap][PAGE_SLUG_CAP]. Returns the count. */
 static int board_pages(AppState *st, sol_u32 board,
@@ -8932,6 +8951,7 @@ static void board_view_exit(AppState *st) {
     st->bv_t   = 0.0f;
     st->bv_dir = -1.0f;
     st->board_view = 0;
+    st->drop_target_handle = 0;      /* drop no stale drag-to-file target (Task 8) */
 }
 
 /* Advance the board-view camera glide (runs AFTER camera_update so it overrides
@@ -10284,8 +10304,12 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                                st->drag_board_oy);
                         st->drag_moved = SOL_TRUE;     /* a reparent is a real move */
                         arrows_rebuild(st);            /* its arrows follow live */
+                        st->drop_target_handle =
+                            (o->kind == KIND_NOTE)
+                                ? folder_at_board_point(st, board, blocal) : 0;
                     } else {                           /* ---- ground mode ---- */
                         float t;
+                        st->drop_target_handle = 0;
                         if (st->drag_board != 0) {     /* leaving a board: step off;
                                                           the floor write-back below
                                                           lands it under the cursor
@@ -10410,6 +10434,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
             st->drag_handle = 0;
             st->drag_moved  = SOL_FALSE;
+            st->drop_target_handle = 0;
         }
         }                                               /* ---- end editor else ---- */
         st->lmb_was_down = lmb;
@@ -13579,6 +13604,9 @@ static void render(AppState *state) {
         model = scene_world_matrix(&state->scene, o);
         hl    = (sel_root != 0 && selection_root(&state->scene, o->handle) == sel_root)
               ? 1.0f : 0.0f;                       /* light the whole selected group */
+        if (state->drop_target_handle != 0 &&
+            o->handle == state->drop_target_handle)
+            hl = 1.0f;                            /* folder under a dragged card */
         state->terrain_blend = (o->mesh_ref &&
                                 strcmp(o->mesh_ref, "terrain") == 0)
                                    ? SOL_TRUE : SOL_FALSE;
