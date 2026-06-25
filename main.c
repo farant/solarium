@@ -2735,6 +2735,7 @@ typedef struct AppState {
     vec3     bv_return_pos;       /* pose to restore on exit (where you stood)    */
     float    bv_return_yaw, bv_return_pitch;
     int      hover_corner;        /* resize-corner the pointer is over; -1 = none */
+    int      resize_corner;       /* corner grabbed for the active resize (stays lit) */
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -8444,6 +8445,7 @@ static int resize_corner_pick(AppState *st, GLFWwindow *w) {
     st->resize_anchor = cor[(best + 2) % 4];   /* the opposite corner */
     st->resize_u      = u;
     st->resize_room   = o ? o->parent : 0;
+    st->resize_corner = best;                  /* grabbed corner: stays lit while dragging */
     return 1;
 }
 
@@ -9950,12 +9952,31 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->lmb_was_down = lmb;
     }
 
-    /* hover highlight: which resize corner (if any) the pointer is over now —
-       the selected board/note shows blue on that corner so the grab reads. */
-    if (st->selected_handle != 0 && st->resize_board == 0 &&
-        (board_is_mounted(&st->scene, st->selected_handle) ||
-         note_resizable(&st->scene, st->selected_handle)))
-        st->hover_corner = resize_corner_at(st, w, (vec3 *)0, (vec3 *)0);
+    /* hover highlight: the resize corner the pointer is over goes blue so the
+       grab reads. While dragging, the grabbed corner stays lit. When NOT
+       dragging, it lights only if the pointer is actually over the selected
+       card (a corner's grab radius spills past the card edge, but a click out
+       there re-picks/deselects instead of resizing — so it must not read hot). */
+    if (st->resize_board != 0) {
+        st->hover_corner = st->resize_corner;
+    } else if (st->selected_handle != 0 &&
+               (board_is_mounted(&st->scene, st->selected_handle) ||
+                note_resizable(&st->scene, st->selected_handle))) {
+        int c = resize_corner_at(st, w, (vec3 *)0, (vec3 *)0);
+        if (c >= 0) {
+            float   nx = 0.0f, ny = 0.0f, pt;
+            if (st->board_view != 0) {                 /* cursor pick (else crosshair) */
+                int ww2, wh2;
+                glfwGetWindowSize(w, &ww2, &wh2);
+                if (ww2 > 0 && wh2 > 0) {
+                    nx = 2.0f * (float)mx / (float)ww2 - 1.0f;
+                    ny = 1.0f - 2.0f * (float)my / (float)wh2;
+                }
+            }
+            if (pick_at(st, w, nx, ny, &pt) == st->selected_handle)
+                st->hover_corner = c;
+        }
+    }
 
     /* Registered discrete commands: poll each hotkey, edge-trigger, honour the
        precondition. The palette dispatches these same run()s. */
