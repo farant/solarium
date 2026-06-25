@@ -7576,6 +7576,26 @@ static int board_pages(AppState *st, sol_u32 board,
     return boardpage_collect(raw, n, active, out, cap);
 }
 
+/* Step the focused board's active_page through its page list by `dir`
+   (+1 next, -1 prev), wrapping. '/' is always reachable. */
+static void cycle_page(AppState *st, int dir) {
+    sol_u32     board = st->board_view;
+    char        pages[BOARD_PAGE_MAX][PAGE_SLUG_CAP];
+    int         np, i, cur, ni;
+    const char *active;
+    cur = 0;
+    if (board == 0) return;
+    np = board_pages(st, board, pages, BOARD_PAGE_MAX);
+    if (np <= 1) return;
+    active = scene_meta_get(&st->scene, board, "active_page");
+    if (!active) active = "/";
+    for (i = 0; i < np; i++)
+        if (strcmp(pages[i], active) == 0) { cur = i; break; }
+    ni = (cur + dir + np) % np;
+    scene_meta_set(&st->scene, board, "active_page", pages[ni]);
+    scene_save(&st->scene, "scene.stml");
+}
+
 /* Does the target page already carry a folder linking back to `link`? */
 static sol_bool folder_backlink_exists(AppState *st, sol_u32 board,
                                        const char *page, const char *link) {
@@ -9978,9 +9998,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     st->last_press_x = mx; st->last_press_y = my;
                     if (is_dbl) st->last_press_t = 0.0;   /* consume: a 3rd click isn't a 2nd double */
                 }
-                if (is_dbl) {                           /* edit a note, or create+edit on the empty board */
+                if (is_dbl) {                           /* navigate a folder, edit a note, or create on the board */
                     SceneObject *so = scene_get(&st->scene, st->selected_handle);
-                    if (so && so->kind == KIND_NOTE) {
+                    if (so && object_is_folder(&st->scene, st->selected_handle)) {
+                        const char *link = scene_meta_get(&st->scene, so->handle, "link");
+                        if (link && link[0]) {
+                            scene_meta_set(&st->scene, st->board_view, "active_page", link);
+                            st->selected_handle = 0;
+                            scene_save(&st->scene, "scene.stml");
+                        }
+                    } else if (so && so->kind == KIND_NOTE) {
                         note_edit_begin(st, st->selected_handle);
                     } else if (st->selected_handle == 0) {
                         vec3 bl;
@@ -11028,6 +11055,21 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             palette_prompt(&st->palette, "/folder name", create_folder_from_name);
         }
         st->d_was_down = d_now;
+    }
+
+    /* Arrow LEFT/RIGHT: cycle the focused board's active page (edge-triggered,
+       no selection, no book open). The camera-look arrow handler above is already
+       gated with !bv_active so it is inert in board view — no extra guard needed. */
+    {
+        sol_bool left_now  = (sol_bool)(glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS);
+        sol_bool right_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS);
+        if (st->board_view != 0 && st->selected_handle == 0 &&
+            st->reader_state == READER_IDLE) {
+            if (right_now && !st->page_next_was) cycle_page(st, +1);
+            if (left_now  && !st->page_prev_was) cycle_page(st, -1);
+        }
+        st->page_prev_was = left_now;
+        st->page_next_was = right_now;
     }
 
     /* +/- resize the SELECTED note's body text. read_input has already returned
