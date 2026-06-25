@@ -8491,6 +8491,14 @@ static sol_bool board_is_mounted(Scene *s, sol_u32 h) {
     return (sol_bool)(par != 0 && scene_meta_get(s, par->handle, "room_type") != 0);
 }
 
+/* a "picture" parented to a whiteboard (not a wall) — resizable in board-local
+   space, the third resizable kind alongside wall-mounts and free notes. */
+static sol_bool picture_on_board(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    return (sol_bool)(o && o->mesh_ref && strcmp(o->mesh_ref, "picture") == 0 &&
+                      object_is_board(s, o->parent));
+}
+
 /* yaw of a mounted board (its facing). */
 static float board_yaw(Scene *s, sol_u32 h) {
     quat q;
@@ -9735,7 +9743,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     /* the press completed a connection — no drag */
                 } else if (st->selected_handle != 0 &&
                            (board_is_mounted(&st->scene, st->selected_handle) ||
-                            note_resizable(&st->scene, st->selected_handle)) &&
+                            note_resizable(&st->scene, st->selected_handle) ||
+                            picture_on_board(&st->scene, st->selected_handle)) &&
                            resize_corner_pick(st, w)) {
                     /* grabbed a corner handle — resize, not carry */
                 } else if (st->selected_handle != 0 &&
@@ -9857,6 +9866,50 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             } else if (st->resize_room == 0 ||
                        scene_get(&st->scene, st->resize_room) == 0) {
                 st->resize_board = 0;                   /* board/room vanished */
+            } else if (object_is_board(&st->scene, st->resize_room)) {
+                /* a picture on a whiteboard: resize on the board face,
+                   aspect-locked, board-local, clamped to the board. */
+                Ray   ray = pick_ray(st, w);
+                float yaw = board_yaw(&st->scene, st->resize_board);
+                vec3  n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+                float pt  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "t");
+                float tt;
+                if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
+                    vec3         hit = vec3_add(vec3_add(ray.origin, vec3_scale(ray.dir, tt)),
+                                                st->resize_grab);   /* no jump on grab */
+                    SceneObject *par = scene_get(&st->scene, st->resize_room);
+                    float cw  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "w");
+                    float ch  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "h");
+                    float bw  = par ? mesh_ref_param("board", par->mesh_params, par->mesh_param_count, "w") : 1.8f;
+                    float bh  = par ? mesh_ref_param("board", par->mesh_params, par->mesh_param_count, "h") : 1.2f;
+                    float aspect = (ch > 0.0f) ? cw / ch : 0.0f;
+                    vec3  origin;
+                    float nw, nh, p3[3];
+                    char  oldkey[160];
+                    sol_bool keyed;
+                    board_resize_corner(st->resize_anchor, hit, st->resize_u,
+                                        0.3f, aspect, &nw, &nh, &origin);
+                    if (nw > bw) { nw = bw; if (aspect > 0.0f) nh = nw / aspect; }  /* fit the board */
+                    if (nh > bh) { nh = bh; if (aspect > 0.0f) nw = nh * aspect; }
+                    p3[0] = nw; p3[1] = nh; p3[2] = pt;
+                    keyed = mesh_asset_key(o, oldkey);   /* registry-shared rebuild (P4 item 4) */
+                    scene_mesh_params_set(&st->scene, st->resize_board, p3, 3);
+                    if (keyed) asset_release(&g_mesh_assets, oldkey);
+                    o = scene_get(&st->scene, st->resize_board);
+                    if (o) {
+                        vec3  lp;
+                        float lx = bw * 0.5f - nw * 0.5f;
+                        memset(&o->mesh, 0, sizeof o->mesh);     /* drop the borrow */
+                        lp = scene_world_to_local(&st->scene, o->parent, origin);
+                        if (lx < 0.0f) lx = 0.0f;                /* clamp to the board face */
+                        if (lp.x >  lx) lp.x =  lx;
+                        if (lp.x < -lx) lp.x = -lx;
+                        if (lp.y < 0.0f)        lp.y = 0.0f;
+                        if (lp.y > bh - nh)     lp.y = bh - nh;
+                        o->pos = lp;
+                    }
+                    scene_resolve_meshes(&st->scene);
+                }
             } else {
                 Ray      ray = pick_ray(st, w);
                 RoomRect r   = editor_room_rect(&st->scene, st->resize_room);
@@ -10092,7 +10145,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->hover_corner = st->resize_corner;
     } else if (st->selected_handle != 0 &&
                (board_is_mounted(&st->scene, st->selected_handle) ||
-                note_resizable(&st->scene, st->selected_handle))) {
+                note_resizable(&st->scene, st->selected_handle) ||
+                picture_on_board(&st->scene, st->selected_handle))) {
         int c = resize_corner_at(st, w, (vec3 *)0, (vec3 *)0);
         if (c >= 0) {
             float   nx = 0.0f, ny = 0.0f, pt;
@@ -13955,7 +14009,8 @@ static void render(AppState *state) {
            shows a small glowing quad at each of its 4 corners. */
         if (state->selected_handle != 0 &&
             (board_is_mounted(&state->scene, state->selected_handle) ||
-             note_resizable(&state->scene, state->selected_handle))) {
+             note_resizable(&state->scene, state->selected_handle) ||
+             picture_on_board(&state->scene, state->selected_handle))) {
             vec3     cor[4], u, n;
             float    yaw = board_yaw(&state->scene, state->selected_handle);
             Material hm  = material_default();
