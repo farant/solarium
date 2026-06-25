@@ -3024,7 +3024,7 @@ static Ray pick_ray(AppState *st, GLFWwindow *w) {
     double mx, my;
     glfwGetWindowSize(w, &ww, &wh);
     aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
-    if (st->camera.mode == CAMERA_ORBIT && ww > 0 && wh > 0) {
+    if ((st->camera.mode == CAMERA_ORBIT || st->board_view != 0) && ww > 0 && wh > 0) {
         glfwGetCursorPos(w, &mx, &my);
         nx = 2.0f * (float)mx / (float)ww - 1.0f;
         ny = 1.0f - 2.0f * (float)my / (float)wh;
@@ -9585,7 +9585,18 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 reader_close(st);                       /* click-away, like blur:
                                                            this press only closes */
             } else if (fp) {
-                do_pick(st, w, 0.0f, 0.0f);             /* select on press, as before */
+                float pnx = 0.0f, pny = 0.0f;           /* crosshair by default */
+                if (st->board_view != 0) {              /* board view: pick at the cursor */
+                    int bww, bwh;
+                    glfwGetWindowSize(w, &bww, &bwh);
+                    if (bww > 0 && bwh > 0) {
+                        pnx = 2.0f * (float)mx / (float)bww - 1.0f;
+                        pny = 1.0f - 2.0f * (float)my / (float)bwh;
+                    }
+                }
+                do_pick(st, w, pnx, pny);               /* select on press */
+                if (st->board_view != 0 && st->selected_handle == st->board_view)
+                    st->selected_handle = 0;            /* clicked the board itself = deselect */
                 if (try_connect(st, st->selected_handle)) {
                     /* the press completed a connection — no drag */
                 } else if (st->selected_handle != 0 &&
