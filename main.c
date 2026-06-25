@@ -9339,10 +9339,13 @@ static void editor_delete_footprint(AppState *st, sol_u32 footprint) {
 
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
-    sol_bool tab_now, dragging, fp;
+    sol_bool tab_now, dragging, fp, bv_active;
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
+    /* board view (and its outbound glide) freezes walking and look — the camera
+       is pinned to the framed pose while you work the surface with the cursor. */
+    bv_active = (sol_bool)(st->board_view != 0 || st->bv_t < 1.0f);
 
     /* inventory: release the cursor for clicking on open, restore on close
        (edge-detect, mirroring the editor's cursor toggle). Runs every frame,
@@ -9355,6 +9358,18 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->mouse_skip = 2;
     }
     st->inv_was_open = st->inv_open;
+
+    /* board view frees the cursor for pointing at cards (mirrors inventory);
+       first-person look re-locks on exit. */
+    if (st->board_view && !st->board_view_was) {
+        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        st->mouse_skip = 2;
+    } else if (!st->board_view && st->board_view_was &&
+               !st->inv_open && !st->editor.active) {
+        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        st->mouse_skip = 2;
+    }
+    st->board_view_was = (sol_bool)(st->board_view != 0);
 
     /* the synth book frees the cursor for pointing at page widgets (mirrors the
        inventory toggle); first-person look re-locks on close. */
@@ -9440,6 +9455,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     in->right   = glfwGetKey(w, GLFW_KEY_D) == GLFW_PRESS;
     in->up      = glfwGetKey(w, GLFW_KEY_SPACE)        == GLFW_PRESS;
     in->down    = glfwGetKey(w, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS;
+    if (bv_active) {
+        in->forward = in->back = in->left = in->right = SOL_FALSE;
+        in->up = in->down = SOL_FALSE;
+    }
 
     /* keyboard look (held -> a rate -> dt-scaled). While READING, the
        arrows turn page-pairs instead (edge-triggered); the mouse still
@@ -9470,7 +9489,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }
         st->arrow_l_was = lnow;
         st->arrow_r_was = rnow;
-    } else {
+    } else if (!bv_active) {
         if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
         if (glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) in->look_dx -= look;
         if (glfwGetKey(w, GLFW_KEY_UP)    == GLFW_PRESS) in->look_dy += look;
@@ -9501,7 +9520,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     dragging = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     if (st->mouse_skip > 0) {
         st->mouse_skip--;                           /* reseed only; don't apply the delta */
-    } else if ((fp || (dragging && st->drag_handle == 0)) && !st->editor.active) {
+    } else if ((fp || (dragging && st->drag_handle == 0)) &&
+               !st->editor.active && !bv_active) {
         /* in orbit, a drag that started ON an object carries it (item 4)
            instead of rotating the camera — drag_handle gates the look */
         float dx = (float)(mx - st->mouse_last_x);
