@@ -7660,7 +7660,7 @@ static sol_u32 add_folder(AppState *st, sol_u32 board, const char *page,
     Mesh         empty;
     vec3         one = vec3_make(1.0f, 1.0f, 1.0f);
     float        p[4];
-    int          leather;
+    float        blue;
     sol_u32      h;
     SceneObject *o;
     if (g_mint_rng == 0) g_mint_rng = (unsigned)time((time_t *)0) | 1u;
@@ -7668,7 +7668,7 @@ static sol_u32 add_folder(AppState *st, sol_u32 board, const char *page,
     p[1] = mint_range(0.51f, 0.78f);             /* h (3x scale) */
     p[2] = mint_range(0.12f, 0.21f);             /* d (3x scale) */
     p[3] = (float)(int)mint_range(3.0f, 5.99f);  /* bands */
-    leather = (int)mint_range(0.0f, 2.99f);
+    blue = mint_range(0.0f, 1.0f);               /* shade: deep navy .. brighter blue */
     memset(&empty, 0, sizeof empty);
     h = scene_add(&st->scene, board, empty, vec3_make(0.0f, 0.0f, 0.0f),
                   quat_identity(), one);
@@ -7682,9 +7682,9 @@ static sol_u32 add_folder(AppState *st, sol_u32 board, const char *page,
     o = scene_get(&st->scene, h);
     if (o) {
         Material m = material_default();
-        m.base_color = (leather == 0) ? vec3_make(0.36f, 0.22f, 0.13f)
-                     : (leather == 1) ? vec3_make(0.34f, 0.12f, 0.10f)
-                                      : vec3_make(0.14f, 0.22f, 0.15f);
+        m.base_color = vec3_make(0.08f + 0.14f * blue,   /* always blue, */
+                                 0.16f + 0.22f * blue,   /* varied shade  */
+                                 0.42f + 0.34f * blue);
         m.roughness = 0.6f;
         o->material = m;
         o->pos = board_pin_pos(&st->scene, board, h, blocal,
@@ -7707,7 +7707,14 @@ static void create_folder_from_name(AppState *st, const char *typed) {
     int         i;
     sol_bool    exists = SOL_FALSE;
     if (board == 0) return;
-    if (boardpage_slugify(typed, target, sizeof target) <= 1) return;  /* '/' = cancel */
+    if (boardpage_slugify(typed, target, sizeof target) <= 1) {
+        /* slug collapsed to "/": a deliberate "/" links to the ROOT page;
+           an empty / no-slug-chars entry cancels */
+        const char *tr = typed ? typed : "";
+        while (*tr == ' ' || *tr == '\t') tr++;
+        if (tr[0] != '/') return;          /* cancel */
+        /* else target is already "/" -> fall through as a root link */
+    }
     src_raw = scene_meta_get(&st->scene, board, "active_page");
     if (!src_raw) src_raw = "/";
     /* copy src before any scene mutation: the raw pointer aliases the board's
