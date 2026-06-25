@@ -270,6 +270,39 @@ int main(void) {
         }
     }
 
+    /* camera_frame_pose: a board facing +Z parks the eye on the +Z axis, looking
+       back (-Z), pitch 0, yaw -90deg. A TALL board is framed by its height; a
+       WIDE (landscape) board is framed by its width (greater standoff wins). */
+    {
+        CameraPose p;
+        float fov = sol_radians(45.0f), aspect = 16.0f / 9.0f, margin = 1.1f;
+        float tanv = tanf(fov * 0.5f);
+        float dist_tall, dist_wide;
+
+        /* tall: half_w=0.5, half_h=1.0 -> height controls */
+        p = camera_frame_pose(vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 0.0f, 1.0f),
+                              0.5f, 1.0f, fov, aspect, margin);
+        dist_tall = (1.0f / tanv) * margin;          /* height-limited standoff */
+        printf("frame tall -> pos=(%.3f,%.3f,%.3f) yaw=%.3f pitch=%.3f\n",
+               p.pos.x, p.pos.y, p.pos.z, p.yaw, p.pitch);
+        if (!approx(p.pos.x, 0.0f) || !approx(p.pos.y, 0.0f) ||
+            fabsf(p.pos.z - dist_tall) > 0.01f) {
+            printf("FAIL: tall board framing\n"); return 1;
+        }
+        if (!approx(p.pitch, 0.0f) || !approx(p.yaw, sol_radians(-90.0f))) {
+            printf("FAIL: tall board pose orientation\n"); return 1;
+        }
+
+        /* wide: half_w=2.0, half_h=0.3 -> width controls (farther back than tall) */
+        p = camera_frame_pose(vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 0.0f, 1.0f),
+                              2.0f, 0.3f, fov, aspect, margin);
+        dist_wide = (2.0f / (tanv * aspect)) * margin;   /* width-limited standoff */
+        printf("frame wide -> pos.z=%.3f (expect %.3f)\n", p.pos.z, dist_wide);
+        if (fabsf(p.pos.z - dist_wide) > 0.01f) {
+            printf("FAIL: wide board framing (width should control)\n"); return 1;
+        }
+    }
+
     printf("camera_test: OK\n");
     return 0;
 }

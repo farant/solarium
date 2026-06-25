@@ -62,4 +62,16 @@ void camera_enter_fp(Camera *c);                    /* back to first-person walk
 void camera_focus(Camera *c, vec3 target, vec3 normal, float half_height);  /* framed head-on view */
 void camera_enter_rts(Camera *c, vec3 center, float radius);  /* angled top-down, framing a disc of `radius` about `center` */
 
+/* A camera pose without mutating live state — used by callers that want to
+   animate toward a framed view rather than snap to it. */
+typedef struct { vec3 pos; float yaw, pitch; } CameraPose;
+
+/* Frame a flat, upright surface head-on, fitting BOTH its half-width and
+   half-height into the FOV (whichever needs the greater standoff wins), scaled
+   by `margin`. `normal` points toward the viewer (the surface's front face);
+   must be non-zero. `fov` is the vertical FOV in radians; `aspect` = width/height. */
+CameraPose camera_frame_pose(vec3 center, vec3 normal,
+                             float half_w, float half_h,
+                             float fov, float aspect, float margin);
+
 #endif /* CAMERA_H */

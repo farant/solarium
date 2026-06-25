@@ -165,6 +165,23 @@ void camera_focus(Camera *c, vec3 target, vec3 normal, float half_height) {
     }
 }
 
+CameraPose camera_frame_pose(vec3 center, vec3 normal,
+                             float half_w, float half_h,
+                             float fov, float aspect, float margin) {
+    CameraPose p;
+    float tanv   = tanf(fov * 0.5f);
+    float dist_h = half_h / tanv;
+    float dist_w = half_w / (tanv * aspect);
+    float dist   = (dist_h > dist_w ? dist_h : dist_w) * margin;
+    vec3  n      = vec3_normalize(normal);
+    vec3  dir;
+    p.pos = vec3_add(center, vec3_scale(n, dist));
+    dir   = vec3_scale(n, -1.0f);                /* camera looks back at center */
+    p.pitch = asinf(dir.y);
+    p.yaw   = atan2f(dir.z, dir.x);
+    return p;
+}
+
 mat4 camera_view(const Camera *c) {
     vec3 target = vec3_add(c->pos, camera_forward(c));
     return mat4_look_at(c->pos, target, WORLD_UP);
