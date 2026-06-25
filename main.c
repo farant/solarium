@@ -8825,13 +8825,13 @@ static void note_autosize(AppState *st, sol_u32 h) {
     ts = note_text_size(&st->scene, h);
     lh = font_line_height(st->ui_font);
     px2m = (lh > 0.0f) ? ts / lh : ts;
-    usable = cw - 2.0f * 0.025f;
+    usable = cw - 3.0f * 0.025f;   /* match the render: left pad 2*0.025 (doubled) + right 0.025 */
     txt = scene_meta_get(&st->scene, h, "text");
     lines = (txt && txt[0] && usable > 0.0f)
           ? text_wrap(st->ui_font, txt, px2m, usable, wbuf, (int)sizeof wbuf)
           : 1;
     if (lines < 1) lines = 1;
-    content_h = (float)lines * ts + 2.0f * 0.025f;          /* top+bottom margins */
+    content_h = (float)lines * ts + 3.0f * 0.025f;          /* top 2*0.025 (doubled) + bottom 0.025 */
     mv = scene_meta_get(&st->scene, h, "min_h");
     min_h = mv ? (float)atof(mv) : 0.5f;                    /* default card height */
     new_h = (content_h > min_h) ? content_h : min_h;
@@ -13913,7 +13913,7 @@ static void render(AppState *state) {
                 ink_r = 0.10f; ink_g = 0.09f; ink_b = 0.08f;
             }
             margin = 0.025f;
-            usable = cw - 2.0f * margin;
+            usable = cw - 3.0f * margin;       /* left pad 2*margin (doubled), right margin */
             /* a tablet filed onto a bookshelf reads like a book SPINE: the name
                runs DOWN the visible edge (the card's -X face, turned toward you
                by the spine's +90 yaw), letters rotated to read top-to-bottom.
@@ -13957,7 +13957,7 @@ static void render(AppState *state) {
                 if (name_w * px2m > usable && name_w > 0.0f)
                     px2m = usable / name_w;                     /* shrink, don't clip */
                 wtext_block(uf, vp, face, nm,
-                            -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
+                            -cw * 0.5f + 2.0f * margin, ch - 2.0f * margin, px2m, 0.0f,
                             ink_r, ink_g, ink_b);
                 {   /* the same label on the BACK face, so the tablet names itself
                        from both sides (rotate 180 about Y so it reads, not mirrors;
@@ -13968,7 +13968,7 @@ static void render(AppState *state) {
                                      vec3_make(0.0f, 1.0f, 0.0f), sol_radians(180.0f)))),
                         mat4_translate(vec3_make(0.0f, 0.0f, ct * 0.5f + 0.0008f)));
                     wtext_block(uf, vp, back, nm,
-                                -cw * 0.5f + margin, ch - margin, px2m, 0.0f,
+                                -cw * 0.5f + 2.0f * margin, ch - 2.0f * margin, px2m, 0.0f,
                                 ink_r, ink_g, ink_b);
                 }
             }
@@ -13989,7 +13989,7 @@ static void render(AppState *state) {
                 if (txt && txt[0]) {
                     float bpx2m = note_text_size(&state->scene, o->handle) / lh;
                     wtext_block(uf, vp, face, txt,
-                                -cw * 0.5f + margin, ch - margin,
+                                -cw * 0.5f + 2.0f * margin, ch - 2.0f * margin,
                                 bpx2m, usable, ink_r, ink_g, ink_b);
                 }
             }
