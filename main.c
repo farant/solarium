@@ -2814,6 +2814,7 @@ typedef struct AppState {
        Transient UI state (never persisted). bv_t starts at 1.0 (settled). */
     sol_u32  board_view;          /* board being viewed; 0 = not in board view  */
     sol_bool board_view_was;      /* edge-detect for the cursor toggle           */
+    double   last_press_t, last_press_x, last_press_y;  /* board-view double-click detect */
     vec3     bv_from_pos,  bv_to_pos;
     float    bv_from_yaw,  bv_to_yaw;
     float    bv_from_pitch, bv_to_pitch;
@@ -4295,6 +4296,8 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define ROOF_TILE_M  2.0f        /* meters per roof texture-repeat */
 #define BOARD_VIEW_GLIDE_S  0.35f   /* seconds for the enter/exit camera glide */
 #define BOARD_VIEW_MARGIN   1.10f   /* fill the FOV to the board + a little air */
+#define BOARD_DBL_S   0.35   /* max seconds between the two clicks of a double-click */
+#define BOARD_DBL_PX  6.0    /* max cursor drift (px) between them */
 
 #define CAMPUS_SUB      72        /* campus tessellation (clamped 2..96 in make_campus) */
 #define CAMPUS_TILE_M   2.0f      /* meters per ground-texture repeat (bigger = less tiling) */
@@ -9809,6 +9812,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                                            this press only closes */
             } else if (fp) {
                 float pnx = 0.0f, pny = 0.0f;           /* crosshair by default */
+                sol_bool is_dbl = SOL_FALSE;
                 if (st->board_view != 0) {              /* board view: pick at the cursor */
                     int bww, bwh;
                     glfwGetWindowSize(w, &bww, &bwh);
@@ -9820,7 +9824,29 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 do_pick(st, w, pnx, pny);               /* select on press */
                 if (st->board_view != 0 && st->selected_handle == st->board_view)
                     st->selected_handle = 0;            /* clicked the board itself = deselect */
-                if (try_connect(st, st->selected_handle)) {
+                if (st->board_view != 0) {              /* board-view double-click detect */
+                    double now = glfwGetTime();
+                    is_dbl = (sol_bool)(now - st->last_press_t < BOARD_DBL_S &&
+                                        fabs(mx - st->last_press_x) < BOARD_DBL_PX &&
+                                        fabs(my - st->last_press_y) < BOARD_DBL_PX);
+                    st->last_press_t = now;
+                    st->last_press_x = mx; st->last_press_y = my;
+                    if (is_dbl) st->last_press_t = 0.0;   /* consume: a 3rd click isn't a 2nd double */
+                }
+                if (is_dbl) {                           /* edit a note, or create+edit on the empty board */
+                    SceneObject *so = scene_get(&st->scene, st->selected_handle);
+                    if (so && so->kind == KIND_NOTE) {
+                        note_edit_begin(st, st->selected_handle);
+                    } else if (st->selected_handle == 0) {
+                        vec3 bl;
+                        if (board_under_ray(st, pick_ray(st, w), &bl) != 0) {  /* over the board only */
+                            sol_u32 nh = spawn_note(st, w);
+                            scene_meta_set(&st->scene, nh, "text", "");        /* type into it empty */
+                            note_edit_begin(st, nh);
+                        }
+                    }
+                    /* else: double-click a non-note card -> nothing (the select stands) */
+                } else if (try_connect(st, st->selected_handle)) {
                     /* the press completed a connection — no drag */
                 } else if (st->selected_handle != 0 &&
                            (board_is_mounted(&st->scene, st->selected_handle) ||
