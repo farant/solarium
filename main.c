@@ -8425,6 +8425,9 @@ static void cmd_carry_toggle(AppState *st) {
                 scene_resolve_meshes(&st->scene);
                 apply_kind_materials(&st->scene);
                 scene_save(&st->scene, "scene.stml");
+                st->selected_handle = 0;              /* deselect: a placed item drops its
+                                                         highlight, so it reads as PLACED,
+                                                         not still being preview-hovered */
                 printf("filed onto furniture\n");
             } else {
                 vec3    w = carry_place_point(st);
