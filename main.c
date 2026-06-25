@@ -10007,43 +10007,54 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     }
                 }
                 if (o && (o->kind == KIND_FILE || o->kind == KIND_FOLDER) && o->content) {
-                    /* a mirror's record never leaves its room (§1.3: membership
-                       follows disk) — dropping it on a board snaps the record
-                       home and pins an ALIAS at the drop point instead */
+                    /* a mirror's record never leaves its room (§1.3) — dropping it
+                       on a board snaps the record home. An IMAGE drops a resizable
+                       PICTURE; any other file pins a filename ALIAS card. */
                     vec3    blocal;
                     sol_u32 board = board_under_ray(st, pick_ray(st, w), &blocal);
                     if (board != 0) {
-                        const char *cpath = o->content;     /* heap string: the
-                                                               pointer survives
-                                                               the scene_add */
-                        char        lbuf[16];
-                        const char *nm = object_label(&st->scene, st->drag_handle, lbuf);
-                        Mesh        empty;
-                        vec3        one = vec3_make(1.0f, 1.0f, 1.0f);
-                        float       ch  = mesh_ref_param("card", (const float *)0, 0, "h");
-                        sol_u32     a;
-                        o->parent = st->drag_prev_parent;   /* snap home */
+                        const char *cpath = o->content;     /* heap str survives scene_add */
+                        o->parent = st->drag_prev_parent;   /* snap the record home */
                         o->pos    = st->drag_prev_pos;
                         o->rot    = st->drag_prev_rot;
-                        memset(&empty, 0, sizeof empty);
-                        a = scene_add(&st->scene, board, empty,
-                                      vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
-                        scene_kind_set(&st->scene, a, KIND_ALIAS);
-                        scene_content_set(&st->scene, a, cpath);
-                        scene_meta_set(&st->scene, a, "name", nm);
-                        scene_mesh_ref_set(&st->scene, a, "card");
-                        {
+                        if (reader_is_image_path(cpath)) {
+                            sol_u32      a = spawn_image_picture(st, board,
+                                              vec3_make(0.0f, 0.0f, 0.0f),
+                                              quat_identity(), cpath);
                             SceneObject *ao = scene_get(&st->scene, a);
-                            if (ao) ao->pos = board_pin_pos(&st->scene, board, a,
-                                                            blocal, 0.0f, -0.5f * ch);
+                            if (ao) {
+                                float ph = mesh_ref_param("picture", ao->mesh_params,
+                                                          ao->mesh_param_count, "h");
+                                ao->pos = board_pin_pos(&st->scene, board, a,
+                                                        blocal, 0.0f, -0.5f * ph);
+                            }
+                            st->selected_handle = a;
+                            printf("dropped an image picture on the board — the record stays home\n");
+                        } else {
+                            char        lbuf[16];
+                            const char *nm = object_label(&st->scene, st->drag_handle, lbuf);
+                            Mesh        empty;
+                            vec3        one = vec3_make(1.0f, 1.0f, 1.0f);
+                            float       ch  = mesh_ref_param("card", (const float *)0, 0, "h");
+                            sol_u32     a;
+                            memset(&empty, 0, sizeof empty);
+                            a = scene_add(&st->scene, board, empty,
+                                          vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+                            scene_kind_set(&st->scene, a, KIND_ALIAS);
+                            scene_content_set(&st->scene, a, cpath);
+                            scene_meta_set(&st->scene, a, "name", nm);
+                            scene_mesh_ref_set(&st->scene, a, "card");
+                            {
+                                SceneObject *ao = scene_get(&st->scene, a);
+                                if (ao) ao->pos = board_pin_pos(&st->scene, board, a,
+                                                                blocal, 0.0f, -0.5f * ch);
+                            }
+                            scene_resolve_meshes(&st->scene);
+                            apply_kind_materials(&st->scene);
+                            st->selected_handle = a;
+                            printf("pinned alias '%s' to the board — the record stays home\n", nm);
                         }
-                        scene_resolve_meshes(&st->scene);
-                        apply_kind_materials(&st->scene);
-                        st->selected_handle = a;
-                        printf("pinned alias '%s' to the board — the record stays home\n", nm);
-                        o = scene_get(&st->scene, st->drag_handle);  /* re-fetch:
-                                                               scene_add may move
-                                                               the objects array */
+                        o = scene_get(&st->scene, st->drag_handle);  /* re-fetch after scene_add */
                     }
                 }
                 if (scene_save(&st->scene, "scene.stml"))
