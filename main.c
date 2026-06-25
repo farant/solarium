@@ -14788,9 +14788,9 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
 int main(void) {
     GLFWwindow *window;
     AppState state = {0};
+    double last;
     state.bv_t = 1.0f;   /* board-view glide starts settled (no tween at boot) */
     state.hover_corner = -1;   /* no resize-corner hovered yet */
-    double last;
 
     asset_store_init(&g_mesh_assets,    mesh_asset_destroy,   NULL);
     asset_store_init(&g_tex_assets,     tex_asset_destroy,    NULL);
