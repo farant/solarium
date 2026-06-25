@@ -2723,6 +2723,17 @@ typedef struct AppState {
     RhiTexture      inv_black_tex;   /* 1x1 black: neutral godray/bloom/depth  */
     sol_u32     move_board;        /* picture being slid along its wall; 0 = none */
     vec3        move_grab;         /* origin - cursor-hit at grab, so it tracks the cursor */
+    /* board view: frame a whiteboard head-on, cursor unlocked, to arrange cards.
+       Transient UI state (never persisted). bv_t starts at 1.0 (settled). */
+    sol_u32  board_view;          /* board being viewed; 0 = not in board view  */
+    sol_bool board_view_was;      /* edge-detect for the cursor toggle           */
+    vec3     bv_from_pos,  bv_to_pos;
+    float    bv_from_yaw,  bv_to_yaw;
+    float    bv_from_pitch, bv_to_pitch;
+    float    bv_t;                /* 0..1 eased glide progress; >=1 = settled     */
+    float    bv_dir;             /* +1 gliding to the board, -1 gliding back out  */
+    vec3     bv_return_pos;       /* pose to restore on exit (where you stood)    */
+    float    bv_return_yaw, bv_return_pitch;
     sol_u32     connect_from;      /* C armed a connection from this card; 0 = idle */
     sol_bool    c_was_down;
     sol_bool    n_was_down;        /* edge-detect spawn-note (N) */
@@ -4190,6 +4201,8 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define FRAME_BENT_SPACING 2.5f      /* meters between scissor-truss bents */
 #define FRAME_SCISSOR_FRAC 0.6f      /* lower chord meets the opposite rafter this far up */
 #define ROOF_TILE_M  2.0f        /* meters per roof texture-repeat */
+#define BOARD_VIEW_GLIDE_S  0.35f   /* seconds for the enter/exit camera glide */
+#define BOARD_VIEW_MARGIN   1.10f   /* fill the FOV to the board + a little air */
 
 #define CAMPUS_SUB      72        /* campus tessellation (clamped 2..96 in make_campus) */
 #define CAMPUS_TILE_M   2.0f      /* meters per ground-texture repeat (bigger = less tiling) */
@@ -14473,6 +14486,7 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
 int main(void) {
     GLFWwindow *window;
     AppState state = {0};
+    state.bv_t = 1.0f;   /* board-view glide starts settled (no tween at boot) */
     double last;
 
     asset_store_init(&g_mesh_assets,    mesh_asset_destroy,   NULL);
