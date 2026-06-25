@@ -9502,6 +9502,63 @@ static void editor_delete_footprint(AppState *st, sol_u32 footprint) {
     printf("deleted %s\n", is_terrain ? "an island" : "a room");
 }
 
+/* Spawn a KIND_NOTE "card": pinned to the board under the cursor, else on the
+   floor ahead. Tags the active workspace, selects it, saves. Returns the handle.
+   Shared by the N key and the board-view double-click. */
+static sol_u32 spawn_note(AppState *st, GLFWwindow *w) {
+    Mesh    empty;
+    vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+    vec3    blocal;
+    sol_u32 board, h;
+    memset(&empty, 0, sizeof empty);
+    blocal = vec3_make(0.0f, 0.0f, 0.0f);
+    board  = board_under_ray(st, pick_ray(st, w), &blocal);
+    if (board != 0) {
+        h = scene_add(&st->scene, board, empty,
+                      vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+    } else {
+        vec3  f = camera_forward(&st->camera);
+        vec3  pos;
+        float yaw;
+        f.y = 0.0f;
+        if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
+        f   = vec3_normalize(f);
+        pos = vec3_add(st->camera.pos, vec3_scale(f, 1.8f));
+        pos.y = mint_ground(st, pos);  /* bottom-origin card on YOUR ground */
+        yaw = atan2f(-f.x, -f.z);       /* facing you */
+        h = scene_add(&st->scene, 0, empty, pos,
+                      quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw), one);
+    }
+    scene_kind_set(&st->scene, h, KIND_NOTE);
+    scene_meta_set(&st->scene, h, "name", "note");
+    scene_meta_set(&st->scene, h, "workspace",
+                   st->scene.active_ws[0] ? st->scene.active_ws : "home");
+    scene_meta_set(&st->scene, h, "text", "press Enter to edit me");
+    scene_mesh_ref_set(&st->scene, h, "card");
+    {   /* notes get a roomy landscape card + a matching min height */
+        float np3[3];
+        char  mhb[16];
+        np3[0] = NOTE_CARD_W; np3[1] = NOTE_CARD_H; np3[2] = NOTE_CARD_T;
+        scene_mesh_params_set(&st->scene, h, np3, 3);
+        snprintf(mhb, sizeof mhb, "%.4f", (double)NOTE_CARD_H);
+        scene_meta_set(&st->scene, h, "min_h", mhb);
+    }
+    if (board != 0) {
+        SceneObject *no = scene_get(&st->scene, h);
+        if (no) no->pos = board_pin_pos(&st->scene, board, h,
+                                        blocal, 0.0f, -0.5f * NOTE_CARD_H);
+    }
+    scene_resolve_meshes(&st->scene);
+    apply_kind_materials(&st->scene);
+    st->selected_handle = h;
+    scene_save(&st->scene, "scene.stml");
+    printf("note #%u spawned%s\n", (unsigned)h, board ? " on the board" : "");
+    return h;
+}
+
+/* defined later (after read_input); the board-view double-click calls it */
+static void note_edit_begin(AppState *st, sol_u32 handle);
+
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
     sol_bool tab_now, dragging, fp, bv_active;
@@ -10343,59 +10400,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        Enter (with the note selected) opens it for typing. */
     {
         sol_bool n_now = glfwGetKey(w, GLFW_KEY_N) == GLFW_PRESS;
-        if (n_now && !st->n_was_down) {
-            Mesh    empty;
-            vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
-            vec3    blocal;
-            sol_u32 board, h;
-            memset(&empty, 0, sizeof empty);
-            blocal = vec3_make(0.0f, 0.0f, 0.0f);
-            board  = board_under_ray(st, pick_ray(st, w), &blocal);
-            if (board != 0) {
-                h = scene_add(&st->scene, board, empty,
-                              vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
-            } else {
-                vec3  f = camera_forward(&st->camera);
-                vec3  pos;
-                float yaw;
-                f.y = 0.0f;
-                if (vec3_dot(f, f) < 1e-6f) f = vec3_make(0.0f, 0.0f, -1.0f);
-                f   = vec3_normalize(f);
-                pos = vec3_add(st->camera.pos, vec3_scale(f, 1.8f));
-                pos.y = mint_ground(st, pos);  /* bottom-origin card on
-                                                  YOUR ground, not the void's */
-                yaw = atan2f(-f.x, -f.z);      /* facing you */
-                h = scene_add(&st->scene, 0, empty, pos,
-                              quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), yaw), one);
-            }
-            scene_kind_set(&st->scene, h, KIND_NOTE);
-            scene_meta_set(&st->scene, h, "name", "note");
-            scene_meta_set(&st->scene, h, "workspace",
-                           st->scene.active_ws[0] ? st->scene.active_ws : "home");
-            scene_meta_set(&st->scene, h, "text",
-                           "press Enter to edit me");
-            scene_mesh_ref_set(&st->scene, h, "card");
-            {   /* notes get a roomy landscape card + a matching min height so
-                   autosize keeps it that tall when nearly empty */
-                float np3[3];
-                char  mhb[16];
-                np3[0] = NOTE_CARD_W; np3[1] = NOTE_CARD_H; np3[2] = NOTE_CARD_T;
-                scene_mesh_params_set(&st->scene, h, np3, 3);
-                snprintf(mhb, sizeof mhb, "%.4f", (double)NOTE_CARD_H);
-                scene_meta_set(&st->scene, h, "min_h", mhb);
-            }
-            if (board != 0) {
-                SceneObject *no = scene_get(&st->scene, h);
-                if (no) no->pos = board_pin_pos(&st->scene, board, h,
-                                                blocal, 0.0f, -0.5f * NOTE_CARD_H);
-            }
-            scene_resolve_meshes(&st->scene);
-            apply_kind_materials(&st->scene);
-            st->selected_handle = h;
-            scene_save(&st->scene, "scene.stml");
-            printf("note #%u spawned%s\n", (unsigned)h,
-                   board ? " on the board" : "");
-        }
+        if (n_now && !st->n_was_down)
+            (void)spawn_note(st, w);
         st->n_was_down = n_now;
     }
 
