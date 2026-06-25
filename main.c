@@ -14256,8 +14256,9 @@ static void render(AppState *state) {
     }   /* show_hud */
 
     /* first-person crosshair at the pick point (screen centre, via the
-       viewport-relative units) — orbit mode picks at the cursor instead */
-    if (state->camera.mode != CAMERA_ORBIT) {
+       viewport-relative units) — orbit mode picks at the cursor instead, and
+       board view hides it (you point with the free cursor, not the crosshair) */
+    if (state->camera.mode != CAMERA_ORBIT && state->board_view == 0) {
         float cx = ui_vw(50.0f), cy = ui_vh(50.0f);
         ui_line(cx - 9.0f * us, cy, cx + 9.0f * us, cy, 1.5f * us, 1.0f, 1.0f, 1.0f, 0.7f);
         ui_line(cx, cy - 9.0f * us, cx, cy + 9.0f * us, 1.5f * us, 1.0f, 1.0f, 1.0f, 0.7f);
@@ -14340,7 +14341,7 @@ static void render(AppState *state) {
        construction. Culled when behind the camera (w<=0: see
        mat4_project_point). The tag names the object (item 6: a FILE card's
        tag is its filename — the seat item 2 reserved, filled at last). */
-    if (state->selected_handle != 0 &&
+    if (state->selected_handle != 0 && state->board_view == 0 &&
         scene_get(&state->scene, state->selected_handle)) {
         vec3 world = object_world_pos(&state->scene, state->selected_handle);
         vec3 ndc;
