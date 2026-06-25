@@ -8601,6 +8601,26 @@ static void board_view_exit(AppState *st) {
     st->board_view = 0;
 }
 
+/* Advance the board-view camera glide (runs AFTER camera_update so it overrides
+   it). Also bails out of board view if the viewed board was deleted. */
+static void board_view_update(AppState *st, float dt) {
+    float e, dyaw;
+    if (st->board_view != 0 && scene_get(&st->scene, st->board_view) == 0)
+        board_view_exit(st);                 /* board vanished: glide back out */
+    if (st->bv_t >= 1.0f) return;            /* settled: nothing to animate */
+    st->bv_t += dt / BOARD_VIEW_GLIDE_S;
+    if (st->bv_t > 1.0f) st->bv_t = 1.0f;
+    e = sol_smoothstep(st->bv_t);
+    st->camera.pos = vec3_add(st->bv_from_pos,
+                     vec3_scale(vec3_sub(st->bv_to_pos, st->bv_from_pos), e));
+    dyaw = st->bv_to_yaw - st->bv_from_yaw;
+    while (dyaw >  SOL_PI) dyaw -= 2.0f * SOL_PI;   /* shortest arc */
+    while (dyaw < -SOL_PI) dyaw += 2.0f * SOL_PI;
+    st->camera.yaw   = st->bv_from_yaw + dyaw * e;
+    st->camera.pitch = st->bv_from_pitch +
+                       (st->bv_to_pitch - st->bv_from_pitch) * e;
+}
+
 /* a note's body text size in metres-per-line; absent meta => the default,
    clamped to the editable range. */
 /* New-note default card: landscape and roomier than the portrait file/folder
@@ -14743,6 +14763,7 @@ int main(void) {
                debug out — both skip. */
             vec3 before = state.camera.pos;
             camera_update(&state.camera, &in, (float)dt);
+            board_view_update(&state, (float)dt);   /* overrides camera_update */
             if (!state.ghost && state.camera.mode != CAMERA_ORBIT) {
                 vec3 move = vec3_sub(state.camera.pos, before);
                 vec3 feet = before;
