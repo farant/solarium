@@ -8470,6 +8470,10 @@ static void cmd_carry_toggle(AppState *st) {
                                                         furniture_is_shelf(par->mesh_ref));
                         co->parent = 0;                                 /* leave the wall/furniture */
                         co->pos    = wp;
+                        mint_tag_ws(st, t);                             /* join the active world: a
+                                                                           now parent-less item would
+                                                                           resolve to "home" and be
+                                                                           HIDDEN in a named workspace */
                         if (was_shelf) shelf_repack(st, src);           /* reflow the rest */
                         {   /* un-shelve/un-mount the orientation: a filed card is
                                spine-out and a mounted picture is surface-facing, so
