@@ -10033,7 +10033,7 @@ static void cmd_place_window(AppState *st) {
         vec3  one   = vec3_make(1.0f, 1.0f, 1.0f);
         vec3  lp;
         Mesh  empty;
-        float p[4];
+        float p[5];
         char  wbuf[8];
         /* keep the aim-derived along-wall X/Z; snap only Y to the default sill
            so the window center sits at floor + sill + h/2 (matches
@@ -10045,10 +10045,11 @@ static void cmd_place_window(AppState *st) {
         p[1] = WINDOW_DEF_H;
         p[2] = ROUTE_WALL_T;
         p[3] = WINDOW_FRAME_W;
+        p[4] = 0.0f;                     /* style: plain */
         h = scene_add(s, best_room, empty, lp, rot, one);
         scene_kind_set(s, h, KIND_PLAIN);
         scene_mesh_ref_set(s, h, "window");
-        scene_mesh_params_set(s, h, p, 4);
+        scene_mesh_params_set(s, h, p, 5);
         snprintf(wbuf, sizeof wbuf, "%d", best_wall);
         scene_meta_set(s, h, "wall", wbuf);
         scene_meta_set(s, h, "glass", "none");
@@ -10098,14 +10099,15 @@ static void window_glass_resize(AppState *st, sol_u32 win) {
     sol_u32      child = window_glass_child(s, win);
     SceneObject *wo    = scene_get(s, win);
     SceneObject *co    = child ? scene_get(s, child) : (SceneObject *)0;
-    float        gp[2];
+    float        gp[3];
     char         oldkey[160];
     sol_bool     keyed;
     if (!wo || !co) return;
     gp[0] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "w");
     gp[1] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "h");
+    gp[2] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "style");
     keyed = mesh_asset_key(co, oldkey);          /* key from the OLD params */
-    scene_mesh_params_set(s, child, gp, 2);
+    scene_mesh_params_set(s, child, gp, 3);
     if (keyed) asset_release(&g_mesh_assets, oldkey);
     co = scene_get(s, child);
     if (co) memset(&co->mesh, 0, sizeof co->mesh);   /* drop the borrow */
@@ -10981,7 +10983,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     float du    = vec3_dot(vec3_sub(hit, wallc), st->resize_u);
                     float hy    = hit.y;
                     vec3  dragged, origin;
-                    float nw, nh, ow, oh, p4[4];
+                    float nw, nh, ow, oh, p4[5], style;
                     char  oldkey[160];
                     sol_bool keyed;
                     if (du >  runH) du =  runH;          /* clamp along the wall */
@@ -10995,9 +10997,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                         0.3f + 2.0f * fw, 0.0f, &nw, &nh, &origin);
                     ow = nw - 2.0f * fw; if (ow < 0.3f) ow = 0.3f;   /* outer -> opening */
                     oh = nh - 2.0f * fw; if (oh < 0.3f) oh = 0.3f;
-                    p4[0] = ow; p4[1] = oh; p4[2] = wt; p4[3] = fw;
+                    style = mesh_ref_param("window", o->mesh_params, o->mesh_param_count, "style");
+                    p4[0] = ow; p4[1] = oh; p4[2] = wt; p4[3] = fw; p4[4] = style;
                     keyed = mesh_asset_key(o, oldkey);   /* registry-shared rebuild (P4 i4) */
-                    scene_mesh_params_set(&st->scene, st->resize_board, p4, 4);
+                    scene_mesh_params_set(&st->scene, st->resize_board, p4, 5);
                     if (keyed) asset_release(&g_mesh_assets, oldkey);
                     o = scene_get(&st->scene, st->resize_board);
                     if (o) {
