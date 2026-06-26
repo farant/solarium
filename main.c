@@ -4179,6 +4179,38 @@ static sol_u32 board_under_ray(AppState *st, Ray r, vec3 *out_local) {
     return best;
 }
 
+/* Project ray `r` onto board `board`'s front-face plane; writes the board-local
+   point (UNCLAMPED). Returns SOL_FALSE if the ray misses the plane. */
+static sol_bool board_ray_local(AppState *st, sol_u32 board, Ray r, vec3 *out) {
+    SceneObject *o = scene_get(&st->scene, board);
+    float bt, t;
+    vec3  n, face;
+    if (!o) return SOL_FALSE;
+    bt   = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "t");
+    n    = quat_rotate(scene_world_rotation(&st->scene, board),
+                       vec3_make(0.0f, 0.0f, 1.0f));
+    face = mat4_mul_point(scene_world_matrix(&st->scene, o),
+                          vec3_make(0.0f, 0.0f, bt * 0.5f));
+    if (!ray_vs_plane(r, face, n, &t)) return SOL_FALSE;
+    *out = scene_world_to_local(&st->scene, board,
+                                vec3_add(r.origin, vec3_scale(r.dir, t)));
+    return SOL_TRUE;
+}
+
+/* The board-local footprint of a selectable card (x centered on pos.x, y
+   bottom-origin pos.y..pos.y+h). */
+static void card_footprint(Scene *s, sol_u32 h, float *x0, float *y0,
+                           float *x1, float *y1) {
+    SceneObject *o  = scene_get(s, h);
+    const char  *mr = (o && o->mesh_ref) ? o->mesh_ref : "card";
+    float cw = o ? mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "w") : 0.0f;
+    float ch = o ? mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "h") : 0.0f;
+    *x0 = o ? o->pos.x - cw * 0.5f : 0.0f;
+    *x1 = o ? o->pos.x + cw * 0.5f : 0.0f;
+    *y0 = o ? o->pos.y             : 0.0f;
+    *y1 = o ? o->pos.y + ch        : 0.0f;
+}
+
 /* A pinned card's board-local position: the cursor hit plus the grab offset
    in the board plane, Z pinned so the card's back just clears the face. */
 #define BOARD_PIN_EPS 0.003f
@@ -9040,6 +9072,8 @@ static void board_view_exit(AppState *st) {
     st->bv_dir = -1.0f;
     st->board_view = 0;
     st->drop_target_handle = 0;      /* drop no stale drag-to-file target (Task 8) */
+    st->marquee_active   = SOL_FALSE;   /* cancel any in-flight marquee */
+    st->marquee_dragging = SOL_FALSE;
 }
 
 /* Advance the board-view camera glide (runs AFTER camera_update so it overrides
@@ -10151,6 +10185,15 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                            st->selected_handle != 0 &&
                            object_is_selectable(&st->scene, st->selected_handle)) {
                     sel_toggle_h(st, st->selected_handle);   /* shift-click: toggle, no drag */
+                } else if (st->board_view != 0 && st->selected_handle == 0) {
+                    /* empty board: begin a marquee (shift => add to the set) */
+                    st->marquee_active   = SOL_TRUE;
+                    st->marquee_dragging = SOL_FALSE;
+                    st->marquee_add      = (sol_bool)(
+                        glfwGetKey(w, GLFW_KEY_LEFT_SHIFT)  == GLFW_PRESS ||
+                        glfwGetKey(w, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+                    st->marquee_x0 = st->marquee_x1 = mx;
+                    st->marquee_y0 = st->marquee_y1 = my;
                 } else if (st->sel_count <= 1 && st->selected_handle != 0 &&
                            (board_is_mounted(&st->scene, st->selected_handle) ||
                             note_resizable(&st->scene, st->selected_handle) ||
@@ -10191,6 +10234,28 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             }
         }
 
+        if (lmb && st->marquee_active) {                /* ---- marquee update ---- */
+            vec3 c0, c1;
+            int  mw, mh;
+            glfwGetWindowSize(w, &mw, &mh);
+            st->marquee_x1 = mx;
+            st->marquee_y1 = my;
+            if ((mx - st->marquee_x0) * (mx - st->marquee_x0) +
+                (my - st->marquee_y0) * (my - st->marquee_y0) >= 25.0)
+                st->marquee_dragging = SOL_TRUE;
+            if (mw > 0 && mh > 0 &&
+                board_ray_local(st, st->board_view, camera_ray(&st->camera,
+                    2.0f * (float)st->marquee_x0 / (float)mw - 1.0f,
+                    1.0f - 2.0f * (float)st->marquee_y0 / (float)mh,
+                    (float)mw / (float)mh), &c0) &&
+                board_ray_local(st, st->board_view, camera_ray(&st->camera,
+                    2.0f * (float)st->marquee_x1 / (float)mw - 1.0f,
+                    1.0f - 2.0f * (float)st->marquee_y1 / (float)mh,
+                    (float)mw / (float)mh), &c1)) {
+                st->marquee_lx0 = c0.x; st->marquee_ly0 = c0.y;
+                st->marquee_lx1 = c1.x; st->marquee_ly1 = c1.y;
+            }
+        }
         if (lmb && st->move_board != 0) {               /* ---- sliding a picture ---- */
             SceneObject *o   = scene_get(&st->scene, st->move_board);
             SceneObject *par = o ? scene_get(&st->scene, st->resize_room) : (SceneObject *)0;
@@ -10480,7 +10545,30 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         }
 
         if (!lmb && st->lmb_was_down) {                 /* ---- release ---- */
-            if (st->resize_board != 0) {                /* finished a resize */
+            if (st->marquee_active) {
+                if (st->marquee_dragging) {             /* rubber-band: select covered cards */
+                    sol_u32 i;
+                    if (!st->marquee_add) sel_clear(st);
+                    for (i = 0; i < st->scene.count; i++) {
+                        sol_u32 h  = st->scene.objects[i].handle;
+                        float   fx0, fy0, fx1, fy1;
+                        if (st->scene.objects[i].parent != st->board_view) continue;
+                        if (!object_is_selectable(&st->scene, h)) continue;
+                        if (!scene_object_active(&st->scene, h)) continue;
+                        card_footprint(&st->scene, h, &fx0, &fy0, &fx1, &fy1);
+                        if (msel_rect_overlap(st->marquee_lx0, st->marquee_ly0,
+                                              st->marquee_lx1, st->marquee_ly1,
+                                              fx0, fy0, fx1, fy1))
+                            msel_add(st->sel, &st->sel_count, MULTISEL_CAP, h);
+                    }
+                    st->selected_handle = st->sel_count
+                                         ? st->sel[st->sel_count - 1] : 0;
+                } else if (!st->marquee_add) {          /* plain click on empty board: clear */
+                    sel_clear(st);
+                }
+                st->marquee_active   = SOL_FALSE;
+                st->marquee_dragging = SOL_FALSE;
+            } else if (st->resize_board != 0) {         /* finished a resize */
                 scene_save(&st->scene, "scene.stml");
                 st->resize_board = 0;
             } else if (st->move_board != 0) {           /* finished a picture slide */
