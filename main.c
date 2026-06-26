@@ -4924,6 +4924,47 @@ static void campus_rebuild(AppState *st, const Route *routes, int nroutes) {
     mb_free(&mb);
 }
 
+#define ROOM_OPENINGS_CAP 32   /* doors + windows per room, across all walls */
+
+/* a window's wall index, from meta["wall"] ("0".."3"); default N. */
+static int window_wall(Scene *s, sol_u32 handle) {
+    const char *m = scene_meta_get(s, handle, "wall");
+    int v = m ? atoi(m) : 0;
+    if (v < 0 || v > 3) v = 0;
+    return v;
+}
+
+/* append every active child window of `room` to ops[] as a RoomOpening.
+   A window is center-origin and parented to the room, so its room-local pos
+   gives the along-wall center (x for N/S, z for E/W), the opening bottom
+   (pos.y - h/2 = sill) and top (pos.y + h/2 = lintel). The sill clamps to the
+   floor but the lintel stays independent so the top doesn't inflate. */
+static void room_append_windows(Scene *s, sol_u32 room, RoomOpening *ops,
+                                int *no, int max) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        float w, h, sill, lintel;
+        int   wall;
+        if (o->parent != room || !o->mesh_ref ||
+            strcmp(o->mesh_ref, "window") != 0) continue;
+        if (!scene_object_active(s, o->handle)) continue;
+        if (*no >= max) break;
+        w      = mesh_ref_param("window", o->mesh_params, o->mesh_param_count, "w");
+        h      = mesh_ref_param("window", o->mesh_params, o->mesh_param_count, "h");
+        wall   = window_wall(s, o->handle);
+        sill   = o->pos.y - h * 0.5f;
+        lintel = o->pos.y + h * 0.5f;
+        if (sill < 0.0f) sill = 0.0f;
+        ops[*no].wall   = wall;
+        ops[*no].center = (wall == ROOM_WALL_N || wall == ROOM_WALL_S) ? o->pos.x : o->pos.z;
+        ops[*no].width  = w;
+        ops[*no].height = lintel;   /* was sill + h */
+        ops[*no].sill   = sill;
+        (*no)++;
+    }
+}
+
 static void connections_rebuild(AppState *st) {
     Scene  *s = &st->scene;
     Route   routes[ROUTE_MAX];
@@ -4983,7 +5024,7 @@ static void connections_rebuild(AppState *st) {
         if (!scene_object_active(s, room->handle)) continue;   /* hidden workspace */
         for (k = 0; k < s->count; k++) {
             SceneObject *shell = &s->objects[k];
-            RoomOpening  ops[16];
+            RoomOpening  ops[ROOM_OPENINGS_CAP];
             int          no;
             float        w, d, h;
             MeshBuilder  mb;
@@ -4992,7 +5033,8 @@ static void connections_rebuild(AppState *st) {
             w = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
             d = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
             h = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
-            no = route_room_openings_in(routes, n, s, room->handle, ops, 16);
+            no = route_room_openings_in(routes, n, s, room->handle, ops, ROOM_OPENINGS_CAP);
+            room_append_windows(s, room->handle, ops, &no, ROOM_OPENINGS_CAP);
             mesh_destroy(&shell->mesh);
             mb_init(&mb);
             make_room_doored(&mb, w, d, h, ROUTE_WALL_T,
@@ -5085,7 +5127,7 @@ static void connections_rebuild_focus(AppState *st, sol_u32 focus) {
         if (!hit) continue;
         for (k = 0; k < s->count; k++) {
             SceneObject *shell = &s->objects[k];
-            RoomOpening  ops[16];
+            RoomOpening  ops[ROOM_OPENINGS_CAP];
             int          no;
             float        w, d, h;
             MeshBuilder  mb;
@@ -5094,7 +5136,8 @@ static void connections_rebuild_focus(AppState *st, sol_u32 focus) {
             w = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
             d = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
             h = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
-            no = route_room_openings_in(routes, n, s, room->handle, ops, 16);
+            no = route_room_openings_in(routes, n, s, room->handle, ops, ROOM_OPENINGS_CAP);
+            room_append_windows(s, room->handle, ops, &no, ROOM_OPENINGS_CAP);
             mesh_destroy(&shell->mesh);
             mb_init(&mb);
             make_room_doored(&mb, w, d, h, ROUTE_WALL_T,
