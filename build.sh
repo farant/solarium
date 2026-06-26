@@ -378,12 +378,14 @@ fi
 if [ "$MODE" = "metal" ]; then
     clang -fobjc-arc -g -O0 -Wall -Wextra \
         -c rhi_metal.m $(pkg-config --cflags glfw3) -o rhi_metal.o
+    clang -fobjc-arc -g -O0 -Wall -Wextra \
+        -c platform_clipboard.m $(pkg-config --cflags glfw3) -o platform_clipboard.o
     clang -std=c11 -g -O0 -Wall -Wextra -DSOL_RHI_METAL \
-        main.c rhi_metal.o mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c multiselect.c widget.c app_synth.c \
+        main.c rhi_metal.o platform_clipboard.o mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c multiselect.c widget.c app_synth.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework Metal -framework QuartzCore -framework Cocoa -framework IOKit -framework AudioToolbox \
         -o solarium-metal
-    rm -f rhi_metal.o
+    rm -f rhi_metal.o platform_clipboard.o
     echo "built ./solarium-metal (stage a: links clean, zero GL; runs from stage b)"
     exit 0
 fi
@@ -392,13 +394,17 @@ fi
 # definition-of-done. Debug-only; ~2x slower. Run ./solarium-asan; the
 # sanitizers report any memory/UB error on stderr and abort.
 if [ "$MODE" = "asan" ]; then
+    clang -fobjc-arc -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined \
+        -Wall -Wextra \
+        -c platform_clipboard.m $(pkg-config --cflags glfw3) -o platform_clipboard.o
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c multiselect.c widget.c app_synth.c \
+        main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c multiselect.c widget.c app_synth.c platform_clipboard.o \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit -framework AudioToolbox \
         -o solarium-asan
+    rm -f platform_clipboard.o
     echo "built ./solarium-asan (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
@@ -409,10 +415,13 @@ else
     FLAGS="-g -O0"
 fi
 
+clang -fobjc-arc $FLAGS -Wall -Wextra \
+    -c platform_clipboard.m $(pkg-config --cflags glfw3) -o platform_clipboard.o
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c multiselect.c widget.c app_synth.c \
+    main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c multiselect.c widget.c app_synth.c platform_clipboard.o \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit -framework AudioToolbox \
     -o solarium
+rm -f platform_clipboard.o
 
 echo "built ./solarium ($MODE)"
