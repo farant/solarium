@@ -13746,8 +13746,8 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     rhi_draw_indexed(0, mesh.index_count);
 }
 
-#define GLASS_OPACITY    0.6f  /* P9 item 2: stained-glass surface opacity (tune by eye) */
-#define GLASS_DRAW_MAX  64     /* sorted transparent pass capacity (church_glass + window_glass) */
+#define GLASS_OPACITY   0.6f  /* P9 item 2: stained-glass surface opacity (tune by eye) */
+#define GLASS_DRAW_MAX  64    /* sorted transparent pass capacity (church_glass + window_glass) */
 /* P9 item 2: the stained-glass draw — the SAME PBR shader (glass stays lit + IBL
    + emissive), on the alpha-blend / depth-write-off glass pipeline, with the
    surface opacity overriding bind_scene_uniforms' opaque default. */
@@ -14451,7 +14451,7 @@ static void render(AppState *state) {
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_glass") == 0)
             continue;                             /* P9 item 2: the GLASS sub-pass draws them */
         if (o->mesh_ref && strcmp(o->mesh_ref, "window_glass") == 0)
-            continue;                             /* Windows: drawn in the glass sub-pass */
+            continue;                             /* Windows: the GLASS sub-pass draws them */
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_decals") == 0)
             continue;                             /* P9 item 3: the DECAL sub-pass draws them */
         state->draws_total++;                     /* the yardstick: would draw */
@@ -15285,10 +15285,10 @@ static void render(AppState *state) {
         }
     }
 
-    /* P9 item 2: stained glass — the church_glass objects, translucent, drawn
-       AFTER all opaque (tests their depth), back-to-front by distance, into the
-       HDR buffer (so it blooms + tonemaps + grades). One mesh per church; the
-       object-level sort orders multiple churches. */
+    /* P9 item 2: stained glass — the church_glass + window_glass objects,
+       translucent, drawn AFTER all opaque (tests their depth), back-to-front
+       by distance, into the HDR buffer (so it blooms + tonemaps + grades). One
+       mesh per church; the object-level sort orders multiple churches. */
     {
         sol_u32 gidx[GLASS_DRAW_MAX];
         float   gdist[GLASS_DRAW_MAX];
