@@ -9008,6 +9008,16 @@ static sol_bool picture_on_board(Scene *s, sol_u32 h) {
                       object_is_board(s, o->parent));
 }
 
+/* a "window" parented to a room wall — selectable/slidable/resizable like a
+   wall picture, but CENTER-origin (its pos is the hole centre). The move/resize
+   branches reconcile that to the picture machinery's bottom-origin assumption by
+   treating the window as a board of the OUTER frame size (w+2fw)x(h+2fw) whose
+   bottom-centre is pos - (0, h/2 + fw, 0). */
+static sol_bool window_on_wall(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    return (sol_bool)(o && o->mesh_ref && strcmp(o->mesh_ref, "window") == 0);
+}
+
 /* yaw of a mounted board (its facing). */
 static float board_yaw(Scene *s, sol_u32 h) {
     quat q;
@@ -9025,6 +9035,14 @@ static void board_world_corners(Scene *s, sol_u32 h, vec3 out[4], vec3 *out_u) {
     float ht  = o ? mesh_ref_param(mr, o->mesh_params, o->mesh_param_count, "h") : 1.2f;
     float yaw = board_yaw(s, h);
     vec3  u   = vec3_make((float)cos((double)yaw), 0.0f, -(float)sin((double)yaw));
+    if (o && o->mesh_ref && strcmp(o->mesh_ref, "window") == 0) {
+        /* center-origin: present the OUTER frame as a bottom-origin board so the
+           corner handles wrap the whole window, not the inner opening. */
+        float fw = mesh_ref_param("window", o->mesh_params, o->mesh_param_count, "fw");
+        p.y -= ht * 0.5f + fw;         /* centre -> outer bottom-centre */
+        w   += 2.0f * fw;
+        ht  += 2.0f * fw;
+    }
     board_corners(p, w, ht, u, out);
     if (out_u) *out_u = u;
 }
@@ -9096,7 +9114,8 @@ static int picture_move_pick(AppState *st, GLFWwindow *w) {
        wall or whiteboard; a board slides only when wall-mounted (a free-standing
        board must stay carry-able, not glue itself to a phantom wall). */
     if (!o || !o->mesh_ref) return 0;
-    if (strcmp(o->mesh_ref, "picture") != 0) {
+    if (strcmp(o->mesh_ref, "picture") != 0 &&
+        strcmp(o->mesh_ref, "window")  != 0) {     /* a window slides on its wall too */
         if (strcmp(o->mesh_ref, "board") != 0 ||
             !board_is_mounted(&st->scene, st->selected_handle))
             return 0;
@@ -10577,7 +10596,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 } else if (st->sel_count <= 1 && st->selected_handle != 0 &&
                            (board_is_mounted(&st->scene, st->selected_handle) ||
                             note_resizable(&st->scene, st->selected_handle) ||
-                            picture_on_board(&st->scene, st->selected_handle)) &&
+                            picture_on_board(&st->scene, st->selected_handle) ||
+                            window_on_wall(&st->scene, st->selected_handle)) &&
                            resize_corner_pick(st, w)) {
                     /* grabbed a corner handle — resize (single selection only) */
                 } else if (st->sel_count <= 1 && st->selected_handle != 0 &&
@@ -10655,7 +10675,32 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 if (ray_vs_plane(ray, anchor, n, &tt) && tt > 0.0f) {
                     vec3 hit = vec3_add(ray.origin, vec3_scale(ray.dir, tt));
                     vec3 P   = vec3_add(hit, st->move_grab);        /* new world origin */
-                    if (par->mesh_ref && strcmp(par->mesh_ref, "board") == 0) {
+                    if (o->mesh_ref && strcmp(o->mesh_ref, "window") == 0) {
+                        /* center-origin window: slide along the wall + vertically,
+                           the OUTER frame clamped to the wall, keeping the
+                           perpendicular (in-wall) depth fixed. P is the new CENTRE
+                           (move_grab kept the centre under the cursor). The wall
+                           hole follows only on release (room_rebuild_one). */
+                        float fw    = mesh_ref_param("window", o->mesh_params,
+                                                     o->mesh_param_count, "fw");
+                        float wo    = pw + 2.0f * fw;     /* outer frame width  */
+                        float ho    = ph + 2.0f * fw;     /* outer frame height */
+                        RoomRect r  = editor_room_rect(&st->scene, st->resize_room);
+                        float ih    = room_interior_height(&st->scene, st->resize_room);
+                        float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
+                        WallMount m = wall_gable_geom(r, ih, (n.x * n.x > 0.25f));
+                        vec3  wallc = vec3_sub(vec3_make(r.cx, P.y, r.cz),
+                                               vec3_scale(n, perpH));
+                        float noff  = vec3_dot(vec3_sub(anchor, wallc), n); /* keep in-wall depth */
+                        float run   = vec3_dot(vec3_sub(P, wallc), st->resize_u);
+                        float cy    = P.y;               /* origin IS the centre */
+                        vec3  np;
+                        wall_clamp_run_cy(m, wo * 0.5f, ho * 0.5f, &run, &cy);
+                        np.x = wallc.x + st->resize_u.x * run + n.x * noff;
+                        np.y = cy;
+                        np.z = wallc.z + st->resize_u.z * run + n.z * noff;
+                        o->pos = scene_world_to_local(&st->scene, o->parent, np);
+                    } else if (par->mesh_ref && strcmp(par->mesh_ref, "board") == 0) {
                         /* on a whiteboard: slide in board-local, clamp to the face
                            (the plane is a constant board-local z, so z stays proud) */
                         vec3  lp = scene_world_to_local(&st->scene, st->resize_room, P);
@@ -10784,6 +10829,57 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                         if (lp.y < 0.0f)        lp.y = 0.0f;
                         if (lp.y > bh - nh)     lp.y = bh - nh;
                         o->pos = lp;
+                    }
+                    scene_resolve_meshes(&st->scene);
+                }
+            } else if (o->mesh_ref && strcmp(o->mesh_ref, "window") == 0) {
+                /* center-origin window resize: drag the OUTER frame corner like a
+                   wall board (free aspect), clamped to the wall; convert the outer
+                   size back to the OPENING (w/h params = opening = outer - 2fw) and
+                   re-centre. The wall hole re-cuts only on release. */
+                Ray      ray = pick_ray(st, w);
+                RoomRect r   = editor_room_rect(&st->scene, st->resize_room);
+                float    yaw = board_yaw(&st->scene, st->resize_board);
+                vec3     n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+                float    fw  = mesh_ref_param("window", o->mesh_params, o->mesh_param_count, "fw");
+                float    wt  = mesh_ref_param("window", o->mesh_params, o->mesh_param_count, "t");
+                float    tt;
+                ray.dir = vec3_normalize(ray.dir);
+                if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
+                    vec3  hit   = vec3_add(vec3_add(ray.origin, vec3_scale(ray.dir, tt)),
+                                           st->resize_grab);   /* no jump on grab */
+                    float ih    = room_interior_height(&st->scene, st->resize_room);
+                    float perpH = (n.z * n.z > 0.25f) ? r.hd : r.hw;
+                    float runH  = (n.z * n.z > 0.25f) ? r.hw : r.hd;
+                    WallMount m = wall_gable_geom(r, ih, (n.x * n.x > 0.25f));
+                    float topcap= m.is_gable ? m.apex_y : r.floor_y + ih;
+                    vec3  wallc = vec3_sub(vec3_make(r.cx, hit.y, r.cz), vec3_scale(n, perpH));
+                    float du    = vec3_dot(vec3_sub(hit, wallc), st->resize_u);
+                    float hy    = hit.y;
+                    vec3  dragged, origin;
+                    float nw, nh, ow, oh, p4[4];
+                    char  oldkey[160];
+                    sol_bool keyed;
+                    if (du >  runH) du =  runH;          /* clamp along the wall */
+                    if (du < -runH) du = -runH;
+                    if (hy < r.floor_y) hy = r.floor_y;  /* clamp floor..apex (gable) */
+                    if (hy > topcap)    hy = topcap;
+                    dragged = vec3_add(vec3_make(wallc.x, hy, wallc.z),
+                                       vec3_scale(st->resize_u, du));
+                    /* OUTER min = opening min (0.3) + the two borders */
+                    board_resize_corner(st->resize_anchor, dragged, st->resize_u,
+                                        0.3f + 2.0f * fw, 0.0f, &nw, &nh, &origin);
+                    ow = nw - 2.0f * fw; if (ow < 0.3f) ow = 0.3f;   /* outer -> opening */
+                    oh = nh - 2.0f * fw; if (oh < 0.3f) oh = 0.3f;
+                    p4[0] = ow; p4[1] = oh; p4[2] = wt; p4[3] = fw;
+                    keyed = mesh_asset_key(o, oldkey);   /* registry-shared rebuild (P4 i4) */
+                    scene_mesh_params_set(&st->scene, st->resize_board, p4, 4);
+                    if (keyed) asset_release(&g_mesh_assets, oldkey);
+                    o = scene_get(&st->scene, st->resize_board);
+                    if (o) {
+                        vec3 center = vec3_make(origin.x, origin.y + nh * 0.5f, origin.z);
+                        memset(&o->mesh, 0, sizeof o->mesh);   /* drop the borrow */
+                        o->pos = scene_world_to_local(&st->scene, o->parent, center);
                     }
                     scene_resolve_meshes(&st->scene);
                 }
@@ -10973,9 +11069,20 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 st->marquee_active   = SOL_FALSE;
                 st->marquee_dragging = SOL_FALSE;
             } else if (st->resize_board != 0) {         /* finished a resize */
+                /* a window's geometry changed: re-cut the wall hole ONCE, here on
+                   release (never per-frame — the room mesh rebuild is heavy). */
+                SceneObject *ro    = scene_get(&st->scene, st->resize_board);
+                sol_u32      wroom = (ro && ro->mesh_ref &&
+                                      strcmp(ro->mesh_ref, "window") == 0)
+                                     ? ro->parent : 0;
+                if (wroom != 0) room_rebuild_one(st, wroom);
                 scene_save(&st->scene, "scene.stml");
                 st->resize_board = 0;
-            } else if (st->move_board != 0) {           /* finished a picture slide */
+            } else if (st->move_board != 0) {           /* finished a picture/window slide */
+                SceneObject *mo    = scene_get(&st->scene, st->move_board);
+                sol_u32      wroom = (mo && mo->mesh_ref &&
+                                      strcmp(mo->mesh_ref, "window") == 0)
+                                     ? mo->parent : 0;
                 if (st->drop_target_handle != 0 &&
                     is_fileable_card(&st->scene, st->move_board)) {
                     const char *link = scene_meta_get(&st->scene,
@@ -10986,6 +11093,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                         printf("filed #%u onto %s\n", (unsigned)st->move_board, link);
                     }
                 }
+                if (wroom != 0) room_rebuild_one(st, wroom);  /* the hole follows the window */
                 st->drop_target_handle = 0;
                 scene_save(&st->scene, "scene.stml");
                 st->move_board = 0;
@@ -11130,7 +11238,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     } else if (st->selected_handle != 0 &&
                (board_is_mounted(&st->scene, st->selected_handle) ||
                 note_resizable(&st->scene, st->selected_handle) ||
-                picture_on_board(&st->scene, st->selected_handle))) {
+                picture_on_board(&st->scene, st->selected_handle) ||
+                window_on_wall(&st->scene, st->selected_handle))) {
         int c = resize_corner_at(st, w, (vec3 *)0, (vec3 *)0);
         if (c >= 0) {
             float   nx = 0.0f, ny = 0.0f, pt;
@@ -11729,6 +11838,24 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 scene_remove(&st->scene, doomed);
                 scene_save(&st->scene, "scene.stml");
                 printf("deleted picture #%u\n", (unsigned)doomed);
+            } else if (o && o->mesh_ref != NULL &&
+                       strcmp(o->mesh_ref, "window") == 0) {
+                /* a placed window: delete any child panes (window_glass) first,
+                   then the window, then re-cut the wall so the hole closes.
+                   delete_board_card releases each shape's keyed mesh + clears any
+                   resize/move/carry/selection references. */
+                sol_u32 doomed = st->selected_handle;
+                sol_u32 room   = o->parent;
+                sol_u32 kids[64];
+                int     nk = 0, i;
+                for (i = 0; i < (int)st->scene.count && nk < 64; i++)
+                    if (st->scene.objects[i].parent == doomed)
+                        kids[nk++] = st->scene.objects[i].handle;   /* handles are stable */
+                for (i = 0; i < nk; i++) delete_board_card(st, kids[i]);
+                delete_board_card(st, doomed);
+                room_rebuild_one(st, room);
+                scene_save(&st->scene, "scene.stml");
+                printf("deleted window #%u\n", (unsigned)doomed);
             } else if (o && o->mesh_ref != NULL &&
                        strcmp(o->mesh_ref, "folderbook") == 0) {
                 /* delete ONLY this folder link. The target page and its
@@ -15124,7 +15251,8 @@ static void render(AppState *state) {
         if (state->selected_handle != 0 &&
             (board_is_mounted(&state->scene, state->selected_handle) ||
              note_resizable(&state->scene, state->selected_handle) ||
-             picture_on_board(&state->scene, state->selected_handle))) {
+             picture_on_board(&state->scene, state->selected_handle) ||
+             window_on_wall(&state->scene, state->selected_handle))) {
             vec3     cor[4], u, n;
             float    yaw = board_yaw(&state->scene, state->selected_handle);
             Material hm  = material_default();
