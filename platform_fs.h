@@ -29,6 +29,10 @@ void     fs_listing_free(FsListing *l);
 /* Does the path exist (file or directory)? Stale-alias detection. */
 sol_bool fs_exists(const char *path);
 
+/* Create a directory (mode 0755). Returns SOL_TRUE if it now exists (created
+   or already present), SOL_FALSE on error. */
+sol_bool fs_mkdir(const char *path);
+
 /* Modification time as a plain long (seconds since the epoch) — the hot-
    reload watcher's change signal (P4 item 4). 0 = unstatable (missing, or
    racing an editor's save). */

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 
 static int entry_cmp(const void *a, const void *b) {
@@ -66,6 +67,11 @@ void fs_listing_free(FsListing *l) {
 sol_bool fs_exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0 ? SOL_TRUE : SOL_FALSE;
+}
+
+sol_bool fs_mkdir(const char *path) {
+    if (mkdir(path, 0755) == 0) return SOL_TRUE;
+    return (errno == EEXIST) ? SOL_TRUE : SOL_FALSE;
 }
 
 char *fs_read_file(const char *path, long cap, long *out_len, int *out_truncated) {
