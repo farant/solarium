@@ -367,7 +367,7 @@ void make_picture(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t) {
    glass fan (Task 3), so it lives here as a mesh.c static. */
 #define WINDOW_ARC_SEG  20    /* segments per semicircle / pointed arc */
 #define WINDOW_CIRC_SEG 32    /* segments around a full oculus */
-#define WINDOW_OUTLINE_MAX 80 /* max outline points (x,y pairs) */
+#define WINDOW_OUTLINE_MAX 80 /* max outline points (x,y pairs); must be >= 2*WINDOW_ARC_SEG + 4 */
 
 static int window_outline(int style, float hw, float hh, float fw,
                           float *xy, int cap) {
@@ -386,11 +386,11 @@ static int window_outline(int style, float hw, float hh, float fw,
     if (style == 1 || style == 2) {      /* arched / pointed: rect bottom + curved top */
         float r  = (aw < ah) ? aw : ah;
         float ys = ah - r;
-        if (style == 2) { ys = ah - aw * 1.2f; if (ys < -ah) ys = -ah; }
+        if (style == 2) { ys = ah - aw * 1.2f; if (ys < -ah) ys = -ah; }  /* apex rise ~1.2x half-width */
         else            { if (ys < -ah) { ys = -ah; r = ah - ys; } }
-        xy[2*n]= -aw; xy[2*n+1]= -ah; n++;        /* bottom-left  */
-        xy[2*n]=  aw; xy[2*n+1]= -ah; n++;        /* bottom-right */
-        xy[2*n]=  aw; xy[2*n+1]=  ys; n++;        /* right springline */
+        if (n < cap) { xy[2*n]= -aw; xy[2*n+1]= -ah; n++; }   /* bottom-left  */
+        if (n < cap) { xy[2*n]=  aw; xy[2*n+1]= -ah; n++; }   /* bottom-right */
+        if (n < cap) { xy[2*n]=  aw; xy[2*n+1]=  ys; n++; }   /* right springline */
         if (style == 1) {                          /* semicircle right->left over top */
             for (i = 1; i < WINDOW_ARC_SEG && n < cap; i++) {
                 float a = 3.14159265f * (float)i / (float)WINDOW_ARC_SEG;
@@ -407,10 +407,9 @@ static int window_outline(int style, float hw, float hh, float fw,
                 xy[2*n]= -aw*u; xy[2*n+1]= ah - (ah-ys)*u; n++;
             }
         }
-        xy[2*n]= -aw; xy[2*n+1]=  ys; n++;        /* left springline */
+        if (n < cap) { xy[2*n]= -aw; xy[2*n+1]=  ys; n++; }  /* left springline */
         return n;
     }
-    (void)cap;
     return 0;   /* plain / french: rectangle, no special outline */
 }
 
