@@ -2917,6 +2917,7 @@ typedef struct AppState {
     int         cut_count;           /* 0 = nothing cut; GLOBAL — survives board_view_exit */
     sol_bool    cut_was_down;        /* edge-detect for Cmd+X */
     sol_bool    win_color_was;       /* edge-detect for Up/Down window glass cycle */
+    sol_bool    win_style_was;       /* edge-detect for Left/Right window shape cycle */
     sol_bool    marquee_active;      /* a marquee gesture is underway (M2) */
     sol_bool    marquee_dragging;    /* moved past the slop -> a real rubber-band (M2) */
     sol_bool    marquee_add;         /* shift held -> union, else replace (M2) */
@@ -10156,6 +10157,43 @@ static void window_set_glass(AppState *st, sol_u32 win, const char *name) {
     }
 }
 
+static const char *WINDOW_STYLE_NAME[5] = {
+    "plain", "arched", "pointed", "circular", "french"
+};
+
+/* Rewrite the style param on BOTH the window frame (5 params) and its glass
+   child (3 params) via the registry-rebuild law.  The wall opening is unchanged
+   so no wall rebuild is needed. */
+static void window_set_style(AppState *st, sol_u32 win, int style) {
+    Scene       *s     = &st->scene;
+    sol_u32      child = window_glass_child(s, win);
+    SceneObject *wo    = scene_get(s, win);
+    float        wp[5], gp[3];
+    char         wkey[160], gkey[160];
+    sol_bool     wkeyed, gkeyed;
+    if (!wo) return;
+    wp[0] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "w");
+    wp[1] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "h");
+    wp[2] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "t");
+    wp[3] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "fw");
+    wp[4] = (float)style;
+    wkeyed = mesh_asset_key(wo, wkey);
+    scene_mesh_params_set(s, win, wp, 5);
+    if (wkeyed) asset_release(&g_mesh_assets, wkey);
+    wo = scene_get(s, win);
+    if (wo) memset(&wo->mesh, 0, sizeof wo->mesh);
+    if (child) {
+        SceneObject *co = scene_get(s, child);
+        gp[0] = wp[0]; gp[1] = wp[1]; gp[2] = (float)style;
+        gkeyed = co ? mesh_asset_key(co, gkey) : SOL_FALSE;
+        scene_mesh_params_set(s, child, gp, 3);
+        if (gkeyed) asset_release(&g_mesh_assets, gkey);
+        co = scene_get(s, child);
+        if (co) memset(&co->mesh, 0, sizeof co->mesh);
+    }
+    scene_resolve_meshes(s);
+}
+
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
@@ -10566,8 +10604,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     } else if (!bv_active) {
         /* suppress UP/DOWN camera-look when a window is selected (Task 7 owns them) */
         sol_bool win_look_free = (sol_bool)(!window_on_wall(&st->scene, st->selected_handle));
-        if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
-        if (glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) in->look_dx -= look;
+        if (win_look_free && glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
+        if (win_look_free && glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) in->look_dx -= look;
         if (win_look_free && glfwGetKey(w, GLFW_KEY_UP)   == GLFW_PRESS) in->look_dy += look;
         if (win_look_free && glfwGetKey(w, GLFW_KEY_DOWN) == GLFW_PRESS) in->look_dy -= look;
     }
@@ -12118,6 +12156,31 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->win_color_was = SOL_FALSE;
     }
 
+    /* Left/Right: cycle the selected window's shape style.
+       The camera-look block above is already guarded by win_look_free so LEFT/RIGHT
+       do NOT also pan the camera while a window is selected. */
+    if (st->selected_handle != 0 && st->board_view == 0) {
+        if (window_on_wall(&st->scene, st->selected_handle)) {
+            sol_bool left  = (sol_bool)(glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS);
+            sol_bool right = (sol_bool)(glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS);
+            sol_bool now   = (sol_bool)(left || right);
+            if (now && !st->win_style_was) {
+                SceneObject *so = scene_get(&st->scene, st->selected_handle);
+                int idx = so ? (int)(mesh_ref_param("window", so->mesh_params,
+                                    so->mesh_param_count, "style") + 0.5f) : 0;
+                idx = (idx + (right ? 1 : 5 - 1)) % 5;
+                window_set_style(st, st->selected_handle, idx);
+                scene_save(&st->scene, "scene.stml");
+                printf("window style: %s\n", WINDOW_STYLE_NAME[idx]);
+            }
+            st->win_style_was = now;
+        } else {
+            st->win_style_was = SOL_FALSE;
+        }
+    } else {
+        st->win_style_was = SOL_FALSE;
+    }
+
     /* +/- resize the SELECTED note's body text. read_input has already returned
        above if a note is being edited or the palette is open, so these keys are
        free here. =/+ grows, -/_ shrinks; numpad +/- too. A press gives one clear
@@ -12754,6 +12817,7 @@ static void bind_runtime_handles(AppState *st) {
     st->cut_count          = 0;
     st->cut_was_down       = SOL_FALSE;
     st->win_color_was      = SOL_FALSE;
+    st->win_style_was      = SOL_FALSE;
     /* page_*_was: Task 5 arrow-cycle; drop_target_handle: Task 8 */
     st->page_prev_was      = SOL_FALSE;
     st->page_next_was      = SOL_FALSE;
