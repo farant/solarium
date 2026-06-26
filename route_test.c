@@ -75,15 +75,17 @@ static void test_window_sill_panel(void) {
            (unsigned)door_idx, (unsigned)win_idx);
 }
 
-static void test_window_frame_styles(void) {
-    MeshBuilder mb; sol_u32 plain, arch, circ;
-    mb_init(&mb); make_window(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 0.0f); plain = mb.index_count; mb_free(&mb);
-    mb_init(&mb); make_window(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 1.0f); arch  = mb.index_count; mb_free(&mb);
-    mb_init(&mb); make_window(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 3.0f); circ  = mb.index_count; mb_free(&mb);
-    assert(arch > plain);
-    assert(circ > plain);
-    printf("  window frame styles: plain=%u arch=%u circ=%u OK\n",
-           (unsigned)plain, (unsigned)arch, (unsigned)circ);
+static void test_window_fill_styles(void) {
+    MeshBuilder mb; sol_u32 plain_fill, circ_fill, frame_plain, frame_arch;
+    mb_init(&mb); make_window_fill(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 0.0f); plain_fill = mb.index_count; mb_free(&mb);
+    mb_init(&mb); make_window_fill(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 3.0f); circ_fill  = mb.index_count; mb_free(&mb);
+    mb_init(&mb); make_window(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 0.0f); frame_plain = mb.index_count; mb_free(&mb);
+    mb_init(&mb); make_window(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 1.0f); frame_arch  = mb.index_count; mb_free(&mb);
+    assert(plain_fill == 0);           /* plain/french carry no fill */
+    assert(circ_fill > 0);             /* circular fill has geometry */
+    assert(frame_arch == frame_plain); /* the casing no longer carries the fill */
+    printf("  window fill split: plain_fill=%u circ_fill=%u frame=%u OK\n",
+           (unsigned)plain_fill, (unsigned)circ_fill, (unsigned)frame_plain);
 }
 
 static void test_window_glass_styles(void) {
@@ -234,7 +236,7 @@ int main(void) {
         scene_free(&s);
     }
     test_window_sill_panel();
-    test_window_frame_styles();
+    test_window_fill_styles();
     test_window_glass_styles();
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;

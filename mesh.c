@@ -421,40 +421,82 @@ static void rect_project(float px, float py, float hw, float hh, float *qx, floa
     *qx = px / m; *qy = py / m;
 }
 
-/* The opaque dark_wood inner FILL: the solid between the aperture outline and
-   its rectangle projection, built no-CSG as a closed strip — front (+ht) cap,
+/* which rectangle edge a point radially projects onto: 0=+x (right), 1=-x
+   (left), 2=+y (top), 3=-y (bottom). The dominant axis (|px|/hw vs |py|/hh)
+   chooses a vertical edge (x=±hw) vs a horizontal one (y=±hh); ties go
+   horizontal. Used to detect a segment that rounds a corner. */
+static int rect_edge(float px, float py, float hw, float hh) {
+    float ax = (px < 0 ? -px : px) / hw, ay = (py < 0 ? -py : py) / hh;
+    if (ax > ay) return (px >= 0.0f) ? 0 : 1;   /* vertical edge   */
+    return (py >= 0.0f) ? 2 : 3;                /* horizontal edge */
+}
+
+/* The opaque inner FILL: the solid between the aperture outline and its
+   rectangle projection, built no-CSG as a closed strip — front (+ht) cap,
    back (-ht) cap, inner tunnel wall — so it reads solid from both faces and at
-   the glass edge. CCW outline assumed. */
+   the glass edge. CCW outline assumed. The outer boundary reaches the four
+   rectangle CORNERS: when a segment's two projected points land on different
+   rectangle edges the radial chord would cut across the corner, so we insert
+   the shared corner vertex and patch the gap with a front + back triangle.
+   UVs are position-based (meters, matching the face_* convention) so the oak
+   veneer shows grain. */
 static void window_fill(MeshBuilder *b, const float *xy, int n,
                         float hw, float hh, float ht) {
     int i;
     for (i = 0; i < n; i++) {
         int   j = (i + 1) % n;
+        int   ei, ej;
         float ix = xy[2*i], iy = xy[2*i+1], jx = xy[2*j], jy = xy[2*j+1];
         float oix, oiy, ojx, ojy;
         sol_u32 a, c, d, e2;
         rect_project(ix, iy, hw, hh, &oix, &oiy);
         rect_project(jx, jy, hw, hh, &ojx, &ojy);
-        /* front cap (+z): inner_i, outer_i, outer_j, inner_j */
-        a  = mb_push_vertex(b, ix,  iy,  ht, 0,0,1, 0,0);
-        c  = mb_push_vertex(b, oix, oiy, ht, 0,0,1, 0,0);
-        d  = mb_push_vertex(b, ojx, ojy, ht, 0,0,1, 0,0);
-        e2 = mb_push_vertex(b, jx,  jy,  ht, 0,0,1, 0,0);
+        /* front cap (+z): inner_i, outer_i, outer_j, inner_j; UV = (x,y) m */
+        a  = mb_push_vertex(b, ix,  iy,  ht, 0,0,1, ix,  iy);
+        c  = mb_push_vertex(b, oix, oiy, ht, 0,0,1, oix, oiy);
+        d  = mb_push_vertex(b, ojx, ojy, ht, 0,0,1, ojx, ojy);
+        e2 = mb_push_vertex(b, jx,  jy,  ht, 0,0,1, jx,  jy);
         mb_push_triangle(b, a, c, d); mb_push_triangle(b, a, d, e2);
         /* back cap (-z): reverse winding */
-        a  = mb_push_vertex(b, ix,  iy,  -ht, 0,0,-1, 0,0);
-        c  = mb_push_vertex(b, oix, oiy, -ht, 0,0,-1, 0,0);
-        d  = mb_push_vertex(b, ojx, ojy, -ht, 0,0,-1, 0,0);
-        e2 = mb_push_vertex(b, jx,  jy,  -ht, 0,0,-1, 0,0);
+        a  = mb_push_vertex(b, ix,  iy,  -ht, 0,0,-1, ix,  iy);
+        c  = mb_push_vertex(b, oix, oiy, -ht, 0,0,-1, oix, oiy);
+        d  = mb_push_vertex(b, ojx, ojy, -ht, 0,0,-1, ojx, ojy);
+        e2 = mb_push_vertex(b, jx,  jy,  -ht, 0,0,-1, jx,  jy);
         mb_push_triangle(b, a, d, c); mb_push_triangle(b, a, e2, d);
-        /* inner tunnel wall (normal toward the glass = inward) */
+        /* corner-flush: a segment whose endpoints project to different edges
+           (one vertical, one horizontal) rounds a rectangle corner — fill it. */
+        ei = rect_edge(ix, iy, hw, hh);
+        ej = rect_edge(jx, jy, hw, hh);
+        if (ei != ej) {
+            int i_vert = (ei <= 1), j_vert = (ej <= 1);
+            if (i_vert != j_vert) {            /* one vertical + one horizontal */
+                int   ve = i_vert ? ei : ej;       /* vertical edge   (0/1) */
+                int   he = i_vert ? ej : ei;       /* horizontal edge (2/3) */
+                float cx = (ve == 0) ? hw : -hw;
+                float cy = (he == 2) ? hh : -hh;
+                sol_u32 fi, fc, fj;
+                /* front (+z): outer_i, corner, outer_j (CCW) */
+                fi = mb_push_vertex(b, oix, oiy, ht, 0,0,1, oix, oiy);
+                fc = mb_push_vertex(b, cx,  cy,  ht, 0,0,1, cx,  cy);
+                fj = mb_push_vertex(b, ojx, ojy, ht, 0,0,1, ojx, ojy);
+                mb_push_triangle(b, fi, fc, fj);
+                /* back (-z): reverse winding */
+                fi = mb_push_vertex(b, oix, oiy, -ht, 0,0,-1, oix, oiy);
+                fc = mb_push_vertex(b, cx,  cy,  -ht, 0,0,-1, cx,  cy);
+                fj = mb_push_vertex(b, ojx, ojy, -ht, 0,0,-1, ojx, ojy);
+                mb_push_triangle(b, fi, fj, fc);
+            }
+        }
+        /* inner tunnel wall (normal toward the glass = inward); u along the
+           edge, v across the z span */
         {
             float nx = -ix, ny = -iy, nl = sqrtf(nx*nx+ny*ny);
+            float seg = sqrtf((jx-ix)*(jx-ix) + (jy-iy)*(jy-iy));
             if (nl < 1e-4f) nl = 1e-4f; nx /= nl; ny /= nl;
-            a  = mb_push_vertex(b, ix, iy,  ht, nx,ny,0, 0,0);
-            c  = mb_push_vertex(b, ix, iy, -ht, nx,ny,0, 0,0);
-            d  = mb_push_vertex(b, jx, jy, -ht, nx,ny,0, 0,0);
-            e2 = mb_push_vertex(b, jx, jy,  ht, nx,ny,0, 0,0);
+            a  = mb_push_vertex(b, ix, iy,  ht, nx,ny,0, 0.0f,  ht);
+            c  = mb_push_vertex(b, ix, iy, -ht, nx,ny,0, 0.0f, -ht);
+            d  = mb_push_vertex(b, jx, jy, -ht, nx,ny,0, seg,  -ht);
+            e2 = mb_push_vertex(b, jx, jy,  ht, nx,ny,0, seg,   ht);
             mb_push_triangle(b, a, c, d); mb_push_triangle(b, a, d, e2);
         }
     }
@@ -472,8 +514,6 @@ static void window_fill(MeshBuilder *b, const float *xy, int n,
 void make_window(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, sol_f32 style) {
     sol_f32 hw = w * 0.5f, hh = h * 0.5f, ht = t * 0.5f + WINDOW_PROUD;
     int   s = (int)(style + 0.5f);
-    float xy[2 * WINDOW_OUTLINE_MAX];
-    int   n;
     if (fw < 0.01f) fw = 0.01f;
     /* outer rectangular casing (all styles) + sill ledge — the existing geometry */
     aabb_box(b, -hw - fw, -hw,      -hh - fw, hh + fw, -ht, ht);  /* left stile  */
@@ -487,11 +527,26 @@ void make_window(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, so
         aabb_box(b, -hw, hw, -bw * 0.5f, bw * 0.5f, -ht, ht);   /* horizontal bar */
         return;
     }
-    if (s == 1 || s == 2 || s == 3) {      /* shaped: opaque fill = rect minus aperture */
+    /* the shaped inner fill is now its OWN child object (make_window_fill,
+       oak_veneer) so it reads apart from the dark_wood casing; the frame mesh
+       carries only the casing + sill above. */
+}
+
+/* The shaped inner FILL as a STANDALONE mesh (a "window_fill" child object,
+   oak_veneer material — distinct from the dark_wood casing). Two materials =
+   two meshes, so the fill the casing used to carry lives here. Empty for plain
+   (0) and french (4); the arched/pointed/circular spandrel for 1/2/3. */
+void make_window_fill(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, sol_f32 style) {
+    sol_f32 hw = w * 0.5f, hh = h * 0.5f, ht = t * 0.5f + WINDOW_PROUD;
+    int     s  = (int)(style + 0.5f);
+    float   xy[2 * WINDOW_OUTLINE_MAX];
+    int     n;
+    if (fw < 0.01f) fw = 0.01f;
+    if (s == 1 || s == 2 || s == 3) {
         n = window_outline(s, hw, hh, fw, xy, WINDOW_OUTLINE_MAX);
         if (n >= 3) window_fill(b, xy, n, hw, hh, ht);
     }
-    /* s == 0 plain: glass fills the rectangle, no inner fill */
+    /* s == 0 plain / s == 4 french: no fill (empty mesh) */
 }
 
 /* A window's GLASS pane: a centered shape at z=0, drawn on the translucent glass
@@ -1176,6 +1231,7 @@ void make_arrow(MeshBuilder *b, sol_f32 x0, sol_f32 y0,
 static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 static void emit_picture(MeshBuilder *b, const float *p) { make_picture(b, p[0], p[1], p[2]); }
 static void emit_window(MeshBuilder *b, const float *p) { make_window(b, p[0], p[1], p[2], p[3], p[4]); }
+static void emit_window_fill(MeshBuilder *b, const float *p) { make_window_fill(b, p[0], p[1], p[2], p[3], p[4]); }
 static void emit_window_glass(MeshBuilder *b, const float *p) { make_window_glass(b, p[0], p[1], p[2]); }
 #define BOARD_TILE_M 3.0f   /* meters per board-texture repeat (the plaster tile size) */
 static void emit_board(MeshBuilder *b, const float *p) {
@@ -1365,6 +1421,7 @@ static const MeshRefEntry REGISTRY[] = {
     { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
     { "picture", 3, { "w", "h", "t" }, { 1.2f, 0.9f, 0.03f }, emit_picture },
     { "window", 5, { "w", "h", "t", "fw", "style" }, { 1.2f, 1.4f, 0.20f, 0.08f /* == WINDOW_FRAME_W */, 0.0f }, emit_window },
+    { "window_fill", 5, { "w", "h", "t", "fw", "style" }, { 1.2f, 1.4f, 0.20f, 0.08f, 0.0f }, emit_window_fill },
     { "window_glass", 3, { "w", "h", "style" }, { 1.2f, 1.4f, 0.0f }, emit_window_glass },
     /* board: a card grown to furniture scale (item 8) — same slab geometry,
        bottom-origin, front face toward local +Z. Its OWN ref name is its

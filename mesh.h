@@ -40,6 +40,7 @@ void    make_page(MeshBuilder *b, sol_f32 w, sol_f32 h);   /* upright XY quad, +
 void    make_picture(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t);  /* bottom-origin quad, +Z, 0..1 UVs (no tile) */
 #define WINDOW_FRAME_W  0.08f   /* window frame border; the "window" registry "fw" default must match this */
 void    make_window(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, sol_f32 style);
+void    make_window_fill(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, sol_f32 style);
 void    make_window_glass(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 style);
 
 /* A walkable slab (P3 item 7): a room-graph edge embodied — length along X,

@@ -4119,6 +4119,13 @@ static void do_pick(AppState *st, GLFWwindow *w, float ndc_x, float ndc_y) {
     sol_u32 hit;
 
     hit = pick_at(st, w, ndc_x, ndc_y, &t);
+    if (hit) {                                   /* a window's glass/fill child -> select the window */
+        SceneObject *ho = scene_get(&st->scene, hit);
+        if (ho && ho->mesh_ref &&
+            (strcmp(ho->mesh_ref, "window_glass") == 0 ||
+             strcmp(ho->mesh_ref, "window_fill") == 0))
+            hit = ho->parent;
+    }
     st->selected_handle = hit;
     if (hit) {
         SceneObject *o = scene_get(&st->scene, hit);
@@ -10091,6 +10098,63 @@ static sol_u32 window_glass_child(Scene *s, sol_u32 win) {
     return 0;
 }
 
+/* find a window's existing oak inner-fill child (mesh_ref "window_fill"), else 0. */
+static sol_u32 window_fill_child(Scene *s, sol_u32 win) {
+    int i;
+    for (i = 0; i < (int)s->count; i++)
+        if (s->objects[i].parent == win && s->objects[i].mesh_ref &&
+            strcmp(s->objects[i].mesh_ref, "window_fill") == 0)
+            return s->objects[i].handle;
+    return 0;
+}
+
+/* Keep a window's shaped oak FILL child in sync with its style. Shaped windows
+   (arched/pointed/circular) carry a "window_fill" child — oak_veneer, distinct
+   from the dark_wood casing; plain/french carry none. CREATE when a plain
+   window becomes shaped, UPDATE the {w,h,t,fw,style} params when a shaped
+   window's size/style changes (the registry-shared rebuild: re-key, release the
+   old shape, drop the borrow), REMOVE when a shaped window becomes plain/french.
+   Does NOT resolve meshes — every caller already does. Re-fetches any
+   SceneObject* across scene_add (realloc). */
+static void ensure_window_fill(AppState *st, sol_u32 win) {
+    Scene       *s  = &st->scene;
+    SceneObject *wo = scene_get(s, win);
+    sol_u32      child;
+    float        fp[5];
+    int          shaped, si;
+    if (!wo || !wo->mesh_ref || strcmp(wo->mesh_ref, "window") != 0) return;
+    fp[0] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "w");
+    fp[1] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "h");
+    fp[2] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "t");
+    fp[3] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "fw");
+    fp[4] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "style");
+    si     = (int)(fp[4] + 0.5f);
+    shaped = (si == 1 || si == 2 || si == 3);
+    child  = window_fill_child(s, win);
+    if (!shaped) {                          /* plain/french: no fill */
+        if (child) delete_board_card(st, child);
+        return;
+    }
+    if (child == 0) {                       /* CREATE */
+        vec3 one = vec3_make(1.0f, 1.0f, 1.0f);
+        Mesh empty;
+        memset(&empty, 0, sizeof empty);
+        child = scene_add(s, win, empty, vec3_make(0.0f, 0.0f, 0.0f),
+                          quat_identity(), one);
+        scene_kind_set(s, child, KIND_PLAIN);
+        scene_mesh_ref_set(s, child, "window_fill");
+        scene_mesh_params_set(s, child, fp, 5);
+    } else {                                /* UPDATE (registry-shared rebuild) */
+        SceneObject *co    = scene_get(s, child);
+        char         oldkey[160];
+        sol_bool     keyed = co ? mesh_asset_key(co, oldkey) : SOL_FALSE;
+        scene_mesh_params_set(s, child, fp, 5);
+        if (keyed) asset_release(&g_mesh_assets, oldkey);
+        co = scene_get(s, child);
+        if (co) memset(&co->mesh, 0, sizeof co->mesh);
+    }
+}
+
 /* after a window's opening was resized, re-size its glass pane to match (the
    registry-shared rebuild: release the OLD shape by its old key, clear the
    borrow, re-resolve — never mesh_destroy a shared shape). The pane is
@@ -10194,6 +10258,7 @@ static void window_set_style(AppState *st, sol_u32 win, int style) {
         co = scene_get(s, child);
         if (co) memset(&co->mesh, 0, sizeof co->mesh);
     }
+    ensure_window_fill(st, win);   /* add/update/remove the oak fill child to match the new style */
     scene_resolve_meshes(s);
 }
 
@@ -11244,9 +11309,12 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 sol_u32      wroom = (ro && ro->mesh_ref &&
                                       strcmp(ro->mesh_ref, "window") == 0)
                                      ? ro->parent : 0;
-                if (wroom != 0)
+                if (wroom != 0) {
                     window_glass_resize(st, st->resize_board);   /* pane tracks the new opening */
-                if (wroom != 0) room_rebuild_one(st, wroom);
+                    ensure_window_fill(st, st->resize_board);    /* oak fill tracks the new opening */
+                    room_rebuild_one(st, wroom);
+                    scene_resolve_meshes(&st->scene);            /* build the resized fill child */
+                }
                 scene_save(&st->scene, "scene.stml");
                 st->resize_board = 0;
             } else if (st->move_board != 0) {           /* finished a picture/window slide */
@@ -12878,6 +12946,19 @@ static int rescan_mirrors(AppState *st) {
    changes (a workspace switch) — no file load, no glb reimport. The shared
    tail of load_palace. */
 static void world_rebuild(AppState *st) {
+    /* migrate placed shaped windows to the standalone oak fill child: gather the
+       window handles first (ensure_window_fill scene_adds, which reallocs the
+       objects array), then ensure each. A window saved before this feature has
+       its fill baked into the casing mesh — make_window no longer emits it, so
+       this is what gives those windows their oak spandrel back. */
+    sol_u32 wins[256];
+    int     nw = 0, wi;
+    sol_u32 k;
+    for (k = 0; k < st->scene.count && nw < 256; k++)
+        if (st->scene.objects[k].mesh_ref &&
+            strcmp(st->scene.objects[k].mesh_ref, "window") == 0)
+            wins[nw++] = st->scene.objects[k].handle;
+    for (wi = 0; wi < nw; wi++) ensure_window_fill(st, wins[wi]);
     scene_resolve_meshes(&st->scene);
     connections_rebuild(st);
     collide_rebuild(&st->colliders, &st->scene);
@@ -14736,6 +14817,9 @@ static void render(AppState *state) {
             if (g_dark_wood.albedo_tex.id != 0 && o->mesh_ref &&
                 strcmp(o->mesh_ref, "window") == 0)
                 dm = g_dark_wood;                 /* window frame (the glass child is "window_glass", untouched) */
+            if (g_oak_mat.albedo_tex.id != 0 && o->mesh_ref &&
+                strcmp(o->mesh_ref, "window_fill") == 0)
+                dm = g_oak_mat;                   /* shaped inner fill: oak veneer, distinct from the casing */
             if (g_oak_mat.albedo_tex.id != 0 && o->mesh_ref &&
                 strcmp(o->mesh_ref, "card") == 0 &&
                 (o->kind == KIND_FILE || o->kind == KIND_FOLDER)) {
