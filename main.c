@@ -5239,6 +5239,19 @@ static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
     st->drag_moved     = SOL_FALSE;
 }
 
+/* Begin dragging the whole selection together: snapshot every member's board-
+   local position, then drag the anchor on the normal path; the update applies
+   the anchor's delta to the rest. */
+static void group_drag_begin(AppState *st, GLFWwindow *w) {
+    int i;
+    for (i = 0; i < st->sel_count; i++) {
+        SceneObject *o = scene_get(&st->scene, st->sel[i]);
+        st->group_prepos[i] = o ? o->pos : vec3_make(0.0f, 0.0f, 0.0f);
+    }
+    st->group_drag = SOL_TRUE;
+    drag_begin(st, w, st->selected_handle);     /* the anchor leads */
+}
+
 /* Scroll arrives only as events (no poll), so it needs a callback; the window
    user-pointer bridges back to our state. read_input drains scroll_accum. */
 static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
@@ -9074,6 +9087,7 @@ static void board_view_exit(AppState *st) {
     st->drop_target_handle = 0;      /* drop no stale drag-to-file target (Task 8) */
     st->marquee_active   = SOL_FALSE;   /* cancel any in-flight marquee */
     st->marquee_dragging = SOL_FALSE;
+    st->group_drag       = SOL_FALSE;   /* cancel any in-flight group drag (M3) */
 }
 
 /* Advance the board-view camera glide (runs AFTER camera_update so it overrides
@@ -10209,8 +10223,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                        select just this card. */
                     if (st->board_view != 0 && st->sel_count > 1 &&
                         msel_contains(st->sel, st->sel_count, st->selected_handle)) {
-                        /* in the set: leave the set as-is; Task 7 makes the drag a group drag */
-                        drag_begin(st, w, st->selected_handle);
+                        group_drag_begin(st, w);            /* drag the whole set (M3) */
                     } else {
                         if (st->board_view != 0 &&
                             object_is_selectable(&st->scene, st->selected_handle))
@@ -10503,9 +10516,30 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                                st->drag_board_oy);
                         st->drag_moved = SOL_TRUE;     /* a reparent is a real move */
                         arrows_rebuild(st);            /* its arrows follow live */
-                        st->drop_target_handle =
-                            is_fileable_card(&st->scene, st->drag_handle)
-                                ? folder_at_board_point(st, board, blocal) : 0;
+                        if (st->group_drag) {
+                            int  gi, ai = -1;
+                            vec3 gd;
+                            for (gi = 0; gi < st->sel_count; gi++)
+                                if (st->sel[gi] == st->drag_handle) { ai = gi; break; }
+                            if (ai >= 0) {
+                                gd = vec3_sub(o->pos, st->group_prepos[ai]);
+                                for (gi = 0; gi < st->sel_count; gi++) {
+                                    SceneObject *si;
+                                    if (st->sel[gi] == st->drag_handle) continue;
+                                    si = scene_get(&st->scene, st->sel[gi]);
+                                    if (si) si->pos = vec3_add(st->group_prepos[gi], gd);
+                                }
+                            }
+                            st->drop_target_handle =
+                                folder_at_board_point(st, board, blocal);
+                            if (msel_contains(st->sel, st->sel_count,
+                                              st->drop_target_handle))
+                                st->drop_target_handle = 0;   /* not a selected folder */
+                        } else {
+                            st->drop_target_handle =
+                                is_fileable_card(&st->scene, st->drag_handle)
+                                    ? folder_at_board_point(st, board, blocal) : 0;
+                        }
                     } else {                           /* ---- ground mode ---- */
                         float t;
                         st->drop_target_handle = 0;
