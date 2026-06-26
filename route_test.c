@@ -87,11 +87,15 @@ static void test_window_frame_styles(void) {
 }
 
 static void test_window_glass_styles(void) {
-    MeshBuilder mb; sol_u32 rect, disc;
+    MeshBuilder mb; sol_u32 rect, disc, arch, pnt;
     mb_init(&mb); make_window_glass(&mb, 1.2f, 1.4f, 0.0f); rect = mb.index_count; mb_free(&mb);
     mb_init(&mb); make_window_glass(&mb, 1.2f, 1.4f, 3.0f); disc = mb.index_count; mb_free(&mb);
+    mb_init(&mb); make_window_glass(&mb, 1.2f, 1.4f, 1.0f); arch = mb.index_count; mb_free(&mb);
+    mb_init(&mb); make_window_glass(&mb, 1.2f, 1.4f, 2.0f); pnt  = mb.index_count; mb_free(&mb);
     assert(disc > rect);   /* a disc fan has many tris vs a 2-tri quad */
-    printf("  window glass styles: rect=%u disc=%u OK\n", (unsigned)rect, (unsigned)disc);
+    assert(arch > rect); assert(pnt > rect);
+    printf("  window glass styles: rect=%u disc=%u arch=%u pnt=%u OK\n",
+           (unsigned)rect, (unsigned)disc, (unsigned)arch, (unsigned)pnt);
 }
 
 int main(void) {

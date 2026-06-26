@@ -9929,7 +9929,7 @@ static void cmd_add_room(AppState *st) {
 #define WINDOW_DEF_W    1.2f
 #define WINDOW_DEF_H    1.4f
 #define WINDOW_DEF_SILL 0.9f
-#define WINDOW_FRAME_W  0.08f
+/* WINDOW_FRAME_W lives in mesh.h (shared with make_window_glass) */
 
 /* Rebuild one room's shell + frame, re-collecting its door openings (via a
    self-contained route_all pass) and any child window objects. Mirrors the

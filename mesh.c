@@ -516,8 +516,8 @@ static void window_glass_fan(MeshBuilder *b, const float *xy, int n) {
 void make_window_glass(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 style) {
     sol_f32 hw = w * 0.5f, hh = h * 0.5f;
     /* fw MUST equal make_window's "fw" registry default (0.08) so the glass edge
-       meets the muntin exactly. WINDOW_FRAME_W lives in main.c; mirror the value. */
-    sol_f32 fw = 0.08f;
+       meets the muntin exactly. Shared via WINDOW_FRAME_W in mesh.h. */
+    sol_f32 fw = WINDOW_FRAME_W;
     int     s  = (int)(style + 0.5f);
     float   xy[2 * WINDOW_OUTLINE_MAX];
     int     n;
@@ -1364,7 +1364,7 @@ static const MeshRefEntry REGISTRY[] = {
     { "gate", 4, { "w", "h", "t", "post" }, { 1.6f, 2.4f, 0.18f, 0.16f }, emit_gate },
     { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
     { "picture", 3, { "w", "h", "t" }, { 1.2f, 0.9f, 0.03f }, emit_picture },
-    { "window", 5, { "w", "h", "t", "fw", "style" }, { 1.2f, 1.4f, 0.20f, 0.08f, 0.0f }, emit_window },
+    { "window", 5, { "w", "h", "t", "fw", "style" }, { 1.2f, 1.4f, 0.20f, 0.08f /* == WINDOW_FRAME_W */, 0.0f }, emit_window },
     { "window_glass", 3, { "w", "h", "style" }, { 1.2f, 1.4f, 0.0f }, emit_window_glass },
     /* board: a card grown to furniture scale (item 8) — same slab geometry,
        bottom-origin, front face toward local +Z. Its OWN ref name is its
