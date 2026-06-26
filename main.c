@@ -9885,6 +9885,127 @@ static void cmd_add_room(AppState *st) {
     printf("added a free room\n");
 }
 
+/* --- window placement -------------------------------------------- */
+
+#define WINDOW_DEF_W    1.2f
+#define WINDOW_DEF_H    1.4f
+#define WINDOW_DEF_SILL 0.9f
+#define WINDOW_FRAME_W  0.08f
+
+/* Rebuild one room's shell + frame, re-collecting its door openings (via a
+   self-contained route_all pass) and any child window objects. Mirrors the
+   connections_rebuild block exactly — same flag expressions, same ceiling
+   guard condition. */
+static void room_rebuild_one(AppState *st, sol_u32 room) {
+    Scene  *s = &st->scene;
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *shell = &s->objects[i];
+        RoomOpening  ops[ROOM_OPENINGS_CAP];
+        int          no;
+        float        w, d, h;
+        MeshBuilder  mb;
+        if (shell->parent != room || !shell->mesh_ref ||
+            strcmp(shell->mesh_ref, "room") != 0) continue;
+        w  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "w");
+        d  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "d");
+        h  = mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "h");
+        no = route_room_openings(s, room, ops, ROOM_OPENINGS_CAP);
+        room_append_windows(s, room, ops, &no, ROOM_OPENINGS_CAP);
+        mesh_destroy(&shell->mesh);
+        mb_init(&mb);
+        make_room_doored(&mb, w, d, h, ROUTE_WALL_T,
+                         mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "wn") > 0.5f,
+                         mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "we") > 0.5f,
+                         mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ws") > 0.5f,
+                         mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ww") > 0.5f,
+                         (g_dark_wood.albedo_tex.id == 0 &&
+                          mesh_ref_param("room", shell->mesh_params, shell->mesh_param_count, "ceil") > 0.5f),
+                         ops, no);
+        if (mb.index_count > 0) shell->mesh = mesh_from_builder(&mb);
+        mb_free(&mb);
+        room_frame_build(shell, ops, no);
+        break;
+    }
+}
+
+/* Place a window on the wall in front of the camera (nearest room wall the
+   look-ray hits). The object is parented to the room, center-origin, with
+   the window local +z pointing into the room interior. */
+static void cmd_place_window(AppState *st) {
+    Scene   *s = &st->scene;
+    Ray      ray;
+    sol_u32  best_room = 0, h;
+    int      best_wall = 0;
+    vec3     best_center;
+    float    best_t = 1e30f;
+    sol_u32  i;
+    float    hw = WINDOW_DEF_W * 0.5f + WINDOW_FRAME_W;
+    float    hh = WINDOW_DEF_H * 0.5f + WINDOW_FRAME_W;
+
+    best_center = vec3_make(0.0f, 0.0f, 0.0f);
+    ray.origin  = st->camera.pos;
+    ray.dir     = camera_forward(&st->camera);
+
+    for (i = 0; i < s->count; i++) {
+        SceneObject *room = &s->objects[i];
+        const char  *rt;
+        RoomRect     r;
+        float        ceil_y, tt;
+        int          wall;
+        vec3         center;
+        vec3         diff;
+        rt = scene_meta_get(s, room->handle, "room_type");
+        if (!rt || (strcmp(rt, "home") != 0 && strcmp(rt, "mirror") != 0)) continue;
+        if (!scene_object_active(s, room->handle)) continue;
+        r      = editor_room_rect(s, room->handle);
+        ceil_y = r.floor_y + room_interior_height(s, room->handle);
+        if (!descend_wall_mount(r, ray, ceil_y, hw, hh, 0.0f, &wall, &center)) continue;
+        diff = vec3_sub(center, ray.origin);
+        tt   = vec3_dot(diff, diff);   /* squared dist — monotone, fine for min */
+        if (tt < best_t) {
+            best_t      = tt;
+            best_room   = room->handle;
+            best_wall   = wall;
+            best_center = center;
+        }
+    }
+    if (best_room == 0) { printf("no wall in front to place a window\n"); return; }
+
+    {
+        static const float wyaw[4] = { 0.0f, -90.0f, 180.0f, 90.0f };
+        vec3  lp    = scene_world_to_local(s, best_room, best_center);
+        quat  rot   = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                           sol_radians(wyaw[best_wall]));
+        vec3  one   = vec3_make(1.0f, 1.0f, 1.0f);
+        Mesh  empty;
+        float p[4];
+        char  wbuf[8];
+        memset(&empty, 0, sizeof empty);
+        p[0] = WINDOW_DEF_W;
+        p[1] = WINDOW_DEF_H;
+        p[2] = ROUTE_WALL_T;
+        p[3] = WINDOW_FRAME_W;
+        h = scene_add(s, best_room, empty, lp, rot, one);
+        scene_kind_set(s, h, KIND_PLAIN);
+        scene_mesh_ref_set(s, h, "window");
+        scene_mesh_params_set(s, h, p, 4);
+        snprintf(wbuf, sizeof wbuf, "%d", best_wall);
+        scene_meta_set(s, h, "wall", wbuf);
+        scene_meta_set(s, h, "glass", "none");
+        mint_tag_ws(st, h);
+        scene_resolve_meshes(s);
+        room_rebuild_one(st, best_room);
+        st->selected_handle = h;
+        scene_save(s, "scene.stml");
+        printf("placed window on wall %d\n", best_wall);
+    }
+}
+
+static sol_bool can_place_window(AppState *st) {
+    return (sol_bool)(st->board_view == 0 && st->reader_state == READER_IDLE);
+}
+
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
@@ -9904,6 +10025,7 @@ static Command g_commands[] = {
     { "Rescan mirrors",              "R", GLFW_KEY_R, cmd_rescan_mirrors,    NULL,                  SOL_FALSE },
     { "Reload scene",                "L", GLFW_KEY_L, cmd_reload_scene,      NULL,                  SOL_FALSE },
     { "Spawn whiteboard",            "B", GLFW_KEY_B, cmd_mint_whiteboard,   NULL,                  SOL_FALSE },
+    { "Place window",                NULL, 0,          cmd_place_window,      can_place_window,      SOL_FALSE },
     { "Cut selected cards",          NULL, 0,          cmd_cut_selection,     can_cut_selection,     SOL_FALSE },
     { "Paste cards",                 NULL, 0,          cmd_paste_cards,       can_paste_cards,       SOL_FALSE },
     { "Mint codex (book)",           "V", GLFW_KEY_V, cmd_mint_codex,        NULL,                  SOL_FALSE },
