@@ -363,11 +363,13 @@ void make_picture(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t) {
 
 /* A window assembly's FRAME (Place Windows, Phase 1): a rectangular dark_wood
    ring around a centered opening [-w/2,w/2] x [-h/2,h/2], spanning the wall
-   thickness in z [-t/2,t/2], border width fw, plus a modest interior sill
-   ledge. Center-origin so the object's transform sits at the hole center.
-   The glass pane (make_window_glass) is a separate object. */
+   thickness plus WINDOW_PROUD proud of each face, border width fw, plus a
+   modest interior sill ledge. Center-origin so the object's transform sits at
+   the hole center. The glass pane (make_window_glass) is a separate object. */
+#define WINDOW_PROUD 0.05f   /* frame stands this far proud of each wall face,
+                                clearing the proud plaster/reveal veneer */
 void make_window(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw) {
-    sol_f32 hw = w * 0.5f, hh = h * 0.5f, ht = t * 0.5f;
+    sol_f32 hw = w * 0.5f, hh = h * 0.5f, ht = t * 0.5f + WINDOW_PROUD;
     if (fw < 0.01f) fw = 0.01f;
     aabb_box(b, -hw - fw, -hw,      -hh - fw, hh + fw, -ht, ht);  /* left stile  */
     aabb_box(b,  hw,       hw + fw, -hh - fw, hh + fw, -ht, ht);  /* right stile */
