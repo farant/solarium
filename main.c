@@ -9088,6 +9088,8 @@ static void board_view_exit(AppState *st) {
     st->marquee_active   = SOL_FALSE;   /* cancel any in-flight marquee */
     st->marquee_dragging = SOL_FALSE;
     st->group_drag       = SOL_FALSE;   /* cancel any in-flight group drag (M3) */
+    sel_clear(st);                      /* multi-select is board-local: don't leak the
+                                           set (or anchor) across a board exit */
 }
 
 /* Advance the board-view camera glide (runs AFTER camera_update so it overrides
