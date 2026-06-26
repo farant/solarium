@@ -10619,6 +10619,27 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 st->drop_target_handle = 0;
                 scene_save(&st->scene, "scene.stml");
                 st->move_board = 0;
+            } else if (st->group_drag) {                /* finished a group move/file */
+                sol_u32     tgt  = st->drop_target_handle;
+                const char *link = (tgt != 0 &&
+                                    !msel_contains(st->sel, st->sel_count, tgt))
+                                   ? scene_meta_get(&st->scene, tgt, "link")
+                                   : (const char *)0;
+                int i;
+                if (link && link[0]) {                  /* dropped on a folder: file all */
+                    /* re-tag EVERY selected item, folders included, so the whole
+                       selection moves; a folder's own link target is unaffected */
+                    for (i = 0; i < st->sel_count; i++) {
+                        SceneObject *si = scene_get(&st->scene, st->sel[i]);
+                        if (si) si->pos = st->group_prepos[i];   /* keep the arrangement */
+                        scene_meta_set(&st->scene, st->sel[i], "page", link);
+                    }
+                    printf("filed %d cards onto %s\n", st->sel_count, link);
+                    sel_clear(st);
+                }                                       /* else: a plain group move, positions kept */
+                st->group_drag = SOL_FALSE;
+                arrows_rebuild(st);
+                scene_save(&st->scene, "scene.stml");
             } else if (st->drag_handle != 0 && st->drag_moved) {
                 SceneObject *o = scene_get(&st->scene, st->drag_handle);
                 sol_bool filed = SOL_FALSE;
