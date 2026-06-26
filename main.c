@@ -10502,7 +10502,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                        is the mirror's record and stays in its room (§1.3) —
                        its drop pins an ALIAS instead (see release below) */
                     if (o->kind == KIND_ALIAS || o->kind == KIND_NOTE ||
-                        object_is_folder(&st->scene, st->drag_handle))
+                        object_is_folder(&st->scene, st->drag_handle) ||
+                        st->group_drag)   /* a group anchor is always a board card —
+                                             incl. a picture, which alone slides via
+                                             move_board, not this drag path */
                         board = board_under_ray(st, r, &blocal);
                     if (board != 0) {                  /* ---- board mode ---- */
                         if (st->drag_board != board) { /* entering / switching */
