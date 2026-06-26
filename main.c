@@ -7579,9 +7579,6 @@ static sol_bool is_fileable_card(Scene *s, sol_u32 h) {
 }
 
 /* A board-child note/picture/folder is multi-selectable. */
-/* Tasks 3-8 will use these helpers; suppress unused-function until then. */
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
 static sol_bool object_is_selectable(Scene *s, sol_u32 h) {
     SceneObject *o   = scene_get(s, h);
     SceneObject *par;
@@ -7596,10 +7593,14 @@ static sol_bool object_is_selectable(Scene *s, sol_u32 h) {
 
 /* selection-set wrappers that keep selected_handle (the anchor) in sync:
    sel_count==0 -> selected_handle==0; sel_count==1 -> selected_handle==sel[0]. */
+/* sel_clear gets a caller in a later task; suppress until then. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
 static void sel_clear(AppState *st) {
     st->sel_count = 0;
     st->selected_handle = 0;
 }
+#pragma clang diagnostic pop
 static void sel_set_single(AppState *st, sol_u32 h) {
     st->sel[0] = h;
     st->sel_count = 1;
@@ -7615,7 +7616,6 @@ static void sel_toggle_h(AppState *st, sol_u32 h) {
     st->selected_handle = now ? h
                         : (st->sel_count ? st->sel[st->sel_count - 1] : 0);
 }
-#pragma clang diagnostic pop
 
 /* Tag a board-pinned card with its board's CURRENT page, so a card created or
    dropped while viewing a sub-page belongs to that page, not the root "/".
@@ -10133,17 +10133,40 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     /* else: double-click a non-note card -> nothing (the select stands) */
                 } else if (try_connect(st, st->selected_handle)) {
                     /* the press completed a connection — no drag */
-                } else if (st->selected_handle != 0 &&
+                } else if (st->board_view != 0 &&
+                           (glfwGetKey(w, GLFW_KEY_LEFT_SHIFT)  == GLFW_PRESS ||
+                            glfwGetKey(w, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) &&
+                           st->selected_handle != 0 &&
+                           object_is_selectable(&st->scene, st->selected_handle)) {
+                    sel_toggle_h(st, st->selected_handle);   /* shift-click: toggle, no drag */
+                } else if (st->sel_count <= 1 && st->selected_handle != 0 &&
                            (board_is_mounted(&st->scene, st->selected_handle) ||
                             note_resizable(&st->scene, st->selected_handle) ||
                             picture_on_board(&st->scene, st->selected_handle)) &&
                            resize_corner_pick(st, w)) {
-                    /* grabbed a corner handle — resize, not carry */
-                } else if (st->selected_handle != 0 &&
+                    /* grabbed a corner handle — resize (single selection only) */
+                } else if (st->sel_count <= 1 && st->selected_handle != 0 &&
                            picture_move_pick(st, w)) {
-                    /* grabbed a picture's body — slide it on its wall or board */
-                } else if (st->selected_handle != 0 && st->selected_handle != st->page_handle)
-                    drag_begin(st, w, st->selected_handle);
+                    /* grabbed a picture's body — slide it (single selection only) */
+                } else if (st->selected_handle != 0 && st->selected_handle != st->page_handle) {
+                    /* a plain click on a card: keep an existing multi-selection it
+                       belongs to (so a later drag moves the group — Task 7); otherwise
+                       select just this card. */
+                    if (st->board_view != 0 && st->sel_count > 1 &&
+                        msel_contains(st->sel, st->sel_count, st->selected_handle)) {
+                        /* in the set: leave the set as-is; Task 7 makes the drag a group drag */
+                        drag_begin(st, w, st->selected_handle);
+                    } else {
+                        if (st->board_view != 0 &&
+                            object_is_selectable(&st->scene, st->selected_handle))
+                            sel_set_single(st, st->selected_handle);
+                        else if (st->board_view != 0)
+                            st->sel_count = 0;   /* clicked a non-card: drop any multi-
+                                                    selection; keep this as a plain single
+                                                    selection (selected_handle stays) */
+                        drag_begin(st, w, st->selected_handle);
+                    }
+                }
             } else {
                 float   t;
                 int     ww, wh;
