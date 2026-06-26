@@ -13746,7 +13746,8 @@ static void draw_mesh(const AppState *state, Mesh mesh, mat4 model,
     rhi_draw_indexed(0, mesh.index_count);
 }
 
-#define GLASS_OPACITY 0.6f   /* P9 item 2: stained-glass surface opacity (tune by eye) */
+#define GLASS_OPACITY    0.6f  /* P9 item 2: stained-glass surface opacity (tune by eye) */
+#define GLASS_DRAW_MAX  64     /* sorted transparent pass capacity (church_glass + window_glass) */
 /* P9 item 2: the stained-glass draw — the SAME PBR shader (glass stays lit + IBL
    + emissive), on the alpha-blend / depth-write-off glass pipeline, with the
    surface opacity overriding bind_scene_uniforms' opaque default. */
@@ -14449,6 +14450,8 @@ static void render(AppState *state) {
             continue;                             /* ponds: the WATER PASS draws them */
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_glass") == 0)
             continue;                             /* P9 item 2: the GLASS sub-pass draws them */
+        if (o->mesh_ref && strcmp(o->mesh_ref, "window_glass") == 0)
+            continue;                             /* Windows: drawn in the glass sub-pass */
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_decals") == 0)
             continue;                             /* P9 item 3: the DECAL sub-pass draws them */
         state->draws_total++;                     /* the yardstick: would draw */
@@ -15287,15 +15290,17 @@ static void render(AppState *state) {
        HDR buffer (so it blooms + tonemaps + grades). One mesh per church; the
        object-level sort orders multiple churches. */
     {
-        sol_u32 gidx[16];
-        float   gdist[16];
+        sol_u32 gidx[GLASS_DRAW_MAX];
+        float   gdist[GLASS_DRAW_MAX];
         int     gn = 0, ga, gb;
-        for (i = 0; i < state->scene.count && gn < 16; i++) {
+        for (i = 0; i < state->scene.count && gn < GLASS_DRAW_MAX; i++) {
             const SceneObject *o = &state->scene.objects[i];
             mat4  gm;
             float dx, dy, dz;
             if (o->mesh.index_count == 0) continue;
-            if (!o->mesh_ref || strcmp(o->mesh_ref, "church_glass") != 0) continue;
+            if (!o->mesh_ref ||
+                (strcmp(o->mesh_ref, "church_glass") != 0 &&
+                 strcmp(o->mesh_ref, "window_glass") != 0)) continue;
             if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
             if (vis && !vis[o->handle]) continue;
             gm = scene_world_matrix(&state->scene, o);
