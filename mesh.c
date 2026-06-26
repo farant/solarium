@@ -361,6 +361,34 @@ void make_picture(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t) {
     mb_push_triangle(b, v0, v2, v3);
 }
 
+/* A window assembly's FRAME (Place Windows, Phase 1): a rectangular dark_wood
+   ring around a centered opening [-w/2,w/2] x [-h/2,h/2], spanning the wall
+   thickness in z [-t/2,t/2], border width fw, plus a modest interior sill
+   ledge. Center-origin so the object's transform sits at the hole center.
+   The glass pane (make_window_glass) is a separate object. */
+void make_window(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw) {
+    sol_f32 hw = w * 0.5f, hh = h * 0.5f, ht = t * 0.5f;
+    if (fw < 0.01f) fw = 0.01f;
+    aabb_box(b, -hw - fw, -hw,      -hh - fw, hh + fw, -ht, ht);  /* left stile  */
+    aabb_box(b,  hw,       hw + fw, -hh - fw, hh + fw, -ht, ht);  /* right stile */
+    aabb_box(b, -hw,       hw,       hh,      hh + fw, -ht, ht);  /* top rail    */
+    aabb_box(b, -hw,       hw,      -hh - fw, -hh,     -ht, ht);  /* bottom rail */
+    aabb_box(b, -hw - fw,  hw + fw, -hh - fw - 0.03f, -hh - fw, -ht, ht + 0.06f); /* sill ledge */
+}
+
+/* A window's GLASS pane: a centered quad at z=0, drawn on the translucent glass
+   pipeline. base_color (material) tints it. */
+void make_window_glass(MeshBuilder *b, sol_f32 w, sol_f32 h) {
+    sol_f32 hw = w * 0.5f, hh = h * 0.5f;
+    sol_u32 v0, v1, v2, v3;
+    v0 = mb_push_vertex(b, -hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f);
+    v1 = mb_push_vertex(b,  hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f);
+    v2 = mb_push_vertex(b,  hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f);
+    v3 = mb_push_vertex(b, -hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f);
+    mb_push_triangle(b, v0, v1, v2);
+    mb_push_triangle(b, v0, v2, v3);
+}
+
 /* A walkable slab — the second EMBODIMENT of a room-graph edge (a path
    between distant rooms; the shared doorway wall is the first). Length runs
    along X, width along Z, the walking surface at y=0 (the slab hangs below,
@@ -1000,6 +1028,8 @@ void make_arrow(MeshBuilder *b, sol_f32 x0, sol_f32 y0,
 
 static void emit_card(MeshBuilder *b, const float *p) { make_card(b, p[0], p[1], p[2]); }
 static void emit_picture(MeshBuilder *b, const float *p) { make_picture(b, p[0], p[1], p[2]); }
+static void emit_window(MeshBuilder *b, const float *p) { make_window(b, p[0], p[1], p[2], p[3]); }
+static void emit_window_glass(MeshBuilder *b, const float *p) { make_window_glass(b, p[0], p[1]); }
 #define BOARD_TILE_M 3.0f   /* meters per board-texture repeat (the plaster tile size) */
 static void emit_board(MeshBuilder *b, const float *p) {
     make_card(b, p[0], p[1], p[2]);
@@ -1187,6 +1217,8 @@ static const MeshRefEntry REGISTRY[] = {
     { "gate", 4, { "w", "h", "t", "post" }, { 1.6f, 2.4f, 0.18f, 0.16f }, emit_gate },
     { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
     { "picture", 3, { "w", "h", "t" }, { 1.2f, 0.9f, 0.03f }, emit_picture },
+    { "window", 4, { "w", "h", "t", "fw" }, { 1.2f, 1.4f, 0.20f, 0.08f }, emit_window },
+    { "window_glass", 2, { "w", "h" }, { 1.2f, 1.4f }, emit_window_glass },
     /* board: a card grown to furniture scale (item 8) — same slab geometry,
        bottom-origin, front face toward local +Z. Its OWN ref name is its
        identity: the drag code recognizes a pinboard by mesh_ref "board". */
