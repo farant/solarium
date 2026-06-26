@@ -55,7 +55,7 @@ static sol_u32 add_island(Scene *s, float x, float y, float z, float w, float d)
 static void test_window_sill_panel(void) {
     MeshBuilder mb;
     RoomOpening door, win;
-    int door_idx, win_idx;
+    sol_u32 door_idx, win_idx;
 
     door.wall = ROOM_WALL_N; door.center = 0.0f; door.width = 1.4f;
     door.height = 2.1f; door.sill = 0.0f;
@@ -64,14 +64,15 @@ static void test_window_sill_panel(void) {
     door_idx = mb.index_count;
     mb_free(&mb);
 
-    win = door; win.sill = 0.9f; win.height = 2.3f;
+    win = door; win.sill = 0.9f;
     mb_init(&mb);
     make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1, 1, 1, 1, 0, &win, 1);
     win_idx = mb.index_count;
     mb_free(&mb);
 
     assert(win_idx > door_idx);   /* the sill box adds faces */
-    printf("  window sill panel: door=%d win=%d OK\n", door_idx, win_idx);
+    printf("  window sill panel: door=%u win=%u OK\n",
+           (unsigned)door_idx, (unsigned)win_idx);
 }
 
 int main(void) {

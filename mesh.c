@@ -303,7 +303,7 @@ static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
             else      aabb_box(b, f0, f1, 0.0f, h, cur, gL);
         }
         if (i < k) {
-            if (sl[i] > 0.0f) {                /* sill below the gap (windows) */
+            if (sl[i] > 0.0f && sl[i] < oy[i]) {  /* sill below the gap (windows) */
                 if (runx) aabb_box(b, gL, gR, 0.0f, sl[i], f0, f1);
                 else      aabb_box(b, f0, f1, 0.0f, sl[i], gL, gR);
             }
