@@ -9935,7 +9935,7 @@ static void room_rebuild_one(AppState *st, sol_u32 room) {
 static void cmd_place_window(AppState *st) {
     Scene   *s = &st->scene;
     Ray      ray;
-    sol_u32  best_room = 0, h;
+    sol_u32  best_room = 0, h = 0;
     int      best_wall = 0;
     vec3     best_center;
     float    best_t = 1e30f;
@@ -9974,13 +9974,19 @@ static void cmd_place_window(AppState *st) {
 
     {
         static const float wyaw[4] = { 0.0f, -90.0f, 180.0f, 90.0f };
-        vec3  lp    = scene_world_to_local(s, best_room, best_center);
+        RoomRect br = editor_room_rect(s, best_room);
         quat  rot   = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
                                            sol_radians(wyaw[best_wall]));
         vec3  one   = vec3_make(1.0f, 1.0f, 1.0f);
+        vec3  lp;
         Mesh  empty;
         float p[4];
         char  wbuf[8];
+        /* keep the aim-derived along-wall X/Z; snap only Y to the default sill
+           so the window center sits at floor + sill + h/2 (matches
+           room_append_windows' sill = pos.y - h/2). User drags to adjust. */
+        best_center.y = br.floor_y + WINDOW_DEF_SILL + WINDOW_DEF_H * 0.5f;
+        lp = scene_world_to_local(s, best_room, best_center);
         memset(&empty, 0, sizeof empty);
         p[0] = WINDOW_DEF_W;
         p[1] = WINDOW_DEF_H;
