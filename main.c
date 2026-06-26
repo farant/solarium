@@ -10160,10 +10160,13 @@ static void window_set_glass(AppState *st, sol_u32 win, const char *name) {
 static const char *WINDOW_STYLE_NAME[5] = {
     "plain", "arched", "pointed", "circular", "french"
 };
+#define WINDOW_STYLE_N ((int)(sizeof WINDOW_STYLE_NAME / sizeof WINDOW_STYLE_NAME[0]))
 
 /* Rewrite the style param on BOTH the window frame (5 params) and its glass
    child (3 params) via the registry-rebuild law.  The wall opening is unchanged
-   so no wall rebuild is needed. */
+   so no wall rebuild is needed.  The glass child's params are {w, h, style}
+   where w/h are copied from the FRAME (the pane always tracks the opening's
+   dimensions), so the glass never reads its own w/h here. */
 static void window_set_style(AppState *st, sol_u32 win, int style) {
     Scene       *s     = &st->scene;
     sol_u32      child = window_glass_child(s, win);
@@ -12168,7 +12171,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 SceneObject *so = scene_get(&st->scene, st->selected_handle);
                 int idx = so ? (int)(mesh_ref_param("window", so->mesh_params,
                                     so->mesh_param_count, "style") + 0.5f) : 0;
-                idx = (idx + (right ? 1 : 5 - 1)) % 5;
+                idx = (idx + (right ? 1 : WINDOW_STYLE_N - 1)) % WINDOW_STYLE_N;
                 window_set_style(st, st->selected_handle, idx);
                 scene_save(&st->scene, "scene.stml");
                 printf("window style: %s\n", WINDOW_STYLE_NAME[idx]);
