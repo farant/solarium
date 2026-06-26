@@ -2913,6 +2913,9 @@ typedef struct AppState {
     /* Board multi-select (Board Multi-Select Tasks 2-8) */
     sol_u32     sel[MULTISEL_CAP];   /* multi-select set; <=1 mirrors selected_handle */
     int         sel_count;
+    sol_u32     cut[MULTISEL_CAP];   /* cut buffer (Cmd+X): handles marked to MOVE on paste */
+    int         cut_count;           /* 0 = nothing cut; GLOBAL — survives board_view_exit */
+    sol_bool    cut_was_down;        /* edge-detect for Cmd+X */
     sol_bool    marquee_active;      /* a marquee gesture is underway (M2) */
     sol_bool    marquee_dragging;    /* moved past the slop -> a real rubber-band (M2) */
     sol_bool    marquee_add;         /* shift held -> union, else replace (M2) */
@@ -7921,6 +7924,84 @@ static void mint_tag_ws(AppState *st, sol_u32 h) {
                        st->scene.active_ws[0] ? st->scene.active_ws : "home");
 }
 
+/* ---- cut & paste board cards (Cmd+X / Cmd+V) ---------------------------
+   A cut MARKS a set of board-card handles without removing them; paste MOVES
+   them onto the board you're viewing, on its active page. The cut buffer is
+   GLOBAL (not cleared on board_view_exit) so a paste can cross boards. */
+
+static sol_bool handle_is_cut(const AppState *st, sol_u32 h) {
+    int i;
+    for (i = 0; i < st->cut_count; i++)
+        if (st->cut[i] == h) return SOL_TRUE;
+    return SOL_FALSE;
+}
+
+/* Move one board card onto (board, page), preserving its board-local layout.
+   Same board: just retag the page (position is already board-local). Cross
+   board: re-parent, re-pin onto the new face (keep local x/y, recompute the
+   pin z from the new board's thickness), retag the page, and re-tag workspace
+   so it joins the world you're viewing. NOTE: scene_meta_set may realloc the
+   object array — set o->parent/o->pos FIRST and never deref o afterwards. */
+static void card_move_to_page(AppState *st, sol_u32 handle,
+                              sol_u32 board, const char *page) {
+    SceneObject *o = scene_get(&st->scene, handle);
+    if (!o || board == 0) return;
+    if (o->parent != board) {                /* cross-board: re-parent + re-pin + re-world */
+        vec3 local = vec3_make(o->pos.x, o->pos.y, 0.0f);
+        o->parent = board;
+        o->pos    = board_pin_pos(&st->scene, board, handle, local, 0.0f, 0.0f);
+        scene_meta_set(&st->scene, handle, "page", page);   /* may realloc; o now stale */
+        mint_tag_ws(st, handle);                            /* inherit the target board's world */
+        return;
+    }
+    scene_meta_set(&st->scene, handle, "page", page);       /* same board: just retag the page */
+}
+
+/* Cmd+V when a cut is pending: move every cut card to the viewed board's
+   active page, consume the cut (cards un-dim), deselect, and persist. */
+static void cmd_paste_cut(AppState *st) {
+    sol_u32     board = st->board_view;
+    char        page[PAGE_SLUG_CAP];
+    const char *ap;
+    int         i, n;
+    if (board == 0 || st->cut_count == 0) return;
+    ap = scene_meta_get(&st->scene, board, "active_page");
+    /* copy the slug out before any scene_meta_set realloc invalidates the meta ptr */
+    snprintf(page, sizeof page, "%s", (ap && ap[0]) ? ap : "/");
+    n = st->cut_count;
+    for (i = 0; i < n; i++)
+        card_move_to_page(st, st->cut[i], board, page);
+    st->cut_count = 0;                        /* consume the cut: cards un-dim */
+    sel_clear(st);                            /* nothing selected after a paste */
+    scene_save(&st->scene, "scene.stml");
+    printf("pasted %d card(s) to %s\n", n, page);
+}
+
+/* Cmd+X: copy the selection into the cut buffer (cards stay, render dimmed).
+   With an EMPTY selection it clears the cut — the explicit "cancel" gesture. */
+static void cmd_cut_selection(AppState *st) {
+    int i;
+    if (st->board_view == 0) return;
+    if (st->sel_count == 0) {                 /* cut nothing = cancel the pending cut */
+        st->cut_count = 0;
+        printf("cut cleared\n");
+        return;
+    }
+    for (i = 0; i < st->sel_count; i++) st->cut[i] = st->sel[i];
+    st->cut_count = st->sel_count;
+    printf("cut %d card(s)\n", st->cut_count);
+}
+
+/* palette wrappers + availability predicates */
+static void cmd_paste_cards(AppState *st) { cmd_paste_cut(st); }
+
+static sol_bool can_cut_selection(AppState *st) {
+    return (sol_bool)(st->board_view != 0 && st->sel_count > 0);
+}
+static sol_bool can_paste_cards(AppState *st) {
+    return (sol_bool)(st->board_view != 0 && st->cut_count > 0);
+}
+
 /* H mints a terrain ISLAND ahead of you, at your floor level (item 10):
    press it while flying and the island FLOATS there — vertical
    placement for free. room_type meta makes it LAND (architecture is
@@ -9780,6 +9861,8 @@ static Command g_commands[] = {
     { "Rescan mirrors",              "R", GLFW_KEY_R, cmd_rescan_mirrors,    NULL,                  SOL_FALSE },
     { "Reload scene",                "L", GLFW_KEY_L, cmd_reload_scene,      NULL,                  SOL_FALSE },
     { "Spawn whiteboard",            "B", GLFW_KEY_B, cmd_mint_whiteboard,   NULL,                  SOL_FALSE },
+    { "Cut selected cards",          NULL, 0,          cmd_cut_selection,     can_cut_selection,     SOL_FALSE },
+    { "Paste cards",                 NULL, 0,          cmd_paste_cards,       can_paste_cards,       SOL_FALSE },
     { "Mint codex (book)",           "V", GLFW_KEY_V, cmd_mint_codex,        NULL,                  SOL_FALSE },
     { "Mint synth book",             NULL, 0,          cmd_mint_synth,        NULL,                  SOL_FALSE },
     { "Mint island",                 "H", GLFW_KEY_H, cmd_mint_island,       NULL,                  SOL_FALSE },
@@ -9941,6 +10024,7 @@ static void delete_board_card(AppState *st, sol_u32 h) {
     if (st->drag_handle        == h) st->drag_handle        = 0;
     if (st->drop_target_handle == h) st->drop_target_handle = 0;
     if (st->selected_handle    == h) st->selected_handle    = 0;
+    msel_remove(st->cut, &st->cut_count, h);   /* a cut card was deleted: drop it */
     scene_remove(&st->scene, h);
 }
 
@@ -11533,15 +11617,30 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->d_was_down = d_now;
     }
 
-    /* Cmd+V in board view: paste the clipboard image onto the board. */
+    /* Cmd+V in board view: paste cut cards if a cut is pending, else the
+       clipboard image (Finder-style: paste whatever's on the clipboard). */
     {
         sol_bool paste_now = (sol_bool)(
             (glfwGetKey(w, GLFW_KEY_LEFT_SUPER)  == GLFW_PRESS ||
              glfwGetKey(w, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS) &&
             glfwGetKey(w, GLFW_KEY_V) == GLFW_PRESS);
-        if (paste_now && !st->paste_was_down && st->board_view != 0)
-            cmd_paste_image(st, w);
+        if (paste_now && !st->paste_was_down && st->board_view != 0) {
+            if (st->cut_count > 0) cmd_paste_cut(st);
+            else                   cmd_paste_image(st, w);
+        }
         st->paste_was_down = paste_now;
+    }
+
+    /* Cmd+X in board view: cut the selection (cards stay, render dimmed). With
+       nothing selected it cancels a pending cut. */
+    {
+        sol_bool cut_now = (sol_bool)(
+            (glfwGetKey(w, GLFW_KEY_LEFT_SUPER)  == GLFW_PRESS ||
+             glfwGetKey(w, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS) &&
+            glfwGetKey(w, GLFW_KEY_X) == GLFW_PRESS);
+        if (cut_now && !st->cut_was_down && st->board_view != 0)
+            cmd_cut_selection(st);
+        st->cut_was_down = cut_now;
     }
 
     /* Arrow LEFT/RIGHT: cycle the focused board's active page (edge-triggered,
@@ -12197,6 +12296,8 @@ static void bind_runtime_handles(AppState *st) {
     st->folder_place_has   = SOL_FALSE;
     st->d_was_down         = SOL_FALSE;
     st->paste_was_down     = SOL_FALSE;
+    st->cut_count          = 0;
+    st->cut_was_down       = SOL_FALSE;
     /* page_*_was: Task 5 arrow-cycle; drop_target_handle: Task 8 */
     st->page_prev_was      = SOL_FALSE;
     st->page_next_was      = SOL_FALSE;
@@ -14122,7 +14223,10 @@ static void render(AppState *state) {
                                                      same channel, two consumers */
             dm.emissive.y *= o->overlay_glow;
             dm.emissive.z *= o->overlay_glow;
-            draw_mesh(state, o->mesh, model, view, proj, eye, hl, dm);
+            if (handle_is_cut(state, o->handle))
+                draw_glass(state, o->mesh, model, view, proj, eye, dm);  /* cut: dimmed (Cmd+X) */
+            else
+                draw_mesh(state, o->mesh, model, view, proj, eye, hl, dm);
         }
         state->draws_done++;                      /* == total until culling (P4 i2 p4) */
     }
