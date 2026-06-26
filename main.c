@@ -3786,6 +3786,7 @@ static sol_u32 g_water_gen    = 0u;
 static float   g_wind_cur = 0.0f, g_wind_sent = -1.0f;
 static sol_u32 g_wind_gen = 0u;
 static int     g_loop_voices = 0;                /* the HUD's number */
+static sol_bool g_muted = SOL_FALSE;             /* global audio mute (palette toggle) */
 static float   g_step_acc = 0.0f;
 static vec3    g_step_prev;
 static int     g_step_prev_ok = 0;
@@ -7421,6 +7422,13 @@ static void cmd_toggle_bloom(AppState *st) {
     printf("bloom %s\n", st->bloom_on ? "on" : "off");
 }
 
+static void cmd_toggle_mute(AppState *st) {
+    (void)st;
+    g_muted = !g_muted;
+    audio_set_muted(g_muted);
+    printf("audio %s\n", g_muted ? "muted" : "unmuted");
+}
+
 /* F toggles walk/fly in first person (precondition: not in orbit) */
 static sol_bool can_toggle_fly(AppState *st) {
     return st->camera.mode != CAMERA_ORBIT;
@@ -9764,6 +9772,7 @@ static Command g_commands[] = {
     { "Toggle day/night",            "`", GLFW_KEY_GRAVE_ACCENT, cmd_toggle_daynight, NULL,         SOL_FALSE },
     { "Cycle color grade",           "9", GLFW_KEY_9, cmd_cycle_grade,       NULL,                  SOL_FALSE },
     { "Toggle irradiance view",      NULL, 0,        cmd_toggle_irradiance, can_toggle_irradiance, SOL_FALSE },
+    { "Toggle mute",                 NULL, 0,        cmd_toggle_mute,       NULL,                  SOL_FALSE },
     { "Inventory",                   "I",  0,        cmd_inventory_open,    NULL,                  SOL_FALSE },
     { "Cycle prefilter inspector",   "P", GLFW_KEY_P, cmd_cycle_prefilter,   can_cycle_prefilter,   SOL_FALSE },
     { "Cycle text inspector",        "T", GLFW_KEY_T, cmd_cycle_textinspect, can_cycle_textinspect, SOL_FALSE },

@@ -29,4 +29,10 @@ void audio_shutdown(void);
    blocked frame, so callers may ignore the return for one-shots. */
 sol_bool audio_push(const MixCmd *cmd);
 
+/* main-thread-only: toggle global output mute. When muted the render
+   callback still drains the ring and advances every voice (looping wind
+   and water stay in sync) but zeroes its output, so unmuting resumes
+   seamlessly — no loop restart, no producer-side state to track. */
+void audio_set_muted(sol_bool muted);
+
 #endif /* PLATFORM_AUDIO_H */

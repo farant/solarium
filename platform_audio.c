@@ -28,6 +28,7 @@ static atomic_uint   g_rd;            /* written by consumer only */
 static Mixer         g_mixer;         /* consumer-owned after init */
 static AudioUnit     g_unit;
 static int           g_running = 0;
+static atomic_int    g_muted;         /* 0 audible, 1 silent; main writes, render reads */
 
 sol_bool audio_push(const MixCmd *cmd) {
     unsigned int w = atomic_load_explicit(&g_wr, memory_order_relaxed);
@@ -37,6 +38,10 @@ sol_bool audio_push(const MixCmd *cmd) {
     g_ring[w & RING_MASK] = *cmd;
     atomic_store_explicit(&g_wr, w + 1u, memory_order_release);
     return SOL_TRUE;
+}
+
+void audio_set_muted(sol_bool muted) {
+    atomic_store_explicit(&g_muted, muted ? 1 : 0, memory_order_relaxed);
 }
 
 /* THE REAL-TIME THREAD. Everything it touches is preallocated; the only
@@ -58,6 +63,10 @@ static OSStatus render_cb(void *ref, AudioUnitRenderActionFlags *flags,
     if (io->mNumberBuffers >= 1 &&
         io->mBuffers[0].mDataByteSize >= frames * 2u * sizeof(float)) {
         mixer_render(&g_mixer, (float *)io->mBuffers[0].mData, (int)frames);
+        /* mute zeroes the OUTPUT after rendering — voices still advanced
+           above, so looping wind/water stay in phase across an unmute. */
+        if (atomic_load_explicit(&g_muted, memory_order_relaxed))
+            memset(io->mBuffers[0].mData, 0, frames * 2u * sizeof(float));
     }
     return noErr;
 }
