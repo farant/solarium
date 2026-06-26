@@ -44,6 +44,7 @@
 #include "widget.h"              /* immediate-mode widget core (TODO5 app books) */
 #include "app_synth.h"           /* the synth book's page layout (TODO5) */
 #include "boardpage.h"           /* page slugs + board page-list (Board Pages) */
+#include "multiselect.h"         /* board multi-select set ops (Board Multi-Select) */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -2906,6 +2907,16 @@ typedef struct AppState {
     sol_bool    page_prev_was;       /* edge-detect for arrow-cycle (Task 5) */
     sol_bool    page_next_was;
     sol_u32     drop_target_handle;  /* folder under a dragged card (Task 8); 0 = none */
+    /* Board multi-select (Board Multi-Select Tasks 2-8) */
+    sol_u32     sel[MULTISEL_CAP];   /* multi-select set; <=1 mirrors selected_handle */
+    int         sel_count;
+    sol_bool    marquee_active;      /* a marquee gesture is underway (M2) */
+    sol_bool    marquee_dragging;    /* moved past the slop -> a real rubber-band (M2) */
+    sol_bool    marquee_add;         /* shift held -> union, else replace (M2) */
+    double      marquee_x0, marquee_y0, marquee_x1, marquee_y1; /* screen px (M2) */
+    float       marquee_lx0, marquee_ly0, marquee_lx1, marquee_ly1; /* board-local rect (M2) */
+    sol_bool    group_drag;          /* dragging the whole set together (M3) */
+    vec3        group_prepos[MULTISEL_CAP]; /* per-member pre-drag board-local pos (M3) */
 } AppState;
 
 #define READER_IDLE      0
@@ -7567,6 +7578,45 @@ static sol_bool is_fileable_card(Scene *s, sol_u32 h) {
     return SOL_FALSE;
 }
 
+/* A board-child note/picture/folder is multi-selectable. */
+/* Tasks 3-8 will use these helpers; suppress unused-function until then. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+static sol_bool object_is_selectable(Scene *s, sol_u32 h) {
+    SceneObject *o   = scene_get(s, h);
+    SceneObject *par;
+    if (!o || o->parent == 0) return SOL_FALSE;
+    par = scene_get(s, o->parent);
+    if (!par || !par->mesh_ref || strcmp(par->mesh_ref, "board") != 0) return SOL_FALSE;
+    if (o->kind == KIND_NOTE) return SOL_TRUE;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "picture") == 0)    return SOL_TRUE;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "folderbook") == 0) return SOL_TRUE;
+    return SOL_FALSE;
+}
+
+/* selection-set wrappers that keep selected_handle (the anchor) in sync:
+   sel_count==0 -> selected_handle==0; sel_count==1 -> selected_handle==sel[0]. */
+static void sel_clear(AppState *st) {
+    st->sel_count = 0;
+    st->selected_handle = 0;
+}
+static void sel_set_single(AppState *st, sol_u32 h) {
+    st->sel[0] = h;
+    st->sel_count = 1;
+    st->selected_handle = h;
+}
+static void sel_toggle_h(AppState *st, sol_u32 h) {
+    sol_bool now;
+    /* at cap and not already present: can't add -> leave the set/anchor alone */
+    if (st->sel_count >= MULTISEL_CAP &&
+        !msel_contains(st->sel, st->sel_count, h))
+        return;
+    now = msel_toggle(st->sel, &st->sel_count, MULTISEL_CAP, h);
+    st->selected_handle = now ? h
+                        : (st->sel_count ? st->sel[st->sel_count - 1] : 0);
+}
+#pragma clang diagnostic pop
+
 /* Tag a board-pinned card with its board's CURRENT page, so a card created or
    dropped while viewing a sub-page belongs to that page, not the root "/".
    No-op unless `handle` is a direct child of a "board". */
@@ -11832,6 +11882,12 @@ static void bind_runtime_handles(AppState *st) {
     st->page_prev_was      = SOL_FALSE;
     st->page_next_was      = SOL_FALSE;
     st->drop_target_handle = 0;
+    /* board multi-select (Board Multi-Select Task 2) */
+    st->sel_count        = 0;
+    st->marquee_active   = SOL_FALSE;
+    st->marquee_dragging = SOL_FALSE;
+    st->marquee_add      = SOL_FALSE;
+    st->group_drag       = SOL_FALSE;
 }
 
 /* Reconcile every mirror against disk + validate aliases (6c/6d): resolves
@@ -13689,6 +13745,9 @@ static void render(AppState *state) {
         if (state->drop_target_handle != 0 &&
             o->handle == state->drop_target_handle)
             hl = 1.0f;                            /* folder under a dragged card */
+        if (state->sel_count > 1 &&
+            msel_contains(state->sel, state->sel_count, o->handle))
+            hl = 1.0f;                            /* a member of the multi-selection */
         state->terrain_blend = (o->mesh_ref &&
                                 strcmp(o->mesh_ref, "terrain") == 0)
                                    ? SOL_TRUE : SOL_FALSE;
