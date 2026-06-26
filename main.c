@@ -7593,14 +7593,10 @@ static sol_bool object_is_selectable(Scene *s, sol_u32 h) {
 
 /* selection-set wrappers that keep selected_handle (the anchor) in sync:
    sel_count==0 -> selected_handle==0; sel_count==1 -> selected_handle==sel[0]. */
-/* sel_clear gets a caller in a later task; suppress until then. */
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
 static void sel_clear(AppState *st) {
     st->sel_count = 0;
     st->selected_handle = 0;
 }
-#pragma clang diagnostic pop
 static void sel_set_single(AppState *st, sol_u32 h) {
     st->sel[0] = h;
     st->sel_count = 1;
@@ -9840,6 +9836,22 @@ static sol_u32 spawn_note(AppState *st, GLFWwindow *w) {
 /* defined later (after read_input); the board-view double-click calls it */
 static void note_edit_begin(AppState *st, sol_u32 handle);
 
+/* Delete one selectable board card (note/picture/folder): release its keyed
+   mesh, clear transient refs, remove it. Does NOT save or rebuild arrows. */
+static void delete_board_card(AppState *st, sol_u32 h) {
+    SceneObject *o = scene_get(&st->scene, h);
+    char akey[160];
+    if (!o) return;
+    if (mesh_asset_key(o, akey)) asset_release(&g_mesh_assets, akey);
+    if (st->resize_board       == h) st->resize_board       = 0;
+    if (st->move_board         == h) st->move_board         = 0;
+    if (st->carried            == h) st->carried            = 0;
+    if (st->drag_handle        == h) st->drag_handle        = 0;
+    if (st->drop_target_handle == h) st->drop_target_handle = 0;
+    if (st->selected_handle    == h) st->selected_handle    = 0;
+    scene_remove(&st->scene, h);
+}
+
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
     sol_bool tab_now, dragging, fp, bv_active;
@@ -11160,7 +11172,16 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     {
         sol_bool bs_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_BACKSPACE) == GLFW_PRESS ||
                                      glfwGetKey(w, GLFW_KEY_DELETE)    == GLFW_PRESS);
-        if (bs_now && !st->bs_was_down && st->selected_handle != 0) {
+        if (bs_now && !st->bs_was_down && st->board_view != 0 && st->sel_count > 1) {
+            sol_u32 doomed[MULTISEL_CAP];
+            int     i, n = st->sel_count;
+            for (i = 0; i < n; i++) doomed[i] = st->sel[i];   /* snapshot: handles are stable */
+            sel_clear(st);
+            for (i = 0; i < n; i++) delete_board_card(st, doomed[i]);
+            arrows_rebuild(st);
+            scene_save(&st->scene, "scene.stml");
+            printf("deleted %d cards\n", n);
+        } else if (bs_now && !st->bs_was_down && st->selected_handle != 0) {
             SceneObject *o = scene_get(&st->scene, st->selected_handle);
             if (o && o->kind == KIND_TOMBSTONE) {
                 char        lbuf[16];
