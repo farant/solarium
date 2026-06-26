@@ -2915,6 +2915,7 @@ typedef struct AppState {
     sol_bool    marquee_add;         /* shift held -> union, else replace (M2) */
     double      marquee_x0, marquee_y0, marquee_x1, marquee_y1; /* screen px (M2) */
     float       marquee_lx0, marquee_ly0, marquee_lx1, marquee_ly1; /* board-local rect (M2) */
+    float       marquee_px_scale;    /* fb_width/window_width: cursor(pts)->ui(px) for the draw */
     sol_bool    group_drag;          /* dragging the whole set together (M3) */
     vec3        group_prepos[MULTISEL_CAP]; /* per-member pre-drag board-local pos (M3) */
 } AppState;
@@ -10253,6 +10254,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             vec3 c0, c1;
             int  mw, mh;
             glfwGetWindowSize(w, &mw, &mh);
+            st->marquee_px_scale = (mw > 0) ? (float)st->fb_width / (float)mw : 1.0f;
             st->marquee_x1 = mx;
             st->marquee_y1 = my;
             if ((mx - st->marquee_x0) * (mx - st->marquee_x0) +
@@ -12076,6 +12078,7 @@ static void bind_runtime_handles(AppState *st) {
     st->marquee_active   = SOL_FALSE;
     st->marquee_dragging = SOL_FALSE;
     st->marquee_add      = SOL_FALSE;
+    st->marquee_px_scale = 1.0f;
     st->group_drag       = SOL_FALSE;
 }
 
@@ -15243,14 +15246,15 @@ static void render(AppState *state) {
     }   /* show_hud */
 
     if (state->marquee_active && state->marquee_dragging) {
-        float rx = (float)(state->marquee_x0 < state->marquee_x1 ?
+        float s  = state->marquee_px_scale > 0.0f ? state->marquee_px_scale : 1.0f;
+        float rx = s * (float)(state->marquee_x0 < state->marquee_x1 ?
                            state->marquee_x0 : state->marquee_x1);
-        float ry = (float)(state->marquee_y0 < state->marquee_y1 ?
+        float ry = s * (float)(state->marquee_y0 < state->marquee_y1 ?
                            state->marquee_y0 : state->marquee_y1);
-        float rw = (float)(state->marquee_x0 < state->marquee_x1 ?
+        float rw = s * (float)(state->marquee_x0 < state->marquee_x1 ?
                            state->marquee_x1 - state->marquee_x0 :
                            state->marquee_x0 - state->marquee_x1);
-        float rh = (float)(state->marquee_y0 < state->marquee_y1 ?
+        float rh = s * (float)(state->marquee_y0 < state->marquee_y1 ?
                            state->marquee_y1 - state->marquee_y0 :
                            state->marquee_y0 - state->marquee_y1);
         ui_quad(rx, ry, rw, rh, 0.45f, 0.62f, 0.95f, 0.18f);            /* fill */
