@@ -2916,6 +2916,7 @@ typedef struct AppState {
     sol_u32     cut[MULTISEL_CAP];   /* cut buffer (Cmd+X): handles marked to MOVE on paste */
     int         cut_count;           /* 0 = nothing cut; GLOBAL — survives board_view_exit */
     sol_bool    cut_was_down;        /* edge-detect for Cmd+X */
+    sol_bool    win_color_was;       /* edge-detect for Up/Down window glass cycle */
     sol_bool    marquee_active;      /* a marquee gesture is underway (M2) */
     sol_bool    marquee_dragging;    /* moved past the slop -> a real rubber-band (M2) */
     sol_bool    marquee_add;         /* shift held -> union, else replace (M2) */
@@ -10031,6 +10032,71 @@ static sol_bool can_place_window(AppState *st) {
     return (sol_bool)(st->board_view == 0 && st->reader_state == READER_IDLE);
 }
 
+/* forward declaration — defined later in main.c (after the board-card helpers) */
+static void delete_board_card(AppState *st, sol_u32 h);
+
+/* ---------- window glass color presets (Task 7) -------------------------------- */
+static const struct { const char *name; float r, g, b; } WINDOW_GLASS[] = {
+    { "none",  0.00f, 0.00f, 0.00f },   /* open hole — no pane */
+    { "clear", 0.85f, 0.92f, 1.00f },
+    { "blue",  0.25f, 0.45f, 0.85f },
+    { "green", 0.30f, 0.70f, 0.45f },
+    { "amber", 0.95f, 0.70f, 0.25f },
+    { "red",   0.85f, 0.25f, 0.30f }
+};
+#define WINDOW_GLASS_N ((int)(sizeof WINDOW_GLASS / sizeof WINDOW_GLASS[0]))
+
+/* find a window's existing glass-pane child (mesh_ref "window_glass"), else 0. */
+static sol_u32 window_glass_child(Scene *s, sol_u32 win) {
+    int i;
+    for (i = 0; i < (int)s->count; i++)
+        if (s->objects[i].parent == win && s->objects[i].mesh_ref &&
+            strcmp(s->objects[i].mesh_ref, "window_glass") == 0)
+            return s->objects[i].handle;
+    return 0;
+}
+
+/* set a window's glass color preset by name: "none" removes the pane; any other
+   adds/retints a window_glass child sized to the opening. */
+static void window_set_glass(AppState *st, sol_u32 win, const char *name) {
+    Scene       *s     = &st->scene;
+    sol_u32      child = window_glass_child(s, win);
+    SceneObject *wo    = scene_get(s, win);
+    int          pi, i;
+    if (!wo) return;
+    scene_meta_set(s, win, "glass", name);
+    if (strcmp(name, "none") == 0) {
+        if (child) delete_board_card(st, child);
+        return;
+    }
+    pi = 0;
+    for (i = 0; i < WINDOW_GLASS_N; i++)
+        if (strcmp(WINDOW_GLASS[i].name, name) == 0) { pi = i; break; }
+    if (child == 0) {
+        float w    = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "w");
+        float h    = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "h");
+        float gp[2];
+        vec3  one  = vec3_make(1.0f, 1.0f, 1.0f);
+        Mesh  empty;
+        gp[0] = w;
+        gp[1] = h;
+        memset(&empty, 0, sizeof empty);
+        child = scene_add(s, win, empty, vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
+        scene_kind_set(s, child, KIND_PLAIN);
+        scene_mesh_ref_set(s, child, "window_glass");
+        scene_mesh_params_set(s, child, gp, 2);
+        scene_resolve_meshes(s);
+    }
+    {
+        SceneObject *co = scene_get(s, child);
+        if (co) {
+            co->material = material_default();
+            co->material.base_color = vec3_make(
+                WINDOW_GLASS[pi].r, WINDOW_GLASS[pi].g, WINDOW_GLASS[pi].b);
+        }
+    }
+}
+
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
@@ -10439,10 +10505,15 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->arrow_l_was = lnow;
         st->arrow_r_was = rnow;
     } else if (!bv_active) {
+        /* suppress UP/DOWN camera-look when a window is selected (Task 7 owns them) */
+        sol_bool      win_look_free;
+        SceneObject  *_wlo = st->selected_handle ? scene_get(&st->scene, st->selected_handle) : 0;
+        win_look_free = (sol_bool)(!(_wlo && _wlo->mesh_ref &&
+                                     strcmp(_wlo->mesh_ref, "window") == 0));
         if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
         if (glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) in->look_dx -= look;
-        if (glfwGetKey(w, GLFW_KEY_UP)    == GLFW_PRESS) in->look_dy += look;
-        if (glfwGetKey(w, GLFW_KEY_DOWN)  == GLFW_PRESS) in->look_dy -= look;
+        if (win_look_free && glfwGetKey(w, GLFW_KEY_UP)   == GLFW_PRESS) in->look_dy += look;
+        if (win_look_free && glfwGetKey(w, GLFW_KEY_DOWN) == GLFW_PRESS) in->look_dy -= look;
     }
 
     /* Tab toggles first-person <-> orbit (edge); cursor mode follows */
@@ -11961,6 +12032,34 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->page_next_was = right_now;
     }
 
+    /* Up/Down: cycle the selected window's glass color preset (Task 7).
+       Suppressed in board view and when carrying/palette (covered by the early-
+       return gate above).  The camera-look block above is already guarded so
+       UP/DOWN do NOT also turn the camera while a window is selected. */
+    if (st->selected_handle != 0 && st->board_view == 0) {
+        SceneObject *so = scene_get(&st->scene, st->selected_handle);
+        if (so && so->mesh_ref && strcmp(so->mesh_ref, "window") == 0) {
+            sol_bool  up   = (sol_bool)(glfwGetKey(w, GLFW_KEY_UP)   == GLFW_PRESS);
+            sol_bool  down = (sol_bool)(glfwGetKey(w, GLFW_KEY_DOWN) == GLFW_PRESS);
+            sol_bool  now  = (sol_bool)(up || down);
+            if (now && !st->win_color_was) {
+                const char *cur = scene_meta_get(&st->scene, st->selected_handle, "glass");
+                int idx = 0, i;
+                for (i = 0; i < WINDOW_GLASS_N; i++)
+                    if (cur && strcmp(WINDOW_GLASS[i].name, cur) == 0) { idx = i; break; }
+                idx = (idx + (up ? 1 : WINDOW_GLASS_N - 1)) % WINDOW_GLASS_N;
+                window_set_glass(st, st->selected_handle, WINDOW_GLASS[idx].name);
+                scene_save(&st->scene, "scene.stml");
+                printf("window glass: %s\n", WINDOW_GLASS[idx].name);
+            }
+            st->win_color_was = now;
+        } else {
+            st->win_color_was = SOL_FALSE;
+        }
+    } else {
+        st->win_color_was = SOL_FALSE;
+    }
+
     /* +/- resize the SELECTED note's body text. read_input has already returned
        above if a note is being edited or the palette is open, so these keys are
        free here. =/+ grows, -/_ shrinks; numpad +/- too. A press gives one clear
@@ -12596,6 +12695,7 @@ static void bind_runtime_handles(AppState *st) {
     st->paste_was_down     = SOL_FALSE;
     st->cut_count          = 0;
     st->cut_was_down       = SOL_FALSE;
+    st->win_color_was      = SOL_FALSE;
     /* page_*_was: Task 5 arrow-cycle; drop_target_handle: Task 8 */
     st->page_prev_was      = SOL_FALSE;
     st->page_next_was      = SOL_FALSE;
