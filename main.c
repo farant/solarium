@@ -10133,16 +10133,17 @@ static void window_set_glass(AppState *st, sol_u32 win, const char *name) {
     if (child == 0) {
         float w    = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "w");
         float h    = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "h");
-        float gp[2];
+        float gp[3];
         vec3  one  = vec3_make(1.0f, 1.0f, 1.0f);
         Mesh  empty;
         gp[0] = w;
         gp[1] = h;
+        gp[2] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "style");
         memset(&empty, 0, sizeof empty);
         child = scene_add(s, win, empty, vec3_make(0.0f, 0.0f, 0.0f), quat_identity(), one);
         scene_kind_set(s, child, KIND_PLAIN);
         scene_mesh_ref_set(s, child, "window_glass");
-        scene_mesh_params_set(s, child, gp, 2);
+        scene_mesh_params_set(s, child, gp, 3);
         scene_resolve_meshes(s);
     }
     {
