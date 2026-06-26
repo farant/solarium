@@ -5174,9 +5174,13 @@ static void drag_begin(AppState *st, GLFWwindow *w, sol_u32 hit) {
 
     if (!ho) return;
     if (ho->kind != KIND_PLAIN ||
-        (ho->mesh_ref && strcmp(ho->mesh_ref, "folderbook") == 0)) {
-        target = hit;       /* cards (item 6) AND folder-link books move
-                               INDIVIDUALLY, though parented to a room or board */
+        (ho->mesh_ref &&
+         (strcmp(ho->mesh_ref, "folderbook") == 0 ||
+          strcmp(ho->mesh_ref, "picture") == 0))) {
+        target = hit;       /* cards (item 6), folder-link books, AND pictures move
+                               INDIVIDUALLY, though parented to a room or board.
+                               A picture only reaches drag_begin as a GROUP-drag
+                               anchor — a lone one slides via picture_move_pick. */
     } else {
         if (object_is_arrow(&st->scene, hit)) return;   /* derived geometry: an
                                                            arrow follows its cards,
