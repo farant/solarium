@@ -5354,7 +5354,7 @@ static void apply_time_of_day(AppState *st);   /* P8 item 9: `-toggle's sky + su
 static void apply_kind_materials(Scene *s);    /* likewise */
 static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
-static void world_rebuild(AppState *st);       /* shared tail of load_palace; defined below */
+static void world_rebuild(AppState *st);       /* workspace-switch re-derive; load_palace inlines its OWN tail */
 static void adopt_legacy_motion(AppState *st); /* P4 item 6: motion becomes data */
 static void note_edit_end(AppState *st);       /* defined with on_key below */
 static void place_confirm(AppState *st);       /* Furniture: Task 8 fills this in */
@@ -10155,6 +10155,23 @@ static void ensure_window_fill(AppState *st, sol_u32 win) {
     }
 }
 
+/* Migrate every placed window to the standalone oak fill child. Gather the
+   window handles first (ensure_window_fill scene_adds, which reallocs the
+   objects array), then ensure each. A window saved before this feature had its
+   fill baked into the casing mesh — make_window no longer emits it, so this is
+   what gives those windows back their oak spandrel. Run on BOTH the rebuild
+   path (world_rebuild) and the load path (load_palace), each BEFORE that
+   function's scene_resolve_meshes so the new fill children get their meshes. */
+static void windows_migrate_fills(AppState *st) {
+    sol_u32 wins[256];
+    int     nw = 0, i;
+    for (i = 0; i < (int)st->scene.count && nw < 256; i++)
+        if (st->scene.objects[i].mesh_ref &&
+            strcmp(st->scene.objects[i].mesh_ref, "window") == 0)
+            wins[nw++] = st->scene.objects[i].handle;
+    for (i = 0; i < nw; i++) ensure_window_fill(st, wins[i]);
+}
+
 /* after a window's opening was resized, re-size its glass pane to match (the
    registry-shared rebuild: release the OLD shape by its old key, clear the
    borrow, re-resolve — never mesh_destroy a shared shape). The pane is
@@ -12943,22 +12960,12 @@ static int rescan_mirrors(AppState *st) {
 }
 
 /* Re-derive everything that hangs off the scene spine after the ACTIVE set
-   changes (a workspace switch) — no file load, no glb reimport. The shared
-   tail of load_palace. */
+   changes (a workspace switch) — no file load, no glb reimport. NOTE: load_palace
+   does NOT call this; it inlines its own (similar but distinct) tail, so any
+   derive that must also run on load (e.g. windows_migrate_fills) has to be added
+   to BOTH places. */
 static void world_rebuild(AppState *st) {
-    /* migrate placed shaped windows to the standalone oak fill child: gather the
-       window handles first (ensure_window_fill scene_adds, which reallocs the
-       objects array), then ensure each. A window saved before this feature has
-       its fill baked into the casing mesh — make_window no longer emits it, so
-       this is what gives those windows their oak spandrel back. */
-    sol_u32 wins[256];
-    int     nw = 0, wi;
-    sol_u32 k;
-    for (k = 0; k < st->scene.count && nw < 256; k++)
-        if (st->scene.objects[k].mesh_ref &&
-            strcmp(st->scene.objects[k].mesh_ref, "window") == 0)
-            wins[nw++] = st->scene.objects[k].handle;
-    for (wi = 0; wi < nw; wi++) ensure_window_fill(st, wins[wi]);
+    windows_migrate_fills(st);   /* shaped windows -> oak fill child, before the resolve */
     scene_resolve_meshes(&st->scene);
     connections_rebuild(st);
     collide_rebuild(&st->colliders, &st->scene);
@@ -13068,6 +13075,7 @@ static sol_bool load_palace(AppState *st) {
     strcpy(st->scene.active_ws, keep_ws);
     migrate_room_heights(&st->scene);   /* timber halls: 3.0m rooms -> 4.5m (idempotent) */
     scene_reimport_glbs(st);
+    windows_migrate_fills(st);          /* shaped windows -> oak fill child, before the ACQUIRE */
     scene_resolve_meshes(&st->scene);             /* ACQUIRE (the new) */
     scene_release_meshes(&old);                   /* RELEASE (the old) */
     scene_free(&old);
