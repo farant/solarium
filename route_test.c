@@ -75,6 +75,17 @@ static void test_window_sill_panel(void) {
            (unsigned)door_idx, (unsigned)win_idx);
 }
 
+static void test_window_frame_styles(void) {
+    MeshBuilder mb; sol_u32 plain, arch, circ;
+    mb_init(&mb); make_window(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 0.0f); plain = mb.index_count; mb_free(&mb);
+    mb_init(&mb); make_window(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 1.0f); arch  = mb.index_count; mb_free(&mb);
+    mb_init(&mb); make_window(&mb, 1.2f, 1.4f, 0.20f, 0.08f, 3.0f); circ  = mb.index_count; mb_free(&mb);
+    assert(arch > plain);
+    assert(circ > plain);
+    printf("  window frame styles: plain=%u arch=%u circ=%u OK\n",
+           (unsigned)plain, (unsigned)arch, (unsigned)circ);
+}
+
 int main(void) {
     /* due-east: straight, A opens E, B opens W, 0 bends */
     {
@@ -211,6 +222,7 @@ int main(void) {
         scene_free(&s);
     }
     test_window_sill_panel();
+    test_window_frame_styles();
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;
 }

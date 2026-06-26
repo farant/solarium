@@ -361,22 +361,138 @@ void make_picture(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t) {
     mb_push_triangle(b, v0, v2, v3);
 }
 
+/* ---- shaped-window geometry (Window styles, Phase 2) ----------------------
+   The aperture OUTLINE = the glass edge, inset fw inside the w/2 x h/2 opening,
+   as a CLOSED CCW loop of (x,y). Shared by the opaque fill (Task 2) and the
+   glass fan (Task 3), so it lives here as a mesh.c static. */
+#define WINDOW_ARC_SEG  20    /* segments per semicircle / pointed arc */
+#define WINDOW_CIRC_SEG 32    /* segments around a full oculus */
+#define WINDOW_OUTLINE_MAX 80 /* max outline points (x,y pairs) */
+
+static int window_outline(int style, float hw, float hh, float fw,
+                          float *xy, int cap) {
+    int n = 0, i;
+    float aw = hw - fw, ah = hh - fw;   /* inset half-extents */
+    if (aw < 0.05f) aw = 0.05f;
+    if (ah < 0.05f) ah = 0.05f;
+    if (style == 3) {                    /* circular: inscribed disc */
+        float r = (aw < ah) ? aw : ah;
+        for (i = 0; i < WINDOW_CIRC_SEG && n < cap; i++) {
+            float a = 6.2831853f * (float)i / (float)WINDOW_CIRC_SEG;
+            xy[2*n] = r * cosf(a); xy[2*n+1] = r * sinf(a); n++;
+        }
+        return n;
+    }
+    if (style == 1 || style == 2) {      /* arched / pointed: rect bottom + curved top */
+        float r  = (aw < ah) ? aw : ah;
+        float ys = ah - r;
+        if (style == 2) { ys = ah - aw * 1.2f; if (ys < -ah) ys = -ah; }
+        else            { if (ys < -ah) { ys = -ah; r = ah - ys; } }
+        xy[2*n]= -aw; xy[2*n+1]= -ah; n++;        /* bottom-left  */
+        xy[2*n]=  aw; xy[2*n+1]= -ah; n++;        /* bottom-right */
+        xy[2*n]=  aw; xy[2*n+1]=  ys; n++;        /* right springline */
+        if (style == 1) {                          /* semicircle right->left over top */
+            for (i = 1; i < WINDOW_ARC_SEG && n < cap; i++) {
+                float a = 3.14159265f * (float)i / (float)WINDOW_ARC_SEG;
+                xy[2*n]   = r * cosf(a);
+                xy[2*n+1] = ys + r * sinf(a); n++;
+            }
+        } else {                                   /* pointed: right->apex->left */
+            for (i = 1; i < WINDOW_ARC_SEG && n < cap; i++) {
+                float u = (float)i / (float)WINDOW_ARC_SEG;
+                xy[2*n]= aw*(1.0f-u); xy[2*n+1]= ys + (ah-ys)*u; n++;
+            }
+            for (i = 0; i < WINDOW_ARC_SEG && n < cap; i++) {
+                float u = (float)i / (float)WINDOW_ARC_SEG;
+                xy[2*n]= -aw*u; xy[2*n+1]= ah - (ah-ys)*u; n++;
+            }
+        }
+        xy[2*n]= -aw; xy[2*n+1]=  ys; n++;        /* left springline */
+        return n;
+    }
+    (void)cap;
+    return 0;   /* plain / french: rectangle, no special outline */
+}
+
+/* radial-project a point onto the rectangle [-hw,hw] x [-hh,hh] boundary. */
+static void rect_project(float px, float py, float hw, float hh, float *qx, float *qy) {
+    float ax = (px < 0 ? -px : px) / hw, ay = (py < 0 ? -py : py) / hh;
+    float m  = (ax > ay) ? ax : ay;
+    if (m < 1e-4f) m = 1e-4f;
+    *qx = px / m; *qy = py / m;
+}
+
+/* The opaque dark_wood inner FILL: the solid between the aperture outline and
+   its rectangle projection, built no-CSG as a closed strip — front (+ht) cap,
+   back (-ht) cap, inner tunnel wall — so it reads solid from both faces and at
+   the glass edge. CCW outline assumed. */
+static void window_fill(MeshBuilder *b, const float *xy, int n,
+                        float hw, float hh, float ht) {
+    int i;
+    for (i = 0; i < n; i++) {
+        int   j = (i + 1) % n;
+        float ix = xy[2*i], iy = xy[2*i+1], jx = xy[2*j], jy = xy[2*j+1];
+        float oix, oiy, ojx, ojy;
+        sol_u32 a, c, d, e2;
+        rect_project(ix, iy, hw, hh, &oix, &oiy);
+        rect_project(jx, jy, hw, hh, &ojx, &ojy);
+        /* front cap (+z): inner_i, outer_i, outer_j, inner_j */
+        a  = mb_push_vertex(b, ix,  iy,  ht, 0,0,1, 0,0);
+        c  = mb_push_vertex(b, oix, oiy, ht, 0,0,1, 0,0);
+        d  = mb_push_vertex(b, ojx, ojy, ht, 0,0,1, 0,0);
+        e2 = mb_push_vertex(b, jx,  jy,  ht, 0,0,1, 0,0);
+        mb_push_triangle(b, a, c, d); mb_push_triangle(b, a, d, e2);
+        /* back cap (-z): reverse winding */
+        a  = mb_push_vertex(b, ix,  iy,  -ht, 0,0,-1, 0,0);
+        c  = mb_push_vertex(b, oix, oiy, -ht, 0,0,-1, 0,0);
+        d  = mb_push_vertex(b, ojx, ojy, -ht, 0,0,-1, 0,0);
+        e2 = mb_push_vertex(b, jx,  jy,  -ht, 0,0,-1, 0,0);
+        mb_push_triangle(b, a, d, c); mb_push_triangle(b, a, e2, d);
+        /* inner tunnel wall (normal toward the glass = inward) */
+        {
+            float nx = -ix, ny = -iy, nl = sqrtf(nx*nx+ny*ny);
+            if (nl < 1e-4f) nl = 1e-4f; nx /= nl; ny /= nl;
+            a  = mb_push_vertex(b, ix, iy,  ht, nx,ny,0, 0,0);
+            c  = mb_push_vertex(b, ix, iy, -ht, nx,ny,0, 0,0);
+            d  = mb_push_vertex(b, jx, jy, -ht, nx,ny,0, 0,0);
+            e2 = mb_push_vertex(b, jx, jy,  ht, nx,ny,0, 0,0);
+            mb_push_triangle(b, a, c, d); mb_push_triangle(b, a, d, e2);
+        }
+    }
+}
+
 /* A window assembly's FRAME (Place Windows, Phase 1): a rectangular dark_wood
    ring around a centered opening [-w/2,w/2] x [-h/2,h/2], spanning the wall
    thickness plus WINDOW_PROUD proud of each face, border width fw, plus a
    modest interior sill ledge. Center-origin so the object's transform sits at
-   the hole center. The glass pane (make_window_glass) is a separate object. */
+   the hole center. The glass pane (make_window_glass) is a separate object.
+   Shaped styles (arched/pointed/circular) add an opaque inner fill = the
+   opening rectangle MINUS the glass aperture; french adds cross bars. */
 #define WINDOW_PROUD 0.05f   /* frame stands this far proud of each wall face,
                                 clearing the proud plaster/reveal veneer */
 void make_window(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, sol_f32 style) {
     sol_f32 hw = w * 0.5f, hh = h * 0.5f, ht = t * 0.5f + WINDOW_PROUD;
-    (void)style;   /* Task 2 dispatches on style; plain for now */
+    int   s = (int)(style + 0.5f);
+    float xy[2 * WINDOW_OUTLINE_MAX];
+    int   n;
     if (fw < 0.01f) fw = 0.01f;
+    /* outer rectangular casing (all styles) + sill ledge — the existing geometry */
     aabb_box(b, -hw - fw, -hw,      -hh - fw, hh + fw, -ht, ht);  /* left stile  */
     aabb_box(b,  hw,       hw + fw, -hh - fw, hh + fw, -ht, ht);  /* right stile */
     aabb_box(b, -hw,       hw,       hh,      hh + fw, -ht, ht);  /* top rail    */
     aabb_box(b, -hw,       hw,      -hh - fw, -hh,     -ht, ht);  /* bottom rail */
     aabb_box(b, -hw - fw,  hw + fw, -hh - fw - 0.03f, -hh - fw, -ht, ht + 0.06f); /* sill ledge */
+    if (s == 4) {                          /* french: cross mullion */
+        float bw = fw;
+        aabb_box(b, -bw * 0.5f, bw * 0.5f, -hh, hh, -ht, ht);   /* vertical bar   */
+        aabb_box(b, -hw, hw, -bw * 0.5f, bw * 0.5f, -ht, ht);   /* horizontal bar */
+        return;
+    }
+    if (s == 1 || s == 2 || s == 3) {      /* shaped: opaque fill = rect minus aperture */
+        n = window_outline(s, hw, hh, fw, xy, WINDOW_OUTLINE_MAX);
+        if (n >= 3) window_fill(b, xy, n, hw, hh, ht);
+    }
+    /* s == 0 plain: glass fills the rectangle, no inner fill */
 }
 
 /* A window's GLASS pane: a centered quad at z=0, drawn on the translucent glass
