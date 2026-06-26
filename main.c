@@ -10069,7 +10069,7 @@ static void window_set_glass(AppState *st, sol_u32 win, const char *name) {
         if (child) delete_board_card(st, child);
         return;
     }
-    pi = 0;
+    pi = 0;   /* unknown name falls back to preset 0; callers only pass valid names */
     for (i = 0; i < WINDOW_GLASS_N; i++)
         if (strcmp(WINDOW_GLASS[i].name, name) == 0) { pi = i; break; }
     if (child == 0) {
@@ -10506,10 +10506,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->arrow_r_was = rnow;
     } else if (!bv_active) {
         /* suppress UP/DOWN camera-look when a window is selected (Task 7 owns them) */
-        sol_bool      win_look_free;
-        SceneObject  *_wlo = st->selected_handle ? scene_get(&st->scene, st->selected_handle) : 0;
-        win_look_free = (sol_bool)(!(_wlo && _wlo->mesh_ref &&
-                                     strcmp(_wlo->mesh_ref, "window") == 0));
+        sol_bool win_look_free = (sol_bool)(!window_on_wall(&st->scene, st->selected_handle));
         if (glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS) in->look_dx += look;
         if (glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS) in->look_dx -= look;
         if (win_look_free && glfwGetKey(w, GLFW_KEY_UP)   == GLFW_PRESS) in->look_dy += look;
@@ -12037,8 +12034,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        return gate above).  The camera-look block above is already guarded so
        UP/DOWN do NOT also turn the camera while a window is selected. */
     if (st->selected_handle != 0 && st->board_view == 0) {
-        SceneObject *so = scene_get(&st->scene, st->selected_handle);
-        if (so && so->mesh_ref && strcmp(so->mesh_ref, "window") == 0) {
+        if (window_on_wall(&st->scene, st->selected_handle)) {
             sol_bool  up   = (sol_bool)(glfwGetKey(w, GLFW_KEY_UP)   == GLFW_PRESS);
             sol_bool  down = (sol_bool)(glfwGetKey(w, GLFW_KEY_DOWN) == GLFW_PRESS);
             sol_bool  now  = (sol_bool)(up || down);
