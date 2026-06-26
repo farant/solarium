@@ -4445,13 +4445,16 @@ static void wall_panel_quad(MeshBuilder *b, int runx, float f, float ns,
 }
 
 /* one wall's inner-face panels: mirror emit_doored_wall's opening-walk, emitting
-   a flat pier between openings and a header above each opening (oy < h). */
+   a flat pier between openings, a header above each opening (oy < h), and — for a
+   window (sill > 0) — an apron panel below the opening (floor -> sill) so the wall
+   under a window reads finished like the rest, not as bare shell stone. */
 static void wall_panels(MeshBuilder *b, int runx, float f, float ns,
                         float s0, float s1, float h,
                         const RoomOpening *ops, int n_ops, int wall_id) {
     float lo[ROOM_MAX_OPENINGS_PER_WALL];
     float hi[ROOM_MAX_OPENINGS_PER_WALL];
     float oy[ROOM_MAX_OPENINGS_PER_WALL];
+    float sy[ROOM_MAX_OPENINGS_PER_WALL];
     int   k = 0, i, j;
     float cur;
     for (i = 0; i < n_ops; i++) {
@@ -4460,15 +4463,17 @@ static void wall_panels(MeshBuilder *b, int runx, float f, float ns,
         if (k >= ROOM_MAX_OPENINGS_PER_WALL) break;
         c = ops[i].center; hwid = ops[i].width * 0.5f;
         lo[k] = c - hwid; hi[k] = c + hwid; oy[k] = ops[i].height;
+        sy[k] = ops[i].sill;
         k++;
     }
     for (i = 1; i < k; i++) {                       /* insertion sort by lo */
-        float plo = lo[i], phi = hi[i], poy = oy[i];
+        float plo = lo[i], phi = hi[i], poy = oy[i], psy = sy[i];
         j = i - 1;
         while (j >= 0 && lo[j] > plo) {
-            lo[j + 1] = lo[j]; hi[j + 1] = hi[j]; oy[j + 1] = oy[j]; j--;
+            lo[j + 1] = lo[j]; hi[j + 1] = hi[j];
+            oy[j + 1] = oy[j]; sy[j + 1] = sy[j]; j--;
         }
-        lo[j + 1] = plo; hi[j + 1] = phi; oy[j + 1] = poy;
+        lo[j + 1] = plo; hi[j + 1] = phi; oy[j + 1] = poy; sy[j + 1] = psy;
     }
     cur = s0;
     for (i = 0; i <= k; i++) {
@@ -4481,6 +4486,8 @@ static void wall_panels(MeshBuilder *b, int runx, float f, float ns,
         if (i < k) {
             if (oy[i] < h)                         /* header [gL, gR] x [oy, h] */
                 wall_panel_quad(b, runx, f, ns, gL, gR, oy[i], h);
+            if (sy[i] > 0.0f)                      /* window apron [gL, gR] x [0, sill] */
+                wall_panel_quad(b, runx, f, ns, gL, gR, 0.0f, sy[i]);
             cur = gR;
         }
     }
@@ -4556,34 +4563,45 @@ static void trim_box(MeshBuilder *mb, float x0, float x1, float y0, float y1,
     frame_quad(mb, vec3_make(x0,y0,z0), vec3_make(x1,y0,z0), vec3_make(x1,y0,z1), vec3_make(x0,y0,z1), vec3_make(0,-1,0), x0/tl,z0/tl, x1/tl,z1/tl);  /* -y */
 }
 
-/* doorway reveal overlays for one opening (the faces of the thick wall you see
-   through a doorway): a sandstone THRESHOLD quad into mbf, and dark-wood JAMB +
-   lintel CASINGS into mbt. The casings are SOLID boxes standing proud into the
-   opening (not floating veneer sheets) so there's no gap behind their edges. */
+/* opening reveal overlays for one opening (the faces of the thick wall you see
+   through a doorway or window): a sandstone THRESHOLD quad into mbf, and dark-wood
+   JAMB + lintel CASINGS into mbt. The casings are SOLID boxes standing proud into
+   the opening (not floating veneer sheets) so there's no gap behind their edges.
+   sill > 0 marks a WINDOW: skip the floor threshold, start the side jambs at the
+   sill (no posts running to the floor), and add a sill ledge casing across the
+   bottom — the mirror of the lintel casing across the top. sill == 0 is a door
+   (reaches the floor) and renders exactly as before. */
 static void emit_door_reveal(MeshBuilder *mbf, MeshBuilder *mbt, int wall,
-                             float center, float width, float oh,
+                             float center, float width, float oh, float sill,
                              float hw, float hd, float t) {
-    float gL = center - width * 0.5f, gR = center + width * 0.5f;
-    float e  = WALL_EPS, lt = DOOR_LINE_T;
-    float ft = PATH_TILE_M, wt = WOOD_TILE_M;   /* sandstone threshold / dark-wood casing */
+    float gL  = center - width * 0.5f, gR = center + width * 0.5f;
+    float e   = WALL_EPS, lt = DOOR_LINE_T;
+    float ft  = PATH_TILE_M, wt = WOOD_TILE_M;   /* sandstone threshold / dark-wood casing */
+    float jy0 = (sill > 0.0f) ? sill : 0.0f;     /* jamb bottom: floor for a door, sill for a window */
     if (wall == ROOM_WALL_N || wall == ROOM_WALL_S) {     /* opening spans X, thickness in Z */
         float z0 = (wall == ROOM_WALL_N) ? -hd - t : hd;
         float z1 = (wall == ROOM_WALL_N) ? -hd     : hd + t;
-        frame_quad(mbf, vec3_make(gL, e, z0), vec3_make(gR, e, z0),            /* threshold (+y) */
-                        vec3_make(gR, e, z1), vec3_make(gL, e, z1),
-                        vec3_make(0.0f, 1.0f, 0.0f), gL / ft, z0 / ft, gR / ft, z1 / ft);
-        trim_box(mbt, gL,      gL + lt, 0.0f,    oh, z0, z1, wt);   /* left jamb casing */
-        trim_box(mbt, gR - lt, gR,      0.0f,    oh, z0, z1, wt);   /* right jamb casing */
+        if (sill <= 0.0f)
+            frame_quad(mbf, vec3_make(gL, e, z0), vec3_make(gR, e, z0),        /* threshold (+y) */
+                            vec3_make(gR, e, z1), vec3_make(gL, e, z1),
+                            vec3_make(0.0f, 1.0f, 0.0f), gL / ft, z0 / ft, gR / ft, z1 / ft);
+        trim_box(mbt, gL,      gL + lt, jy0,     oh, z0, z1, wt);   /* left jamb casing */
+        trim_box(mbt, gR - lt, gR,      jy0,     oh, z0, z1, wt);   /* right jamb casing */
         trim_box(mbt, gL,      gR,      oh - lt, oh, z0, z1, wt);   /* lintel casing */
+        if (sill > 0.0f)
+            trim_box(mbt, gL,  gR,      sill, sill + lt, z0, z1, wt);   /* sill ledge casing */
     } else {                                              /* opening spans Z, thickness in X */
         float x0 = (wall == ROOM_WALL_W) ? -hw - t : hw;
         float x1 = (wall == ROOM_WALL_W) ? -hw     : hw + t;
-        frame_quad(mbf, vec3_make(x0, e, gL), vec3_make(x1, e, gL),            /* threshold (+y) */
-                        vec3_make(x1, e, gR), vec3_make(x0, e, gR),
-                        vec3_make(0.0f, 1.0f, 0.0f), x0 / ft, gL / ft, x1 / ft, gR / ft);
-        trim_box(mbt, x0, x1, 0.0f,    oh, gL,      gL + lt, wt);   /* jamb casing z=gL */
-        trim_box(mbt, x0, x1, 0.0f,    oh, gR - lt, gR,      wt);   /* jamb casing z=gR */
+        if (sill <= 0.0f)
+            frame_quad(mbf, vec3_make(x0, e, gL), vec3_make(x1, e, gL),        /* threshold (+y) */
+                            vec3_make(x1, e, gR), vec3_make(x0, e, gR),
+                            vec3_make(0.0f, 1.0f, 0.0f), x0 / ft, gL / ft, x1 / ft, gR / ft);
+        trim_box(mbt, x0, x1, jy0,     oh, gL,      gL + lt, wt);   /* jamb casing z=gL */
+        trim_box(mbt, x0, x1, jy0,     oh, gR - lt, gR,      wt);   /* jamb casing z=gR */
         trim_box(mbt, x0, x1, oh - lt, oh, gL,      gR,      wt);   /* lintel casing */
+        if (sill > 0.0f)
+            trim_box(mbt, x0, x1, sill, sill + lt, gL,      gR,      wt);   /* sill ledge casing */
     }
 }
 
@@ -4723,7 +4741,8 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
         mb_init(&mbt);
         for (oi = 0; oi < no; oi++)
             emit_door_reveal(&mbf, &mbt, ops[oi].wall, ops[oi].center,
-                             ops[oi].width, ops[oi].height, hw, hd, ROUTE_WALL_T);
+                             ops[oi].width, ops[oi].height, ops[oi].sill,
+                             hw, hd, ROUTE_WALL_T);
         if (mbf.index_count > 0) door_floor = mesh_from_builder(&mbf);
         if (mbt.index_count > 0) door_trim  = mesh_from_builder(&mbt);
         mb_free(&mbf);
@@ -9992,6 +10011,20 @@ static void cmd_place_window(AppState *st) {
     }
     if (best_room == 0) { printf("no wall in front to place a window\n"); return; }
 
+    /* descend_wall_mount (t=0) lands the centre on the INTERIOR wall plane, so the
+       frame straddles it half-proud into the room. Push the centre OUTWARD (away
+       from the interior, into the wall slab) by half the wall thickness so the
+       0.20-thick frame centres in the slab. Outward = -inward; inward normals
+       (descend_wall_mount): N +z, E -x, S -z, W +x. The along-wall coordinate
+       (x for N/S, z for E/W) is untouched, so the shell hole position is unchanged. */
+    switch (best_wall) {
+        case ROOM_WALL_N: best_center.z -= ROUTE_WALL_T * 0.5f; break;  /* outward -z */
+        case ROOM_WALL_E: best_center.x += ROUTE_WALL_T * 0.5f; break;  /* outward +x */
+        case ROOM_WALL_S: best_center.z += ROUTE_WALL_T * 0.5f; break;  /* outward +z */
+        case ROOM_WALL_W: best_center.x -= ROUTE_WALL_T * 0.5f; break;  /* outward -x */
+        default: break;
+    }
+
     {
         static const float wyaw[4] = { 0.0f, -90.0f, 180.0f, 90.0f };
         RoomRect br = editor_room_rect(s, best_room);
@@ -10054,6 +10087,29 @@ static sol_u32 window_glass_child(Scene *s, sol_u32 win) {
             strcmp(s->objects[i].mesh_ref, "window_glass") == 0)
             return s->objects[i].handle;
     return 0;
+}
+
+/* after a window's opening was resized, re-size its glass pane to match (the
+   registry-shared rebuild: release the OLD shape by its old key, clear the
+   borrow, re-resolve — never mesh_destroy a shared shape). The pane is
+   center-origin at the window's local (0,0,0), so only its {w,h} change. */
+static void window_glass_resize(AppState *st, sol_u32 win) {
+    Scene       *s     = &st->scene;
+    sol_u32      child = window_glass_child(s, win);
+    SceneObject *wo    = scene_get(s, win);
+    SceneObject *co    = child ? scene_get(s, child) : (SceneObject *)0;
+    float        gp[2];
+    char         oldkey[160];
+    sol_bool     keyed;
+    if (!wo || !co) return;
+    gp[0] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "w");
+    gp[1] = mesh_ref_param("window", wo->mesh_params, wo->mesh_param_count, "h");
+    keyed = mesh_asset_key(co, oldkey);          /* key from the OLD params */
+    scene_mesh_params_set(s, child, gp, 2);
+    if (keyed) asset_release(&g_mesh_assets, oldkey);
+    co = scene_get(s, child);
+    if (co) memset(&co->mesh, 0, sizeof co->mesh);   /* drop the borrow */
+    scene_resolve_meshes(s);
 }
 
 /* set a window's glass color preset by name: "none" removes the pane; any other
@@ -11143,6 +11199,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 sol_u32      wroom = (ro && ro->mesh_ref &&
                                       strcmp(ro->mesh_ref, "window") == 0)
                                      ? ro->parent : 0;
+                if (wroom != 0)
+                    window_glass_resize(st, st->resize_board);   /* pane tracks the new opening */
                 if (wroom != 0) room_rebuild_one(st, wroom);
                 scene_save(&st->scene, "scene.stml");
                 st->resize_board = 0;
@@ -14604,6 +14662,9 @@ static void render(AppState *state) {
             if (g_dark_wood.albedo_tex.id != 0 && o->mesh_ref &&
                 strcmp(o->mesh_ref, "gate") == 0)
                 dm = g_dark_wood;                 /* portal frame */
+            if (g_dark_wood.albedo_tex.id != 0 && o->mesh_ref &&
+                strcmp(o->mesh_ref, "window") == 0)
+                dm = g_dark_wood;                 /* window frame (the glass child is "window_glass", untouched) */
             if (g_oak_mat.albedo_tex.id != 0 && o->mesh_ref &&
                 strcmp(o->mesh_ref, "card") == 0 &&
                 (o->kind == KIND_FILE || o->kind == KIND_FOLDER)) {
