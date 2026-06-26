@@ -7748,6 +7748,31 @@ static void cycle_page(AppState *st, int dir) {
     scene_save(&st->scene, "scene.stml");
 }
 
+/* Shift+Right in board view: create a fresh page (/page-N, the next free
+   number) and navigate to it. If a selection exists, MOVE it onto the new page
+   (each card keeps its board-local position) and stay selected. The blank page
+   is emergent: it persists once it carries something, vanishes if left empty. */
+static void board_new_page(AppState *st) {
+    sol_u32 board = st->board_view;
+    char    pages[BOARD_PAGE_MAX][PAGE_SLUG_CAP];
+    char    slug[PAGE_SLUG_CAP];
+    int     np, i, n;
+    if (board == 0) return;
+    np = board_pages(st, board, pages, BOARD_PAGE_MAX);
+    for (n = 1; ; n++) {                          /* smallest free /page-N */
+        sol_bool taken = SOL_FALSE;
+        snprintf(slug, sizeof slug, "/page-%d", n);
+        for (i = 0; i < np; i++)
+            if (strcmp(pages[i], slug) == 0) { taken = SOL_TRUE; break; }
+        if (!taken) break;
+    }
+    for (i = 0; i < st->sel_count; i++)           /* move the selection, layout kept */
+        scene_meta_set(&st->scene, st->sel[i], "page", slug);
+    scene_meta_set(&st->scene, board, "active_page", slug);
+    scene_save(&st->scene, "scene.stml");
+    printf("new page %s%s\n", slug, st->sel_count ? " (moved selection)" : "");
+}
+
 /* Does the target page already carry a folder linking back to `link`? */
 static sol_bool folder_backlink_exists(AppState *st, sol_u32 board,
                                        const char *page, const char *link) {
@@ -11516,10 +11541,15 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     {
         sol_bool left_now  = (sol_bool)(glfwGetKey(w, GLFW_KEY_LEFT)  == GLFW_PRESS);
         sol_bool right_now = (sol_bool)(glfwGetKey(w, GLFW_KEY_RIGHT) == GLFW_PRESS);
-        if (st->board_view != 0 && st->selected_handle == 0 &&
-            st->reader_state == READER_IDLE) {
-            if (right_now && !st->page_next_was) cycle_page(st, +1);
-            if (left_now  && !st->page_prev_was) cycle_page(st, -1);
+        sol_bool shift     = (sol_bool)(glfwGetKey(w, GLFW_KEY_LEFT_SHIFT)  == GLFW_PRESS ||
+                                        glfwGetKey(w, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+        if (st->board_view != 0 && st->reader_state == READER_IDLE) {
+            if (shift) {                          /* Shift+Right: new page (+ move selection) */
+                if (right_now && !st->page_next_was) board_new_page(st);
+            } else if (st->selected_handle == 0) {/* plain arrows cycle (nothing selected) */
+                if (right_now && !st->page_next_was) cycle_page(st, +1);
+                if (left_now  && !st->page_prev_was) cycle_page(st, -1);
+            }
         }
         st->page_prev_was = left_now;
         st->page_next_was = right_now;
