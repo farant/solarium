@@ -13880,6 +13880,19 @@ static void render(AppState *state) {
         if (state->sel_count > 1 &&
             msel_contains(state->sel, state->sel_count, o->handle))
             hl = 1.0f;                            /* a member of the multi-selection */
+        if (state->marquee_active && state->marquee_dragging &&
+            o->parent == state->board_view &&
+            object_is_selectable(&state->scene, o->handle)) {
+            float fw = mesh_ref_param(o->mesh_ref ? o->mesh_ref : "card",
+                                      o->mesh_params, o->mesh_param_count, "w");
+            float fh = mesh_ref_param(o->mesh_ref ? o->mesh_ref : "card",
+                                      o->mesh_params, o->mesh_param_count, "h");
+            if (msel_rect_overlap(state->marquee_lx0, state->marquee_ly0,
+                                  state->marquee_lx1, state->marquee_ly1,
+                                  o->pos.x - fw * 0.5f, o->pos.y,
+                                  o->pos.x + fw * 0.5f, o->pos.y + fh))
+                hl = 1.0f;                        /* live marquee preview */
+        }
         state->terrain_blend = (o->mesh_ref &&
                                 strcmp(o->mesh_ref, "terrain") == 0)
                                    ? SOL_TRUE : SOL_FALSE;
@@ -15171,6 +15184,21 @@ static void render(AppState *state) {
         }
     }
     }   /* show_hud */
+
+    if (state->marquee_active && state->marquee_dragging) {
+        float rx = (float)(state->marquee_x0 < state->marquee_x1 ?
+                           state->marquee_x0 : state->marquee_x1);
+        float ry = (float)(state->marquee_y0 < state->marquee_y1 ?
+                           state->marquee_y0 : state->marquee_y1);
+        float rw = (float)(state->marquee_x0 < state->marquee_x1 ?
+                           state->marquee_x1 - state->marquee_x0 :
+                           state->marquee_x0 - state->marquee_x1);
+        float rh = (float)(state->marquee_y0 < state->marquee_y1 ?
+                           state->marquee_y1 - state->marquee_y0 :
+                           state->marquee_y0 - state->marquee_y1);
+        ui_quad(rx, ry, rw, rh, 0.45f, 0.62f, 0.95f, 0.18f);            /* fill */
+        ui_quad_outline(rx, ry, rw, rh, 1.5f, 0.55f, 0.72f, 1.0f, 0.9f);/* border */
+    }
 
     /* first-person crosshair at the pick point (screen centre, via the
        viewport-relative units) — orbit mode picks at the cursor instead, and
