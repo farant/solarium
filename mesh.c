@@ -494,18 +494,46 @@ void make_window(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, so
     /* s == 0 plain: glass fills the rectangle, no inner fill */
 }
 
-/* A window's GLASS pane: a centered quad at z=0, drawn on the translucent glass
-   pipeline. base_color (material) tints it. */
+/* A window's GLASS pane: a centered shape at z=0, drawn on the translucent glass
+   pipeline. base_color (material) tints it. For plain/french the pane is a full
+   rectangle; for styled apertures (arch/pointed/circular) we build a centre-fan
+   of the aperture outline so the glass takes the window's shape. */
+
+/* Triangle fan over a CCW outline in the XY plane at z=0, normal +z. */
+static void window_glass_fan(MeshBuilder *b, const float *xy, int n) {
+    sol_u32 c, prev, cur;
+    int i;
+    c    = mb_push_vertex(b, 0.0f,    0.0f,    0.0f, 0,0,1, 0.5f,0.5f);
+    prev = mb_push_vertex(b, xy[0],   xy[1],   0.0f, 0,0,1, 0.0f,0.0f);
+    for (i = 1; i <= n; i++) {
+        int j = i % n;
+        cur  = mb_push_vertex(b, xy[2*j], xy[2*j+1], 0.0f, 0,0,1, 0.0f,0.0f);
+        mb_push_triangle(b, c, prev, cur);
+        prev = cur;
+    }
+}
+
 void make_window_glass(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 style) {
     sol_f32 hw = w * 0.5f, hh = h * 0.5f;
-    sol_u32 v0, v1, v2, v3;
-    (void)style;   /* Task 3 shapes the glass pane; plain quad for now */
-    v0 = mb_push_vertex(b, -hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f);
-    v1 = mb_push_vertex(b,  hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f);
-    v2 = mb_push_vertex(b,  hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f);
-    v3 = mb_push_vertex(b, -hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f);
-    mb_push_triangle(b, v0, v1, v2);
-    mb_push_triangle(b, v0, v2, v3);
+    /* fw MUST equal make_window's "fw" registry default (0.08) so the glass edge
+       meets the muntin exactly. WINDOW_FRAME_W lives in main.c; mirror the value. */
+    sol_f32 fw = 0.08f;
+    int     s  = (int)(style + 0.5f);
+    float   xy[2 * WINDOW_OUTLINE_MAX];
+    int     n;
+    if (s == 1 || s == 2 || s == 3) {
+        n = window_outline(s, hw, hh, fw, xy, WINDOW_OUTLINE_MAX);
+        if (n >= 3) { window_glass_fan(b, xy, n); return; }
+    }
+    {   /* plain / french (s==0 or s==4): full rectangle quad */
+        sol_u32 v0, v1, v2, v3;
+        v0 = mb_push_vertex(b, -hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f);
+        v1 = mb_push_vertex(b,  hw, -hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f);
+        v2 = mb_push_vertex(b,  hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f);
+        v3 = mb_push_vertex(b, -hw,  hh, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f);
+        mb_push_triangle(b, v0, v1, v2);
+        mb_push_triangle(b, v0, v2, v3);
+    }
 }
 
 /* A walkable slab — the second EMBODIMENT of a room-graph edge (a path

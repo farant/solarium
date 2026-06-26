@@ -86,6 +86,14 @@ static void test_window_frame_styles(void) {
            (unsigned)plain, (unsigned)arch, (unsigned)circ);
 }
 
+static void test_window_glass_styles(void) {
+    MeshBuilder mb; sol_u32 rect, disc;
+    mb_init(&mb); make_window_glass(&mb, 1.2f, 1.4f, 0.0f); rect = mb.index_count; mb_free(&mb);
+    mb_init(&mb); make_window_glass(&mb, 1.2f, 1.4f, 3.0f); disc = mb.index_count; mb_free(&mb);
+    assert(disc > rect);   /* a disc fan has many tris vs a 2-tri quad */
+    printf("  window glass styles: rect=%u disc=%u OK\n", (unsigned)rect, (unsigned)disc);
+}
+
 int main(void) {
     /* due-east: straight, A opens E, B opens W, 0 bends */
     {
@@ -223,6 +231,7 @@ int main(void) {
     }
     test_window_sill_panel();
     test_window_frame_styles();
+    test_window_glass_styles();
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;
 }
