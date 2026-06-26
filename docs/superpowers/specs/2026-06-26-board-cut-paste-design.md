@@ -90,7 +90,7 @@ sol_bool cut_was_down;        /* edge-detect for Cmd+X */
 ```
 paste-style edge-detect: (LEFT_SUPER||RIGHT_SUPER) && KEY_X, gated board_view != 0
 on the rising edge:
-    if sel_count == 0: no-op (nothing to cut)
+    if sel_count == 0: clear the cut (cut_count = 0) — the "cancel cut" gesture
     else: copy sel[0..sel_count) into cut[], set cut_count = sel_count
           printf("cut %d card(s)\n", cut_count)
 track st->cut_was_down
@@ -162,11 +162,18 @@ pipeline → no new shader, no MSL twin.
 
 The cut clears when:
 - **Paste** consumes it (§3).
-- **`Esc`** in board view: add `st->cut_count = 0;` to the existing board-view Esc handling.
-- **A new `Cmd+X`** replaces it (§2 overwrites).
-- **A cut card is deleted:** in the board-card delete path (`delete_board_card` / the group
-  delete), drop any deleted handle from `cut[]` (compact the array, decrement `cut_count`) so
-  the dim state and the paste set never reference a dead handle.
+- **A new `Cmd+X` with a non-empty selection** replaces it (§2 overwrites).
+- **`Cmd+X` with an empty selection** clears it — the explicit "cancel cut" gesture
+  (cut-nothing = empty the clipboard). Click empty board space to deselect, then `Cmd+X`.
+- **A cut card is deleted:** in the board-card delete path (`delete_board_card`, which every
+  delete route funnels through), drop the deleted handle from `cut[]` via the already-tested
+  `msel_remove(st->cut, &st->cut_count, h)` so the dim state and the paste set never reference
+  a dead handle.
+
+**Esc does NOT clear the cut.** Esc is the only way to leave board view, and cross-board paste
+requires the cut to survive leaving board view — so Esc keeps its single job (exit board view)
+and the cut rides along, dimmed, until pasted or explicitly cancelled. This is why the cut
+buffer is deliberately *not* cleared in `board_view_exit`.
 
 ### 7. Palette rows — `g_commands[]` (main.c:9759)
 
@@ -221,8 +228,10 @@ reload: cards load under their new parent/page from scene.stml
     board B's active page (re-parented), correct workspace.
   - `Cmd+V` with an **empty** cut buffer but an image on the system clipboard → still pastes
     the image (contextual fall-through intact).
-  - `Esc` after a cut → cards un-dim, a subsequent `Cmd+V` pastes the clipboard image (cut
-    cleared).
+  - Cancel a cut: deselect (click empty board) then `Cmd+X` → cards un-dim; a subsequent
+    `Cmd+V` pastes the clipboard image (cut cleared).
+  - `Esc` after a cut → leaves board view but **keeps** the cut (cards still dimmed in the
+    walkaround); entering another board and `Cmd+V` pastes there (cross-board path).
   - Delete a cut card → no crash, paste set no longer references it.
 
 ## Risks
