@@ -26,6 +26,8 @@
 #include "text.h"                /* text_shape seam + ui_text (P3 item 3b) */
 #include "wtext.h"               /* world-space SDF text — note cards (P3 item 8) */
 #include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
+#include "platform_clipboard.h"  /* clipboard_read_image — Cmd+V paste (clipboard-paste-images) */
+#include "nid.h"                 /* nid_generate — library/<nid>.png filenames */
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
 #include "route.h"
 #include "editor.h"              /* the top-down spatial-tree editor (Task 2-4) */
@@ -2904,6 +2906,7 @@ typedef struct AppState {
     vec3        folder_place_local;  /* board-local point captured at 'd' press */
     sol_bool    folder_place_has;    /* 0 = no board hit at press -> use center */
     sol_bool    d_was_down;          /* edge-detect for the 'd' folder key */
+    sol_bool    paste_was_down;      /* edge-detect for Cmd+V paste */
     sol_bool    page_prev_was;       /* edge-detect for arrow-cycle (Task 5) */
     sol_bool    page_next_was;
     sol_u32     drop_target_handle;  /* folder under a dragged card (Task 8); 0 = none */
@@ -9907,6 +9910,73 @@ static void delete_board_card(AppState *st, sol_u32 h) {
     scene_remove(&st->scene, h);
 }
 
+/* Write `len` bytes to library/<nid>.png and fill out_path (cap bytes) with the
+   relative path. Returns SOL_TRUE on success. */
+static sol_bool library_write(const unsigned char *bytes, int len,
+                              char *out_path, int cap) {
+    char  nid[NID_LEN + 1];
+    FILE *f;
+    nid_generate(nid);
+    fs_mkdir("library");
+    snprintf(out_path, (size_t)cap, "library/%s.png", nid);
+    f = fopen(out_path, "wb");
+    if (!f) return SOL_FALSE;
+    if (fwrite(bytes, 1, (size_t)len, f) != (size_t)len) {
+        fclose(f);
+        return SOL_FALSE;
+    }
+    fclose(f);
+    return SOL_TRUE;
+}
+
+/* Cmd+V in board view: paste the clipboard image -> library/<nid>.png -> a
+   picture on the board at the cursor, on the current page. */
+static void cmd_paste_image(AppState *st, GLFWwindow *w) {
+    unsigned char *bytes = (unsigned char *)0;
+    int            len   = 0;
+    Image          img;
+    char           path[256];
+    sol_u32        board, a;
+    vec3           blocal;
+    if (st->board_view == 0) return;
+    if (!clipboard_read_image(&bytes, &len) || !bytes || len <= 0) {
+        free(bytes);   /* safe (free(NULL) is defined); guards future clipboard impls */
+        printf("paste: no image on the clipboard\n");
+        return;
+    }
+    if (!image_load_from_memory(bytes, len, &img)) {   /* validate it decodes */
+        printf("paste: clipboard image not decodable\n");
+        free(bytes);
+        return;
+    }
+    image_free(&img);
+    if (!library_write(bytes, len, path, (int)sizeof path)) {
+        printf("paste: could not write the library file\n");
+        free(bytes);
+        return;
+    }
+    free(bytes);
+    blocal = vec3_make(0.0f, 0.0f, 0.0f);
+    board  = board_under_ray(st, pick_ray(st, w), &blocal);
+    if (board == 0) {                                  /* cursor off the board: center */
+        board  = st->board_view;
+        blocal = board_local_frac(st, board, 0.0f, 0.5f);
+    }
+    a = spawn_image_picture(st, board, vec3_make(0.0f, 0.0f, 0.0f),
+                            quat_identity(), path);     /* tags the page internally */
+    {
+        SceneObject *ao = scene_get(&st->scene, a);
+        if (ao) {
+            float ph = mesh_ref_param("picture", ao->mesh_params,
+                                      ao->mesh_param_count, "h");
+            ao->pos = board_pin_pos(&st->scene, board, a, blocal, 0.0f, -0.5f * ph);
+        }
+    }
+    st->selected_handle = a;
+    scene_save(&st->scene, "scene.stml");
+    printf("pasted image -> %s\n", path);
+}
+
 static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) {
     float    look = (float)dt * LOOK_SPEED;
     sol_bool tab_now, dragging, fp, bv_active;
@@ -11429,6 +11499,17 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         st->d_was_down = d_now;
     }
 
+    /* Cmd+V in board view: paste the clipboard image onto the board. */
+    {
+        sol_bool paste_now = (sol_bool)(
+            (glfwGetKey(w, GLFW_KEY_LEFT_SUPER)  == GLFW_PRESS ||
+             glfwGetKey(w, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS) &&
+            glfwGetKey(w, GLFW_KEY_V) == GLFW_PRESS);
+        if (paste_now && !st->paste_was_down && st->board_view != 0)
+            cmd_paste_image(st, w);
+        st->paste_was_down = paste_now;
+    }
+
     /* Arrow LEFT/RIGHT: cycle the focused board's active page (edge-triggered,
        no selection, no book open). The camera-look arrow handler above is already
        gated with !bv_active so it is inert in board view — no extra guard needed. */
@@ -12076,6 +12157,7 @@ static void bind_runtime_handles(AppState *st) {
     memset(&st->place_ghost, 0, sizeof st->place_ghost);
     st->folder_place_has   = SOL_FALSE;
     st->d_was_down         = SOL_FALSE;
+    st->paste_was_down     = SOL_FALSE;
     /* page_*_was: Task 5 arrow-cycle; drop_target_handle: Task 8 */
     st->page_prev_was      = SOL_FALSE;
     st->page_next_was      = SOL_FALSE;
