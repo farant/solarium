@@ -339,7 +339,8 @@ int route_room_openings_in(const Route *all, int n, Scene *s, sol_u32 room,
             float c = (wall == ROOM_WALL_N || wall == ROOM_WALL_S)
                         ? r->door_lo.x - rp.x : r->door_lo.z - rp.z;
             out[m].wall = wall; out[m].center = c;
-            out[m].width = ROUTE_DOOR_W; out[m].height = ROUTE_DOOR_H; m++;
+            out[m].width = ROUTE_DOOR_W; out[m].height = ROUTE_DOOR_H;
+            out[m].sill = 0.0f; m++;
         }
         if (m >= max) break;
         if (r->room_hi == room) {
@@ -347,7 +348,8 @@ int route_room_openings_in(const Route *all, int n, Scene *s, sol_u32 room,
             float c = (wall == ROOM_WALL_N || wall == ROOM_WALL_S)
                         ? r->door_hi.x - rp.x : r->door_hi.z - rp.z;
             out[m].wall = wall; out[m].center = c;
-            out[m].width = ROUTE_DOOR_W; out[m].height = ROUTE_DOOR_H; m++;
+            out[m].width = ROUTE_DOOR_W; out[m].height = ROUTE_DOOR_H;
+            out[m].sill = 0.0f; m++;
         }
     }
     return m;

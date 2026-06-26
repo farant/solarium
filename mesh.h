@@ -63,7 +63,8 @@ typedef struct {
     int     wall;
     sol_f32 center;
     sol_f32 width;
-    sol_f32 height;
+    sol_f32 height;    /* top of the opening (lintel) above the floor */
+    sol_f32 sill;      /* bottom of the opening above the floor; 0 = door (reaches floor) */
 } RoomOpening;
 
 /* The most gaps one wall can carry (the doored-wall scratch arrays size to it). */

@@ -1,5 +1,6 @@
 #include "route.h"
 #include "scene.h"
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -49,6 +50,28 @@ static sol_u32 add_island(Scene *s, float x, float y, float z, float w, float d)
     p[0] = w; p[1] = d; p[2] = 56.0f; p[3] = 2.0f; p[4] = 1.0f;
     scene_mesh_params_set(s, h, p, 5);
     return h;
+}
+
+static void test_window_sill_panel(void) {
+    MeshBuilder mb;
+    RoomOpening door, win;
+    int door_idx, win_idx;
+
+    door.wall = ROOM_WALL_N; door.center = 0.0f; door.width = 1.4f;
+    door.height = 2.1f; door.sill = 0.0f;
+    mb_init(&mb);
+    make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1, 1, 1, 1, 0, &door, 1);
+    door_idx = mb.index_count;
+    mb_free(&mb);
+
+    win = door; win.sill = 0.9f; win.height = 2.3f;
+    mb_init(&mb);
+    make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1, 1, 1, 1, 0, &win, 1);
+    win_idx = mb.index_count;
+    mb_free(&mb);
+
+    assert(win_idx > door_idx);   /* the sill box adds faces */
+    printf("  window sill panel: door=%d win=%d OK\n", door_idx, win_idx);
 }
 
 int main(void) {
@@ -186,6 +209,7 @@ int main(void) {
         CHECK(r.room_lo == isle || r.room_hi == isle);
         scene_free(&s);
     }
+    test_window_sill_panel();
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;
 }

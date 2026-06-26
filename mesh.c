@@ -273,6 +273,7 @@ static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
     sol_f32 lo[ROOM_MAX_OPENINGS_PER_WALL];
     sol_f32 hi[ROOM_MAX_OPENINGS_PER_WALL];
     sol_f32 oy[ROOM_MAX_OPENINGS_PER_WALL];
+    sol_f32 sl[ROOM_MAX_OPENINGS_PER_WALL];   /* sill (bottom) per opening; 0 = door */
     int     k = 0, i, j;
     sol_f32 cur;
     for (i = 0; i < n_ops; i++) {
@@ -280,16 +281,16 @@ static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
         if (ops[i].wall != wall_id) continue;
         if (k >= ROOM_MAX_OPENINGS_PER_WALL) break;
         c = ops[i].center; hwid = ops[i].width * 0.5f;
-        lo[k] = c - hwid; hi[k] = c + hwid; oy[k] = ops[i].height;
+        lo[k] = c - hwid; hi[k] = c + hwid; oy[k] = ops[i].height; sl[k] = ops[i].sill;
         k++;
     }
     for (i = 1; i < k; i++) {                 /* insertion sort by lo */
-        sol_f32 pivot_lo = lo[i], pivot_hi = hi[i], pivot_oy = oy[i];
+        sol_f32 pivot_lo = lo[i], pivot_hi = hi[i], pivot_oy = oy[i], pivot_sl = sl[i];
         j = i - 1;
         while (j >= 0 && lo[j] > pivot_lo) {
-            lo[j + 1] = lo[j]; hi[j + 1] = hi[j]; oy[j + 1] = oy[j]; j--;
+            lo[j + 1] = lo[j]; hi[j + 1] = hi[j]; oy[j + 1] = oy[j]; sl[j + 1] = sl[j]; j--;
         }
-        lo[j + 1] = pivot_lo; hi[j + 1] = pivot_hi; oy[j + 1] = pivot_oy;
+        lo[j + 1] = pivot_lo; hi[j + 1] = pivot_hi; oy[j + 1] = pivot_oy; sl[j + 1] = pivot_sl;
     }
     cur = s0;
     for (i = 0; i <= k; i++) {
@@ -302,6 +303,10 @@ static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
             else      aabb_box(b, f0, f1, 0.0f, h, cur, gL);
         }
         if (i < k) {
+            if (sl[i] > 0.0f) {                /* sill below the gap (windows) */
+                if (runx) aabb_box(b, gL, gR, 0.0f, sl[i], f0, f1);
+                else      aabb_box(b, f0, f1, 0.0f, sl[i], gL, gR);
+            }
             if (oy[i] < h) {                   /* header above the gap */
                 if (runx) aabb_box(b, gL, gR, oy[i], h, f0, f1);
                 else      aabb_box(b, f0, f1, oy[i], h, gL, gR);
