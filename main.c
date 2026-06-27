@@ -16763,6 +16763,8 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
         return;
     }
     if (st->edit_handle == 0) return;
+    if (glfwGetKey(w, GLFW_KEY_LEFT_SUPER)  == GLFW_PRESS ||
+        glfwGetKey(w, GLFW_KEY_RIGHT_SUPER) == GLFW_PRESS) return;  /* Cmd+key is a command, not text */
     n = utf8_encode(cp, enc);
     if (n <= 0) return;
     selection_delete(st);                                   /* type-over a selection */
@@ -16778,6 +16780,64 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
     note_autosize(st, st->edit_handle);
     caret_refresh_goal(st);
+}
+
+/* Insert a UTF-8 string at the caret, replacing any selection. Truncates to the
+   buffer's remaining room on a codepoint boundary. Mirrors + autosizes like on_char. */
+static void note_insert_text(AppState *st, const char *s, int len) {
+    int room;
+    selection_delete(st);                                   /* replace a selection */
+    room = EDIT_BUF_CAP - 1 - st->edit_len;
+    if (len > room) len = room;
+    while (len > 0 && ((unsigned char)s[len] & 0xC0u) == 0x80u) len--;  /* don't split a codepoint */
+    if (len <= 0) return;
+    memmove(st->edit_buf + st->edit_cursor + len,
+            st->edit_buf + st->edit_cursor,
+            (size_t)(st->edit_len - st->edit_cursor));
+    memcpy(st->edit_buf + st->edit_cursor, s, (size_t)len);
+    st->edit_len    += len;
+    st->edit_cursor += len;
+    st->edit_sel_anchor = st->edit_cursor;
+    st->edit_buf[st->edit_len] = '\0';
+    scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+    note_autosize(st, st->edit_handle);
+    caret_refresh_goal(st);
+}
+
+/* Copy the selection to the system clipboard. Returns 1 if there was a selection. */
+static int note_clip_copy(AppState *st, GLFWwindow *w) {
+    int  lo, hi, k;
+    char cb[EDIT_BUF_CAP];
+    if (!edit_has_sel(st)) return 0;
+    lo = edit_sel_lo(st);
+    hi = edit_sel_hi(st);
+    k  = hi - lo;
+    if (k > EDIT_BUF_CAP - 1) k = EDIT_BUF_CAP - 1;
+    memcpy(cb, st->edit_buf + lo, (size_t)k);
+    cb[k] = '\0';
+    glfwSetClipboardString(w, cb);
+    return 1;
+}
+
+/* Paste the system clipboard's text at the caret (replacing a selection), stripping '\r'. */
+static void note_clip_paste(AppState *st, GLFWwindow *w) {
+    const char *cb = glfwGetClipboardString(w);
+    const char *p;
+    char        s[EDIT_BUF_CAP];
+    int         n = 0, lp, need;
+    unsigned    lead;
+    if (!cb || !cb[0]) return;
+    for (p = cb; *p != '\0' && n < EDIT_BUF_CAP - 1; p++)
+        if (*p != '\r') s[n++] = *p;     /* drop carriage returns: \r\n -> \n */
+    if (n == EDIT_BUF_CAP - 1) {          /* hit capacity: the last codepoint may be partial */
+        lp = n - 1;
+        while (lp > 0 && ((unsigned char)s[lp] & 0xC0u) == 0x80u) lp--;
+        lead = (unsigned char)s[lp];
+        need = (lead >= 0xF0u) ? 4 : (lead >= 0xE0u) ? 3 : (lead >= 0xC0u) ? 2 : 1;
+        if (lp + need > n) n = lp;        /* drop the incomplete trailing codepoint */
+    }
+    s[n] = '\0';
+    if (n > 0) note_insert_text(st, s, n);
 }
 
 /* KEYS are buttons. While a note has focus the only buttons that mean
@@ -16966,6 +17026,12 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
                     if (!shift) st->edit_sel_anchor = st->edit_cursor;
                 }
             }
+        } else if ((mods & GLFW_MOD_SUPER) && key == GLFW_KEY_C && action == GLFW_PRESS) {
+            note_clip_copy(st, window);                       /* copy selection (no-op if none) */
+        } else if ((mods & GLFW_MOD_SUPER) && key == GLFW_KEY_X && action == GLFW_PRESS) {
+            if (note_clip_copy(st, window)) selection_delete(st);   /* cut = copy + delete */
+        } else if ((mods & GLFW_MOD_SUPER) && key == GLFW_KEY_V && action == GLFW_PRESS) {
+            note_clip_paste(st, window);                      /* paste at the caret */
         }
         return;                                 /* everything else stays quiet */
     }
