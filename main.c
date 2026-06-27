@@ -47,6 +47,7 @@
 #include "app_synth.h"           /* the synth book's page layout (TODO5) */
 #include "boardpage.h"           /* page slugs + board page-list (Board Pages) */
 #include "multiselect.h"         /* board multi-select set ops (Board Multi-Select) */
+#include "caret.h"               /* caret layout (pure; font glue = caret_build below) */
 
 /* glb models come through the registry (P4 item 4 piece 3) — defined with
    the stores below; forward-declared because the import layer sits above
@@ -2846,6 +2847,9 @@ typedef struct AppState {
     sol_u32     edit_handle;       /* note being edited; 0 = none */
     char        edit_buf[EDIT_BUF_CAP];
     int         edit_len;
+    int         edit_cursor;      /* byte offset into edit_buf: the caret */
+    float       edit_goal_x;      /* remembered note-local x for Up/Down */
+    Mesh        caret_mesh;       /* unit caret quad; built once on first use */
     Palette     palette;           /* command palette state (palette.h) */
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
@@ -10655,6 +10659,9 @@ static sol_u32 spawn_note(AppState *st, GLFWwindow *w) {
 
 /* defined later (after read_input); the board-view double-click calls it */
 static void note_edit_begin(AppState *st, sol_u32 handle);
+/* defined later (after note_edit_begin); the note-body renderer calls it */
+static int caret_build(const Font *f, const char *src, float px2m, float wrap_w,
+                       CaretField *out);
 
 /* Delete one selectable board card (note/picture/folder): release its keyed
    mesh, clear transient refs, remove it. Does NOT save or rebuild arrows. */
@@ -15646,20 +15653,42 @@ static void render(AppState *state) {
                mirrors every keystroke, so this renders the typing live. */
             if (o->kind == KIND_NOTE) {
                 const char *txt = scene_meta_get(&state->scene, o->handle, "text");
-                char        ebuf[EDIT_BUF_CAP + 2];
-                if (state->edit_handle == o->handle) {
-                    size_t tn = txt ? strlen(txt) : 0;
-                    if (tn > sizeof(ebuf) - 2) tn = sizeof(ebuf) - 2;
-                    memcpy(ebuf, txt ? txt : "", tn);
-                    ebuf[tn]     = '_';
-                    ebuf[tn + 1] = '\0';
-                    txt = ebuf;
-                }
                 if (txt && txt[0]) {
                     float bpx2m = note_text_size(&state->scene, o->handle) / lh;
                     wtext_block(uf, vp, face, txt,
                                 -cw * 0.5f + 2.0f * margin, ch - 2.0f * margin,
                                 bpx2m, usable, ink_r, ink_g, ink_b);
+                }
+                if (state->edit_handle == o->handle) {     /* the moveable caret */
+                    float       bpx2m = note_text_size(&state->scene, o->handle) / lh;
+                    float       x0 = -cw * 0.5f + 2.0f * margin;
+                    float       y0 = ch - 2.0f * margin;
+                    const char *src = txt ? txt : "";
+                    CaretField  cf;
+                    int         slot, linei;
+                    Material    cm = material_default();
+                    caret_build(uf, src, bpx2m, usable, &cf);
+                    slot  = caret_slot_for_offset(&cf, state->edit_cursor);
+                    linei = (slot >= 0) ? caret_line_of_slot(&cf, slot) : 0;
+                    if (state->caret_mesh.index_count == 0) {
+                        MeshBuilder mb;
+                        mb_init(&mb);
+                        make_page(&mb, 1.0f, 1.0f);
+                        state->caret_mesh = mesh_from_builder(&mb);
+                        mb_free(&mb);
+                    }
+                    if (slot >= 0) {
+                        float cw_caret = 0.006f;
+                        float ctop = y0 - (float)linei * cf.line_h;
+                        vec3  cpos = vec3_make(x0 + cf.slots[slot].x + cw_caret * 0.5f,
+                                               ctop - cf.line_h * 0.5f, 0.0006f);
+                        mat4  cmodel = mat4_mul(face,
+                                   mat4_from_trs(cpos, quat_identity(),
+                                                 vec3_make(cw_caret, cf.line_h, 1.0f)));
+                        cm.base_color = vec3_make(0.10f, 0.09f, 0.08f);
+                        cm.emissive   = vec3_make(0.10f, 0.09f, 0.08f);
+                        draw_mesh(state, state->caret_mesh, cmodel, view, proj, eye, 0.0f, cm);
+                    }
                 }
             }
         }
@@ -16456,6 +16485,47 @@ static void render(AppState *state) {
 
 /* ---- note editing (item 8 piece 5) ---- */
 
+/* Build the note's caret field: wrap exactly as the renderer does, recover
+   source offsets, gather per-char advances from the font, assemble (pure). */
+static int caret_build(const Font *f, const char *src, float px2m, float wrap_w,
+                       CaretField *out) {
+    char  wrapped[CARET_MAX_SLOTS];
+    int   map[CARET_MAX_SLOTS];
+    float adv[CARET_MAX_SLOTS];
+    int   wlen, wi, prevg;
+    text_wrap(f, src, px2m, wrap_w, wrapped, WT_WRAP_CAP);
+    wlen  = caret_reconcile(src, wrapped, map, CARET_MAX_SLOTS);
+    prevg = 0;
+    wi    = 0;
+    while (wi < wlen) {
+        unsigned long    cp;
+        int              n = caret_cplen((unsigned char)wrapped[wi]);
+        int              gi, k;
+        const FontGlyph *g;
+        for (k = 0; k < n && wi + k < wlen; k++) adv[wi + k] = 0.0f;
+        if (wrapped[wi] == '\n') { prevg = 0; wi += n; continue; }
+        cp = (unsigned long)(unsigned char)wrapped[wi];
+        if (n > 1) {
+            cp = (unsigned long)((unsigned char)wrapped[wi] & (0x7Fu >> n));
+            for (k = 1; k < n && wi + k < wlen; k++)
+                cp = (cp << 6) | ((unsigned long)(unsigned char)wrapped[wi + k] & 0x3Fu);
+        }
+        gi = font_glyph_index(f, cp);
+        g  = gi ? font_glyph(f, gi) : (const FontGlyph *)0;
+        if (g) {
+            float a = g->advance;
+            if (prevg) a += font_kern(f, prevg, gi);
+            adv[wi] = a * px2m;
+            prevg = gi;
+        } else {
+            prevg = 0;
+        }
+        wi += n;
+    }
+    return caret_field_build(src, wrapped, map, adv,
+                             wlen, font_line_height(f) * px2m, out);
+}
+
 /* Open a note for typing: seed the buffer from its text meta. */
 static void note_edit_begin(AppState *st, sol_u32 handle) {
     const char *t = scene_meta_get(&st->scene, handle, "text");
@@ -16465,6 +16535,8 @@ static void note_edit_begin(AppState *st, sol_u32 handle) {
     st->edit_buf[n] = '\0';
     st->edit_len    = (int)n;
     st->edit_handle = handle;
+    st->edit_cursor = st->edit_len;    /* caret at the end, matching today's feel */
+    st->edit_goal_x = 0.0f;
     printf("editing note — type away; Enter = newline, Esc or click = done\n");
 }
 
@@ -16527,6 +16599,7 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     memcpy(st->edit_buf + st->edit_len, enc, (size_t)n);
     st->edit_len += n;
     st->edit_buf[st->edit_len] = '\0';
+    st->edit_cursor = st->edit_len;
     scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
     note_autosize(st, st->edit_handle);
 }
@@ -16632,11 +16705,13 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
                    ((unsigned char)st->edit_buf[st->edit_len] & 0xC0u) == 0x80u)
                 st->edit_len--;
             st->edit_buf[st->edit_len] = '\0';
+            st->edit_cursor = st->edit_len;
             scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
             note_autosize(st, st->edit_handle);
         } else if (key == GLFW_KEY_ENTER && st->edit_len + 1 < EDIT_BUF_CAP) {
             st->edit_buf[st->edit_len++] = '\n';
             st->edit_buf[st->edit_len]   = '\0';
+            st->edit_cursor = st->edit_len;
             scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
             note_autosize(st, st->edit_handle);
         }
@@ -16949,6 +17024,7 @@ int main(void) {
     }
 
     plan_overlay_drop(&state);
+    mesh_destroy(&state.caret_mesh);
     font_destroy(state.mono_font);
     font_destroy(state.ui_font);
     wtext_shutdown();

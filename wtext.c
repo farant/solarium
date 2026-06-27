@@ -8,8 +8,8 @@
 #include "sol_math.h"
 
 #define WT_MAX_GLYPHS 4096   /* a full book page of code (item 9) fits */
-#define WT_WRAP_CAP   2048
 #define WT_VERT_FLOATS 5              /* x, y, z, u, v — z carries the bend */
+/* WT_WRAP_CAP now comes from wtext.h, so callers wrap identically */
 
 static struct {
     RhiShader   shader;

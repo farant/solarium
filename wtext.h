@@ -14,6 +14,8 @@
 #include "font.h"
 #include "sol_types.h"
 
+#define WT_WRAP_CAP   2048   /* wrap-buffer cap; shared so callers wrap identically */
+
 sol_bool wtext_init(void);      /* needs rhi_init; builds pipeline + buffer */
 void     wtext_shutdown(void);
 
