@@ -289,6 +289,7 @@ static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
         lo[k] = c - hwid; hi[k] = c + hwid;
         oy[k] = ops[i].height; if (oy[k] > h) oy[k] = h;   /* spanning window: wall part stops at h */
         sl[k] = ops[i].sill;
+        if (oy[k] <= sl[k]) continue;   /* degenerate/inverted opening: skip (don't record k) */
         k++;
     }
     /* x-boundaries: the wall ends + each opening edge, clamped to [s0,s1] */

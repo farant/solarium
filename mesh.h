@@ -76,8 +76,9 @@ typedef struct {
 
 /* A thick-walled room built AROUND its door gaps (never CSG): floor always,
    ceiling if `ceil`, a thick slab per present wall (wn/we/ws/ww) with the
-   openings for that wall left as gaps (piers + headers; the floor fills each
-   doorway's threshold strip). */
+   openings for that wall cut as solid minus the union of opening holes (a
+   vertical slab sweep), so overlapping/stacked openings don't fill each
+   other; the floor fills each doorway's threshold strip). */
 void make_room_doored(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_f32 h, sol_f32 t,
                       int wn, int we, int ws, int ww, int ceil,
                       const RoomOpening *ops, int n_ops);
