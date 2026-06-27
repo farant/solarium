@@ -124,6 +124,7 @@ static void test_window_above_wall(void) {
     assert(above_idx == none_idx);   /* above-wall window leaves the wall solid */
     assert(below_idx != none_idx);   /* a real window cuts the wall */
     assert(span_idx  != below_idx);  /* spanning differs (reaches the wall top, no header) */
+    assert(span_idx != none_idx);  /* spanning window still cuts the wall */
     printf("  window above wall: none=%u below=%u above=%u span=%u OK\n",
            (unsigned)none_idx, (unsigned)below_idx, (unsigned)above_idx, (unsigned)span_idx);
 }
