@@ -7978,8 +7978,9 @@ static void cycle_page(AppState *st, int dir) {
 
 /* Shift+Right in board view: create a fresh page (/page-N, the next free
    number) and navigate to it. If a selection exists, MOVE it onto the new page
-   (each card keeps its board-local position) and stay selected. The blank page
-   is emergent: it persists once it carries something, vanishes if left empty. */
+   (each card keeps its board-local position) and stay selected. The page is
+   registered in the board's ordered "pages" meta, so it persists in creation
+   order even while empty. */
 static void board_new_page(AppState *st) {
     sol_u32 board = st->board_view;
     char    pages[BOARD_PAGE_MAX][PAGE_SLUG_CAP];
