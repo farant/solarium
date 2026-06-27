@@ -64,6 +64,18 @@ if [ "$MODE" = "iotest" ]; then
     exit 0
 fi
 
+# Build + run the headless scene handle-map test under the sanitizers. Same link
+# set as iotest (scene.c + deps, no GL): it churns the graph and checks scene_get.
+if [ "$MODE" = "scenetest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        scene.c material.c scene_io.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mirror.c platform_fs.c component.c particles.c nid.c stml.c sol_math.c scene_test.c \
+        -o scene_test
+    echo "built ./scene_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
 # Build + run the headless camera-math test under the sanitizers. Links only
 # camera.c + sol_math.c (no GLFW/GL): pure state + math.
 if [ "$MODE" = "camtest" ]; then
