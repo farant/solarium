@@ -4453,52 +4453,68 @@ static void wall_panel_quad(MeshBuilder *b, int runx, float f, float ns,
     mb_push_triangle(b, a, e, g);                  /* never culls; normals are set) */
 }
 
-/* one wall's inner-face panels: mirror emit_doored_wall's opening-walk, emitting
-   a flat pier between openings, a header above each opening (oy < h), and — for a
-   window (sill > 0) — an apron panel below the opening (floor -> sill) so the wall
-   under a window reads finished like the rest, not as bare shell stone. */
+/* one wall's inner-face panels: mirror emit_doored_wall's slab sweep (cut the
+   veneer as solid minus the UNION of the opening holes), emitting a flat plaster
+   quad per remaining y-band instead of a solid box. A gable window (sill >= h)
+   leaves the veneer solid; a spanning window's veneer stops at h. The duplication
+   with emit_doored_wall (mesh.c) is deliberate — they were always parallel; only
+   the emit primitive (wall_panel_quad vs aabb_box) differs. */
 static void wall_panels(MeshBuilder *b, int runx, float f, float ns,
                         float s0, float s1, float h,
                         const RoomOpening *ops, int n_ops, int wall_id) {
     float lo[ROOM_MAX_OPENINGS_PER_WALL];
     float hi[ROOM_MAX_OPENINGS_PER_WALL];
-    float oy[ROOM_MAX_OPENINGS_PER_WALL];
-    float sy[ROOM_MAX_OPENINGS_PER_WALL];
-    int   k = 0, i, j;
-    float cur;
+    float oy[ROOM_MAX_OPENINGS_PER_WALL];   /* lintel, capped at h */
+    float sy[ROOM_MAX_OPENINGS_PER_WALL];   /* sill */
+    float xb[2 * ROOM_MAX_OPENINGS_PER_WALL + 2];   /* x-boundaries: wall ends + opening edges */
+    int   k = 0, nb = 0, i, j;
+    /* gather this wall's openings (skip ones entirely above the wall top) */
     for (i = 0; i < n_ops; i++) {
         float c, hwid;
         if (ops[i].wall != wall_id) continue;
+        if (ops[i].sill >= h) continue;             /* gable window: veneer stays solid */
         if (k >= ROOM_MAX_OPENINGS_PER_WALL) break;
         c = ops[i].center; hwid = ops[i].width * 0.5f;
-        lo[k] = c - hwid; hi[k] = c + hwid; oy[k] = ops[i].height;
+        lo[k] = c - hwid; hi[k] = c + hwid;
+        oy[k] = ops[i].height; if (oy[k] > h) oy[k] = h;   /* spanning window: veneer stops at h */
         sy[k] = ops[i].sill;
+        if (oy[k] <= sy[k]) continue;               /* degenerate/inverted: skip (don't record k) */
         k++;
     }
-    for (i = 1; i < k; i++) {                       /* insertion sort by lo */
-        float plo = lo[i], phi = hi[i], poy = oy[i], psy = sy[i];
-        j = i - 1;
-        while (j >= 0 && lo[j] > plo) {
-            lo[j + 1] = lo[j]; hi[j + 1] = hi[j];
-            oy[j + 1] = oy[j]; sy[j + 1] = sy[j]; j--;
-        }
-        lo[j + 1] = plo; hi[j + 1] = phi; oy[j + 1] = poy; sy[j + 1] = psy;
+    /* x-boundaries: the wall ends + each opening edge, clamped to [s0,s1] */
+    xb[nb++] = s0; xb[nb++] = s1;
+    for (i = 0; i < k; i++) {
+        float a = lo[i], c = hi[i];
+        if (a < s0) a = s0; if (a > s1) a = s1;
+        if (c < s0) c = s0; if (c > s1) c = s1;
+        xb[nb++] = a; xb[nb++] = c;
     }
-    cur = s0;
-    for (i = 0; i <= k; i++) {
-        float gL = (i < k) ? lo[i] : s1;
-        float gR = (i < k) ? hi[i] : s1;
-        if (gL < s0) gL = s0;
-        if (gR > s1) gR = s1;
-        if (gL > cur)                              /* solid pier [cur, gL] x [0, h] */
-            wall_panel_quad(b, runx, f, ns, cur, gL, 0.0f, h);
-        if (i < k) {
-            if (oy[i] < h)                         /* header [gL, gR] x [oy, h] */
-                wall_panel_quad(b, runx, f, ns, gL, gR, oy[i], h);
-            if (sy[i] > 0.0f)                      /* window apron [gL, gR] x [0, sill] */
-                wall_panel_quad(b, runx, f, ns, gL, gR, 0.0f, sy[i]);
-            cur = gR;
+    for (i = 1; i < nb; i++) {                       /* insertion sort xb ascending */
+        float p = xb[i]; j = i - 1;
+        while (j >= 0 && xb[j] > p) { xb[j + 1] = xb[j]; j--; }
+        xb[j + 1] = p;
+    }
+    /* each x-slab: cut the union of covering openings' [sill,lintel]; emit solid bands */
+    for (j = 0; j + 1 < nb; j++) {
+        float xa = xb[j], xc = xb[j + 1], mid;
+        float iv_lo[ROOM_MAX_OPENINGS_PER_WALL], iv_hi[ROOM_MAX_OPENINGS_PER_WALL];
+        int   ni = 0, p, q;
+        float cur_y;
+        if (xc - xa < 1e-5f) continue;              /* zero-width (duplicate boundary) */
+        mid = (xa + xc) * 0.5f;
+        for (i = 0; i < k; i++)
+            if (lo[i] <= mid && hi[i] >= mid) { iv_lo[ni] = sy[i]; iv_hi[ni] = oy[i]; ni++; }
+        for (p = 1; p < ni; p++) {                  /* sort the covering intervals by lo */
+            float a = iv_lo[p], c = iv_hi[p]; q = p - 1;
+            while (q >= 0 && iv_lo[q] > a) { iv_lo[q + 1] = iv_lo[q]; iv_hi[q + 1] = iv_hi[q]; q--; }
+            iv_lo[q + 1] = a; iv_hi[q + 1] = c;
         }
+        cur_y = 0.0f;                               /* emit complement bands within [0,h] */
+        for (p = 0; p < ni; p++) {
+            if (iv_lo[p] > cur_y) wall_panel_quad(b, runx, f, ns, xa, xc, cur_y, iv_lo[p]);
+            if (iv_hi[p] > cur_y) cur_y = iv_hi[p];
+        }
+        if (cur_y < h) wall_panel_quad(b, runx, f, ns, xa, xc, cur_y, h);   /* top band up to wall top */
     }
 }
 
