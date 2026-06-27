@@ -13180,6 +13180,9 @@ static void world_rebuild(AppState *st) {
     meadow_rebuild(st);
     forest_rebuild(st);
     apply_kind_materials(&st->scene);
+    st->routes_last_t = 0.0;   /* the world changed (workspace switch / re-derive):
+                                  drop the doorway-label route cache so it re-solves
+                                  next frame, not flashing the old world's routes */
 }
 
 #define PORTAL_TRIGGER_R 1.1f    /* walk within this of a gate's mouth to travel */
@@ -13294,6 +13297,7 @@ static sol_bool load_palace(AppState *st) {
     meadow_rebuild(st);                           /* and the grass */
     forest_rebuild(st);                           /* and the woods */
     apply_kind_materials(&st->scene);
+    st->routes_last_t = 0.0;   /* fresh world: re-solve doorway-label routes next frame */
     bind_runtime_handles(st);
     adopt_legacy_motion(st);         /* pre-component saves get their dance back */
     {
