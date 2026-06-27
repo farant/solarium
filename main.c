@@ -16526,6 +16526,22 @@ static int caret_build(const Font *f, const char *src, float px2m, float wrap_w,
                              wlen, font_line_height(f) * px2m, out);
 }
 
+/* recompute edit_goal_x from the caret's current slot (after a horizontal move/edit). */
+static void caret_refresh_goal(AppState *st) {
+    SceneObject *o = scene_get(&st->scene, st->edit_handle);
+    CaretField   cf;
+    float        bpx2m, usable, cw, lh;
+    int          slot;
+    if (!o || !st->ui_font) { st->edit_goal_x = 0.0f; return; }
+    lh     = font_line_height(st->ui_font);
+    cw     = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "w");
+    usable = cw - 3.0f * 0.025f;                 /* matches the render's margin math */
+    bpx2m  = note_text_size(&st->scene, st->edit_handle) / lh;
+    caret_build(st->ui_font, st->edit_buf, bpx2m, usable, &cf);
+    slot = caret_slot_for_offset(&cf, st->edit_cursor);
+    st->edit_goal_x = (slot >= 0) ? cf.slots[slot].x : 0.0f;
+}
+
 /* Open a note for typing: seed the buffer from its text meta. */
 static void note_edit_begin(AppState *st, sol_u32 handle) {
     const char *t = scene_meta_get(&st->scene, handle, "text");
@@ -16596,12 +16612,16 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     if (st->edit_handle == 0) return;
     n = utf8_encode(cp, enc);
     if (n <= 0 || st->edit_len + n >= EDIT_BUF_CAP) return;
-    memcpy(st->edit_buf + st->edit_len, enc, (size_t)n);
-    st->edit_len += n;
+    memmove(st->edit_buf + st->edit_cursor + n,
+            st->edit_buf + st->edit_cursor,
+            (size_t)(st->edit_len - st->edit_cursor));
+    memcpy(st->edit_buf + st->edit_cursor, enc, (size_t)n);
+    st->edit_len    += n;
+    st->edit_cursor += n;
     st->edit_buf[st->edit_len] = '\0';
-    st->edit_cursor = st->edit_len;
     scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
     note_autosize(st, st->edit_handle);
+    caret_refresh_goal(st);
 }
 
 /* KEYS are buttons. While a note has focus the only buttons that mean
@@ -16698,22 +16718,50 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             note_edit_end(st);
-        } else if (key == GLFW_KEY_BACKSPACE && st->edit_len > 0) {
-            st->edit_len--;                     /* drop ONE codepoint: walk back
-                                                   over UTF-8 continuation bytes */
-            while (st->edit_len > 0 &&
-                   ((unsigned char)st->edit_buf[st->edit_len] & 0xC0u) == 0x80u)
-                st->edit_len--;
+        } else if (key == GLFW_KEY_BACKSPACE && st->edit_cursor > 0) {
+            int e = st->edit_cursor, s = e - 1;   /* delete the codepoint before the caret */
+            while (s > 0 && ((unsigned char)st->edit_buf[s] & 0xC0u) == 0x80u) s--;
+            memmove(st->edit_buf + s, st->edit_buf + e,
+                    (size_t)(st->edit_len - e));
+            st->edit_len   -= (e - s);
+            st->edit_cursor = s;
             st->edit_buf[st->edit_len] = '\0';
-            st->edit_cursor = st->edit_len;
             scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
             note_autosize(st, st->edit_handle);
+            caret_refresh_goal(st);
+        } else if (key == GLFW_KEY_DELETE && st->edit_cursor < st->edit_len) {
+            int s = st->edit_cursor, e = s + 1;   /* delete the codepoint after the caret */
+            while (e < st->edit_len && ((unsigned char)st->edit_buf[e] & 0xC0u) == 0x80u) e++;
+            memmove(st->edit_buf + s, st->edit_buf + e,
+                    (size_t)(st->edit_len - e));
+            st->edit_len -= (e - s);
+            st->edit_buf[st->edit_len] = '\0';
+            scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+            note_autosize(st, st->edit_handle);
+            caret_refresh_goal(st);
         } else if (key == GLFW_KEY_ENTER && st->edit_len + 1 < EDIT_BUF_CAP) {
-            st->edit_buf[st->edit_len++] = '\n';
-            st->edit_buf[st->edit_len]   = '\0';
-            st->edit_cursor = st->edit_len;
+            memmove(st->edit_buf + st->edit_cursor + 1,
+                    st->edit_buf + st->edit_cursor,
+                    (size_t)(st->edit_len - st->edit_cursor));
+            st->edit_buf[st->edit_cursor] = '\n';
+            st->edit_len++;
+            st->edit_cursor++;
+            st->edit_buf[st->edit_len] = '\0';
             scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
             note_autosize(st, st->edit_handle);
+            caret_refresh_goal(st);
+        } else if (key == GLFW_KEY_LEFT && st->edit_cursor > 0) {
+            st->edit_cursor--;
+            while (st->edit_cursor > 0 &&
+                   ((unsigned char)st->edit_buf[st->edit_cursor] & 0xC0u) == 0x80u)
+                st->edit_cursor--;
+            caret_refresh_goal(st);
+        } else if (key == GLFW_KEY_RIGHT && st->edit_cursor < st->edit_len) {
+            st->edit_cursor++;
+            while (st->edit_cursor < st->edit_len &&
+                   ((unsigned char)st->edit_buf[st->edit_cursor] & 0xC0u) == 0x80u)
+                st->edit_cursor++;
+            caret_refresh_goal(st);
         }
         return;                                 /* everything else stays quiet */
     }
