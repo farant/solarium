@@ -29,8 +29,9 @@ int caret_reconcile(const char *src, const char *wrapped, int *out_src, int cap)
 }
 
 int caret_field_build(const char *src, const char *wrapped, const int *map,
-                      const float *adv, int wlen, float line_h, CaretField *out) {
-    int   wi, line, srclen = 0;
+                      const float *adv, int wlen, float line_h, float space_adv,
+                      CaretField *out) {
+    int   wi, line, srclen = 0, cur_src;
     float pen = 0.0f;
     while (src[srclen] != '\0') srclen++;
     out->slot_count = 0;
@@ -42,7 +43,8 @@ int caret_field_build(const char *src, const char *wrapped, const int *map,
     out->lines[0].line   = 0;
     out->line_count      = 1;
     line = 0;
-    out->slots[0].src = (wlen > 0) ? map[0] : srclen;
+    cur_src = (wlen > 0) ? map[0] : srclen;
+    out->slots[0].src = cur_src;
     out->slots[0].x   = 0.0f;
     out->slot_count   = 1;
     out->lines[0].nslots = 1;
@@ -58,6 +60,7 @@ int caret_field_build(const char *src, const char *wrapped, const int *map,
             out->lines[line].line   = line;
             out->line_count++;
             pen = 0.0f;
+            cur_src = next;
             if (out->slot_count < CARET_MAX_SLOTS) {
                 out->slots[out->slot_count].src = next;
                 out->slots[out->slot_count].x   = 0.0f;
@@ -68,9 +71,9 @@ int caret_field_build(const char *src, const char *wrapped, const int *map,
         }
         {   /* one codepoint: advance the pen, emit a trailing slot */
             int n = caret_cplen((unsigned char)wrapped[wi]);
-            int after;
+            int after = map[wi] + n;   /* the source byte just past this codepoint */
             pen += adv[wi];
-            after = (wi + n < wlen) ? map[wi + n] : srclen;
+            cur_src = after;
             if (out->slot_count < CARET_MAX_SLOTS) {
                 out->slots[out->slot_count].src = after;
                 out->slots[out->slot_count].x   = pen;
@@ -79,6 +82,19 @@ int caret_field_build(const char *src, const char *wrapped, const int *map,
             }
             wi += n;
         }
+    }
+    /* trailing source bytes text_wrap dropped (spaces at a line/text end): give
+       each a slot on the current line, advancing one space width, so the caret
+       reflects typed trailing spaces even though they don't render. */
+    while (cur_src < srclen) {
+        pen += space_adv;
+        if (out->slot_count < CARET_MAX_SLOTS) {
+            out->slots[out->slot_count].src = cur_src + 1;
+            out->slots[out->slot_count].x   = pen;
+            out->slot_count++;
+            out->lines[line].nslots++;
+        }
+        cur_src++;
     }
     return out->line_count;
 }

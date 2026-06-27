@@ -25,7 +25,7 @@ static int build(const char *src, const char *wrapped, CaretField *cf) {
     float adv[CARET_MAX_SLOTS];
     int   wlen = caret_reconcile(src, wrapped, map, CARET_MAX_SLOTS);
     unit_adv(wrapped, wlen, adv);
-    return caret_field_build(src, wrapped, map, adv, wlen, 1.0f, cf);
+    return caret_field_build(src, wrapped, map, adv, wlen, 1.0f, 1.0f, cf);
 }
 
 static void test_cplen(void) {
@@ -129,6 +129,19 @@ static void test_field_trailing_nl(void) {
     CHECK(caret_slot_for_offset(&cf, 4) == cf.lines[1].slot0, "field trailing-nl: offset 4 -> line1 leading slot");
 }
 
+static void test_field_trailing_space(void) {
+    /* text_wrap drops a trailing space: src "ab " wraps to "ab". With space_adv=1
+       the dropped space still gets a caret slot one space-width past 'b', so the
+       caret advances when you type a trailing space. */
+    CaretField cf;
+    int lines = build("ab ", "ab", &cf);
+    CHECK(lines == 1, "field trailing-space: one line");
+    /* slots: leading(src0,x0), after-a(src1,x1), after-b(src2,x2), space(src3,x3) */
+    CHECK(cf.slot_count == 4, "field trailing-space: 4 slots incl. the dropped space");
+    CHECK(cf.slots[3].src == 3 && cf.slots[3].x == 3.0f, "field trailing-space: caret after the space at x=3");
+    CHECK(caret_slot_for_offset(&cf, 3) == 3, "field trailing-space: offset 3 -> the trailing-space slot");
+}
+
 int main(void) {
     test_cplen();
     test_reconcile_plain();
@@ -140,6 +153,7 @@ int main(void) {
     test_field_empty();
     test_field_multibyte();
     test_field_trailing_nl();
+    test_field_trailing_space();
     if (fails == 0) printf("caret_test: all passed\n");
     return fails ? 1 : 0;
 }

@@ -29,11 +29,13 @@ int caret_reconcile(const char *src, const char *wrapped, int *out_src, int cap)
 
 /* Assemble a CaretField. wrapped + out_src (map) from the two calls above; adv[i]
    = the x to add at wrapped byte i (a codepoint's advance at its lead byte, 0 at
-   continuation bytes and '\n'); wlen = the wrapped byte length; line_h in metres.
-   A leading slot opens each line at x=0; a trailing slot follows each codepoint.
-   Pure. Returns the line count. */
+   continuation bytes and '\n'); wlen = the wrapped byte length; line_h in metres;
+   space_adv = the width of one space (note-local) for caret slots over trailing
+   spaces text_wrap dropped. A leading slot opens each line at x=0; a trailing slot
+   follows each codepoint. Pure. Returns the line count. */
 int caret_field_build(const char *src, const char *wrapped, const int *map,
-                      const float *adv, int wlen, float line_h, CaretField *out);
+                      const float *adv, int wlen, float line_h, float space_adv,
+                      CaretField *out);
 
 int caret_slot_for_offset(const CaretField *cf, int cursor);            /* slot with .src==cursor (nearest fallback) */
 int caret_line_of_slot(const CaretField *cf, int slot);                 /* slot -> visual line */

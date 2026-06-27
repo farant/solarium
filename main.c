@@ -16497,7 +16497,9 @@ static int caret_build(const Font *f, const char *src, float px2m, float wrap_w,
     char  wrapped[CARET_MAX_SLOTS];
     int   map[CARET_MAX_SLOTS];
     float adv[CARET_MAX_SLOTS];
-    int   wlen, wi, prevg;
+    int   wlen, wi, prevg, sgi;
+    float space_adv;
+    const FontGlyph *sg;
     text_wrap(f, src, px2m, wrap_w, wrapped, WT_WRAP_CAP);
     wlen  = caret_reconcile(src, wrapped, map, CARET_MAX_SLOTS);
     prevg = 0;
@@ -16527,8 +16529,11 @@ static int caret_build(const Font *f, const char *src, float px2m, float wrap_w,
         }
         wi += n;
     }
+    sgi = font_glyph_index(f, (unsigned long)' ');   /* space width for trailing spaces */
+    sg  = sgi ? font_glyph(f, sgi) : (const FontGlyph *)0;
+    space_adv = sg ? sg->advance * px2m : 0.0f;
     return caret_field_build(src, wrapped, map, adv,
-                             wlen, font_line_height(f) * px2m, out);
+                             wlen, font_line_height(f) * px2m, space_adv, out);
 }
 
 /* recompute edit_goal_x from the caret's current slot (after a horizontal move/edit). */
