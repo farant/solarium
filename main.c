@@ -4613,6 +4613,89 @@ static void emit_door_reveal(MeshBuilder *mbf, MeshBuilder *mbt, int wall,
     }
 }
 
+/* push one gable-plane vertex: (s,y) -> 3D via bent_pt + offv, position UVs. */
+static sol_u32 g_push(MeshBuilder *mb, int rax, float ge, vec3 offv, vec3 n, float s, float y) {
+    vec3 p = vec3_add(bent_pt(rax, ge, s, y), offv);
+    return mb_push_vertex(mb, p.x, p.y, p.z, n.x, n.y, n.z, s / WALL_TILE_M, y / WALL_TILE_M);
+}
+
+/* one gable end FACE (inner: offv=0,n=nin / outer: offv=off,n=nout): the triangle
+   (base [-sh,sh] at hwall, apex (0,ridge_y)) MINUS the notch [s0,s1]x[yb,yt].
+   Four regions: bottom band (if yb>hwall), left strip, right strip, top piece (if yt<ridge_y). */
+static void gable_face_notched(MeshBuilder *mb, int rax, float ge, vec3 offv, vec3 n,
+                               float sh, float hwall, float ridge_y,
+                               float s0, float s1, float yb, float yt) {
+    float spanH = ridge_y - hwall;
+    float hwb   = sh * (ridge_y - yb) / spanH;
+    float hwt   = sh * (ridge_y - yt) / spanH;
+    sol_u32 a, b, c, d;
+    if (yb > hwall + 1e-4f) {
+        a = g_push(mb,rax,ge,offv,n, -sh,  hwall);
+        b = g_push(mb,rax,ge,offv,n,  sh,  hwall);
+        c = g_push(mb,rax,ge,offv,n,  hwb, yb);
+        d = g_push(mb,rax,ge,offv,n, -hwb, yb);
+        mb_push_triangle(mb,a,b,c); mb_push_triangle(mb,a,c,d);
+    }
+    a = g_push(mb,rax,ge,offv,n, -hwb, yb);
+    b = g_push(mb,rax,ge,offv,n,  s0,  yb);
+    c = g_push(mb,rax,ge,offv,n,  s0,  yt);
+    d = g_push(mb,rax,ge,offv,n, -hwt, yt);
+    mb_push_triangle(mb,a,b,c); mb_push_triangle(mb,a,c,d);
+    a = g_push(mb,rax,ge,offv,n,  s1,  yb);
+    b = g_push(mb,rax,ge,offv,n,  hwb, yb);
+    c = g_push(mb,rax,ge,offv,n,  hwt, yt);
+    d = g_push(mb,rax,ge,offv,n,  s1,  yt);
+    mb_push_triangle(mb,a,b,c); mb_push_triangle(mb,a,c,d);
+    if (yt < ridge_y - 1e-4f) {
+        a = g_push(mb,rax,ge,offv,n, -hwt, yt);
+        b = g_push(mb,rax,ge,offv,n,  hwt, yt);
+        c = g_push(mb,rax,ge,offv,n,  0.0f, ridge_y);
+        mb_push_triangle(mb,a,b,c);
+    }
+}
+
+/* the notch's inner hole walls (solid gable material), each spanning inner->outer
+   (0->off) so you don't see through the slab. Normals point INTO the hole.
+   `has_bottom` adds the bottom wall (an interior/gable-only notch; a spanning
+   notch's bottom meets the wall hole at hwall). */
+static void gable_notch_reveal(MeshBuilder *mb, int rax, float ge, vec3 off,
+                               float s0, float s1, float yb, float yt, int has_bottom) {
+    vec3 su = rax ? vec3_make(0.0f,0.0f,1.0f) : vec3_make(1.0f,0.0f,0.0f);  /* +s direction */
+    { vec3 n = su;                              /* left wall s=s0 (faces +s) */
+      vec3 ia=bent_pt(rax,ge,s0,yb), ib=bent_pt(rax,ge,s0,yt);
+      vec3 oa=vec3_add(ia,off), ob=vec3_add(ib,off); sol_u32 v0,v1,v2,v3;
+      v0=mb_push_vertex(mb,ia.x,ia.y,ia.z,n.x,n.y,n.z,0.0f,0.0f);
+      v1=mb_push_vertex(mb,ib.x,ib.y,ib.z,n.x,n.y,n.z,1.0f,0.0f);
+      v2=mb_push_vertex(mb,ob.x,ob.y,ob.z,n.x,n.y,n.z,1.0f,1.0f);
+      v3=mb_push_vertex(mb,oa.x,oa.y,oa.z,n.x,n.y,n.z,0.0f,1.0f);
+      mb_push_triangle(mb,v0,v1,v2); mb_push_triangle(mb,v0,v2,v3); }
+    { vec3 n = vec3_scale(su,-1.0f);            /* right wall s=s1 (faces -s) */
+      vec3 ia=bent_pt(rax,ge,s1,yt), ib=bent_pt(rax,ge,s1,yb);
+      vec3 oa=vec3_add(ia,off), ob=vec3_add(ib,off); sol_u32 v0,v1,v2,v3;
+      v0=mb_push_vertex(mb,ia.x,ia.y,ia.z,n.x,n.y,n.z,0.0f,0.0f);
+      v1=mb_push_vertex(mb,ib.x,ib.y,ib.z,n.x,n.y,n.z,1.0f,0.0f);
+      v2=mb_push_vertex(mb,ob.x,ob.y,ob.z,n.x,n.y,n.z,1.0f,1.0f);
+      v3=mb_push_vertex(mb,oa.x,oa.y,oa.z,n.x,n.y,n.z,0.0f,1.0f);
+      mb_push_triangle(mb,v0,v1,v2); mb_push_triangle(mb,v0,v2,v3); }
+    { vec3 n = vec3_make(0.0f,-1.0f,0.0f);      /* top wall y=yt (faces -y) */
+      vec3 ia=bent_pt(rax,ge,s0,yt), ib=bent_pt(rax,ge,s1,yt);
+      vec3 oa=vec3_add(ia,off), ob=vec3_add(ib,off); sol_u32 v0,v1,v2,v3;
+      v0=mb_push_vertex(mb,ia.x,ia.y,ia.z,n.x,n.y,n.z,0.0f,0.0f);
+      v1=mb_push_vertex(mb,ib.x,ib.y,ib.z,n.x,n.y,n.z,1.0f,0.0f);
+      v2=mb_push_vertex(mb,ob.x,ob.y,ob.z,n.x,n.y,n.z,1.0f,1.0f);
+      v3=mb_push_vertex(mb,oa.x,oa.y,oa.z,n.x,n.y,n.z,0.0f,1.0f);
+      mb_push_triangle(mb,v0,v1,v2); mb_push_triangle(mb,v0,v2,v3); }
+    if (has_bottom) {                           /* bottom wall y=yb (faces +y) */
+      vec3 n = vec3_make(0.0f,1.0f,0.0f);
+      vec3 ia=bent_pt(rax,ge,s1,yb), ib=bent_pt(rax,ge,s0,yb);
+      vec3 oa=vec3_add(ia,off), ob=vec3_add(ib,off); sol_u32 v0,v1,v2,v3;
+      v0=mb_push_vertex(mb,ia.x,ia.y,ia.z,n.x,n.y,n.z,0.0f,0.0f);
+      v1=mb_push_vertex(mb,ib.x,ib.y,ib.z,n.x,n.y,n.z,1.0f,0.0f);
+      v2=mb_push_vertex(mb,ob.x,ob.y,ob.z,n.x,n.y,n.z,1.0f,1.0f);
+      v3=mb_push_vertex(mb,oa.x,oa.y,oa.z,n.x,n.y,n.z,0.0f,1.0f);
+      mb_push_triangle(mb,v0,v1,v2); mb_push_triangle(mb,v0,v2,v3); }
+}
+
 /* build a RoomFrame (wall + timber) for a room shell from its openings and
    store it by handle (replacing any prior entry). no-op if planks disabled. */
 static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no) {
@@ -4720,14 +4803,41 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
                and outer (off by the wall thickness, lit for the exterior). offset so
                they never z-fight; each lit for its own side, so the gable reads right
                from inside the hall and from outside -- no backface culling needed. */
-            gable_tri(&mb, eL, eR, ap, nin,            /* inner face (toward the hall) */
-                      -sh / WALL_TILE_M, h / WALL_TILE_M,
-                       sh / WALL_TILE_M, h / WALL_TILE_M,
-                      0.0f,              ridge_y / WALL_TILE_M);
-            gable_tri(&mb, eRo, eLo, apo, nout,        /* outer face (reversed winding) */
-                       sh / WALL_TILE_M, h / WALL_TILE_M,
-                      -sh / WALL_TILE_M, h / WALL_TILE_M,
-                      0.0f,              ridge_y / WALL_TILE_M);
+            {
+                int   gwall = rax ? (gi ? ROOM_WALL_E : ROOM_WALL_W)
+                                  : (gi ? ROOM_WALL_S : ROOM_WALL_N);
+                int   oi, found = -1;
+                float s0 = 0.0f, s1 = 0.0f, yb = 0.0f, yt = 0.0f;
+                for (oi = 0; oi < no; oi++)
+                    if (ops[oi].wall == gwall && ops[oi].height > h + 1e-3f) { found = oi; break; }
+                if (found >= 0) {
+                    float cen = ops[found].center, hwid = ops[found].width * 0.5f;
+                    float hwt;
+                    s0 = cen - hwid; s1 = cen + hwid;
+                    yb = ops[found].sill;   if (yb < h)       yb = h;
+                    yt = ops[found].height; if (yt > ridge_y) yt = ridge_y;
+                    hwt = sh * (ridge_y - yt) / (ridge_y - h);   /* fit width to the triangle at yt */
+                    if (s0 < -hwt) s0 = -hwt;
+                    if (s1 >  hwt) s1 =  hwt;
+                    if (s1 - s0 < 0.05f || yt - yb < 0.05f) found = -1;   /* degenerate -> solid */
+                }
+                if (found >= 0) {
+                    gable_face_notched(&mb, rax, ge, vec3_make(0.0f,0.0f,0.0f), nin,
+                                       sh, h, ridge_y, s0, s1, yb, yt);
+                    gable_face_notched(&mb, rax, ge, off, nout,
+                                       sh, h, ridge_y, s0, s1, yb, yt);
+                    gable_notch_reveal(&mb, rax, ge, off, s0, s1, yb, yt, yb > h + 1e-3f);
+                } else {
+                    gable_tri(&mb, eL, eR, ap, nin,            /* inner face (toward the hall) */
+                              -sh / WALL_TILE_M, h / WALL_TILE_M,
+                               sh / WALL_TILE_M, h / WALL_TILE_M,
+                              0.0f,              ridge_y / WALL_TILE_M);
+                    gable_tri(&mb, eRo, eLo, apo, nout,        /* outer face (reversed winding) */
+                               sh / WALL_TILE_M, h / WALL_TILE_M,
+                              -sh / WALL_TILE_M, h / WALL_TILE_M,
+                              0.0f,              ridge_y / WALL_TILE_M);
+                }
+            }
             {   /* cap the two sloped top edges (the rake) so the slab isn't hollow
                    where it stands proud of the roof; bottom edge sits on the wall
                    top, so it stays hidden like the walls' unexposed faces. */
