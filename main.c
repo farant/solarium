@@ -7923,19 +7923,6 @@ static int board_pages(AppState *st, sol_u32 board,
     return boardpage_collect(raw, n, active, out, cap);
 }
 
-/* Append slug to the board's ordered "pages" meta if not already listed.
-   "/" is implicit and never stored. */
-static void board_page_register(AppState *st, sol_u32 board, const char *slug) {
-    const char *cur;
-    char        buf[BOARD_PAGE_MAX * PAGE_SLUG_CAP];
-    if (!slug || !slug[0] || strcmp(slug, "/") == 0) return;
-    cur = scene_meta_get(&st->scene, board, "pages");
-    if (cur && boardpage_contains(cur, slug)) return;
-    if (cur && cur[0]) snprintf(buf, sizeof buf, "%s %s", cur, slug);
-    else               snprintf(buf, sizeof buf, "%s", slug);
-    scene_meta_set(&st->scene, board, "pages", buf);
-}
-
 /* Seed "pages" for any board lacking it, from its emergent page list (natural-
    sorted), so empty-page persistence becomes real for pre-feature boards. No
    save here -- the next scene_save persists it; re-running is idempotent. */
@@ -7945,13 +7932,14 @@ static void boards_migrate_pages(AppState *st) {
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         char  pages[BOARD_PAGE_MAX][PAGE_SLUG_CAP];
-        int   np, j;
+        char  buf[BOARD_PAGE_MAX * PAGE_SLUG_CAP];
+        int   np;
         if (!o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) continue;
         if (scene_meta_get(s, o->handle, "pages")) continue; /* already migrated */
         np = board_pages(st, o->handle, pages, BOARD_PAGE_MAX); /* emergent, natural-sorted */
-        if (np <= 1) continue;                               /* only "/" -> nothing to store */
-        for (j = 0; j < np; j++)
-            board_page_register(st, o->handle, pages[j]);   /* appends all non-"/" slugs */
+        if (np <= 1) continue;     /* only "/" -> nothing to store */
+        boardpage_serialize(pages, np, buf, (int)sizeof buf);
+        if (buf[0]) scene_meta_set(s, o->handle, "pages", buf);
     }
 }
 
@@ -13222,7 +13210,7 @@ static sol_bool load_palace(AppState *st) {
     migrate_room_heights(&st->scene);   /* timber halls: 3.0m rooms -> 4.5m (idempotent) */
     scene_reimport_glbs(st);
     windows_migrate_fills(st);          /* shaped windows -> oak fill child, before the ACQUIRE */
-    boards_migrate_pages(st);          /* seed ordered "pages" meta for un-migrated boards */
+    boards_migrate_pages(st);    /* seed ordered "pages" meta for un-migrated boards */
     scene_resolve_meshes(&st->scene);             /* ACQUIRE (the new) */
     scene_release_meshes(&old);                   /* RELEASE (the old) */
     scene_free(&old);
