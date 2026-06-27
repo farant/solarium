@@ -15653,8 +15653,9 @@ static void render(AppState *state) {
                 }
             }
             /* the note body: the inline text meta, wrapped to the card.
-               While the note has focus, a caret tails the text — the meta
-               mirrors every keystroke, so this renders the typing live. */
+               While the note has focus, a moveable caret quad marks the
+               insertion point (edit_cursor); the meta mirrors every
+               keystroke, so this renders the typing live. */
             if (o->kind == KIND_NOTE) {
                 const char *txt = scene_meta_get(&state->scene, o->handle, "text");
                 if (txt && txt[0]) {
