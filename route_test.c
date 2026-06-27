@@ -129,6 +129,32 @@ static void test_window_above_wall(void) {
            (unsigned)none_idx, (unsigned)below_idx, (unsigned)above_idx, (unsigned)span_idx);
 }
 
+static void test_stacked_windows(void) {
+    MeshBuilder mb;
+    RoomOpening two[2], merged;
+    sol_u32 stacked_idx, merged_idx, solid_idx;
+
+    /* solid wall (no opening) baseline */
+    mb_init(&mb); make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1,1,1,1, 0, (RoomOpening*)0, 0);
+    solid_idx = mb.index_count; mb_free(&mb);
+
+    /* two stacked windows, same x, A=[0.5,1.5] B=[2.0,2.8] */
+    two[0].wall = ROOM_WALL_N; two[0].center = 0.0f; two[0].width = 1.2f; two[0].sill = 0.5f; two[0].height = 1.5f;
+    two[1] = two[0]; two[1].sill = 2.0f; two[1].height = 2.8f;
+    mb_init(&mb); make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1,1,1,1, 0, two, 2);
+    stacked_idx = mb.index_count; mb_free(&mb);
+
+    /* one merged opening covering both [0.5,2.8] */
+    merged = two[0]; merged.sill = 0.5f; merged.height = 2.8f;
+    mb_init(&mb); make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1,1,1,1, 0, &merged, 1);
+    merged_idx = mb.index_count; mb_free(&mb);
+
+    assert(stacked_idx != solid_idx);     /* both holes are cut (not solid) */
+    assert(stacked_idx > merged_idx);     /* the wall BAND between the two windows exists */
+    printf("  stacked windows: solid=%u merged=%u stacked=%u OK\n",
+           (unsigned)solid_idx, (unsigned)merged_idx, (unsigned)stacked_idx);
+}
+
 int main(void) {
     /* due-east: straight, A opens E, B opens W, 0 bends */
     {
@@ -268,6 +294,7 @@ int main(void) {
     test_window_fill_styles();
     test_window_glass_styles();
     test_window_above_wall();
+    test_stacked_windows();
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;
 }

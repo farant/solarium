@@ -264,55 +264,72 @@ static void aabb_box(MeshBuilder *b, sol_f32 x0, sol_f32 x1, sol_f32 y0,
    (N/S walls), its two faces at z=f0,f1, span [s0,s1] in x. runx=0: runs
    along Z (E/W walls), faces at x=f0,f1, span [s0,s1] in z. `ops` is the full
    room list; only entries with .wall==wall_id are used (their .center is in
-   the run axis). Up to ROOM_MAX_OPENINGS_PER_WALL gaps per wall. Emits piers
-   + headers; the room floor (full outer footprint) fills each doorway's
-   threshold strip, so no threshold face is emitted here (it would z-fight). */
+   the run axis). Up to ROOM_MAX_OPENINGS_PER_WALL gaps per wall. Cut as a
+   vertical SLAB SWEEP: split at every opening x-edge, then within each x-slab
+   emit the wall MINUS the union of the covering openings' [sill,lintel] holes
+   (so stacked/overlapping windows don't fill each other's hole). The room
+   floor (full outer footprint) fills each doorway's threshold strip, so no
+   threshold face is emitted here (it would z-fight). */
 static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
                              sol_f32 s0, sol_f32 s1, sol_f32 h,
                              const RoomOpening *ops, int n_ops, int wall_id) {
     sol_f32 lo[ROOM_MAX_OPENINGS_PER_WALL];
     sol_f32 hi[ROOM_MAX_OPENINGS_PER_WALL];
-    sol_f32 oy[ROOM_MAX_OPENINGS_PER_WALL];
+    sol_f32 oy[ROOM_MAX_OPENINGS_PER_WALL];   /* lintel (top), capped at h */
     sol_f32 sl[ROOM_MAX_OPENINGS_PER_WALL];   /* sill (bottom) per opening; 0 = door */
-    int     k = 0, i, j;
-    sol_f32 cur;
+    sol_f32 xb[2 * ROOM_MAX_OPENINGS_PER_WALL + 2];   /* x-boundaries: wall ends + opening edges */
+    int     k = 0, nb = 0, i, j;
+    /* gather this wall's openings (skip ones entirely above the wall top) */
     for (i = 0; i < n_ops; i++) {
         sol_f32 c, hwid;
         if (ops[i].wall != wall_id) continue;
-        if (ops[i].sill >= h) continue;   /* entirely above the wall: it's a gable window — wall stays solid */
+        if (ops[i].sill >= h) continue;        /* entirely in the gable: wall stays solid */
         if (k >= ROOM_MAX_OPENINGS_PER_WALL) break;
         c = ops[i].center; hwid = ops[i].width * 0.5f;
-        lo[k] = c - hwid; hi[k] = c + hwid; oy[k] = ops[i].height; sl[k] = ops[i].sill;
+        lo[k] = c - hwid; hi[k] = c + hwid;
+        oy[k] = ops[i].height; if (oy[k] > h) oy[k] = h;   /* spanning window: wall part stops at h */
+        sl[k] = ops[i].sill;
         k++;
     }
-    for (i = 1; i < k; i++) {                 /* insertion sort by lo */
-        sol_f32 pivot_lo = lo[i], pivot_hi = hi[i], pivot_oy = oy[i], pivot_sl = sl[i];
-        j = i - 1;
-        while (j >= 0 && lo[j] > pivot_lo) {
-            lo[j + 1] = lo[j]; hi[j + 1] = hi[j]; oy[j + 1] = oy[j]; sl[j + 1] = sl[j]; j--;
-        }
-        lo[j + 1] = pivot_lo; hi[j + 1] = pivot_hi; oy[j + 1] = pivot_oy; sl[j + 1] = pivot_sl;
+    /* x-boundaries: the wall ends + each opening edge, clamped to [s0,s1] */
+    xb[nb++] = s0; xb[nb++] = s1;
+    for (i = 0; i < k; i++) {
+        sol_f32 a = lo[i], c = hi[i];
+        if (a < s0) a = s0; if (a > s1) a = s1;
+        if (c < s0) c = s0; if (c > s1) c = s1;
+        xb[nb++] = a; xb[nb++] = c;
     }
-    cur = s0;
-    for (i = 0; i <= k; i++) {
-        sol_f32 gL = (i < k) ? lo[i] : s1;
-        sol_f32 gR = (i < k) ? hi[i] : s1;
-        if (gL < s0) gL = s0;
-        if (gR > s1) gR = s1;
-        if (gL > cur) {                        /* solid pier [cur, gL] */
-            if (runx) aabb_box(b, cur, gL, 0.0f, h, f0, f1);
-            else      aabb_box(b, f0, f1, 0.0f, h, cur, gL);
+    for (i = 1; i < nb; i++) {                  /* insertion sort xb ascending */
+        sol_f32 p = xb[i]; j = i - 1;
+        while (j >= 0 && xb[j] > p) { xb[j + 1] = xb[j]; j--; }
+        xb[j + 1] = p;
+    }
+    /* each x-slab: cut the union of covering openings' [sill,lintel]; emit solid bands */
+    for (j = 0; j + 1 < nb; j++) {
+        sol_f32 xa = xb[j], xc = xb[j + 1], mid;
+        sol_f32 iv_lo[ROOM_MAX_OPENINGS_PER_WALL], iv_hi[ROOM_MAX_OPENINGS_PER_WALL];
+        int     ni = 0, p, q;
+        sol_f32 cur_y;
+        if (xc - xa < 1e-5f) continue;          /* zero-width (duplicate boundary) */
+        mid = (xa + xc) * 0.5f;
+        for (i = 0; i < k; i++)
+            if (lo[i] <= mid && hi[i] >= mid) { iv_lo[ni] = sl[i]; iv_hi[ni] = oy[i]; ni++; }
+        for (p = 1; p < ni; p++) {              /* sort the covering intervals by lo */
+            sol_f32 a = iv_lo[p], c = iv_hi[p]; q = p - 1;
+            while (q >= 0 && iv_lo[q] > a) { iv_lo[q + 1] = iv_lo[q]; iv_hi[q + 1] = iv_hi[q]; q--; }
+            iv_lo[q + 1] = a; iv_hi[q + 1] = c;
         }
-        if (i < k) {
-            if (sl[i] > 0.0f && sl[i] < oy[i]) {  /* sill below the gap (windows) */
-                if (runx) aabb_box(b, gL, gR, 0.0f, sl[i], f0, f1);
-                else      aabb_box(b, f0, f1, 0.0f, sl[i], gL, gR);
+        cur_y = 0.0f;                           /* emit complement bands within [0,h] */
+        for (p = 0; p < ni; p++) {
+            if (iv_lo[p] > cur_y) {
+                if (runx) aabb_box(b, xa, xc, cur_y, iv_lo[p], f0, f1);
+                else      aabb_box(b, f0, f1, cur_y, iv_lo[p], xa, xc);
             }
-            if (oy[i] < h) {                   /* header above the gap */
-                if (runx) aabb_box(b, gL, gR, oy[i], h, f0, f1);
-                else      aabb_box(b, f0, f1, oy[i], h, gL, gR);
-            }
-            cur = gR;
+            if (iv_hi[p] > cur_y) cur_y = iv_hi[p];
+        }
+        if (cur_y < h) {                        /* top band up to the wall top */
+            if (runx) aabb_box(b, xa, xc, cur_y, h, f0, f1);
+            else      aabb_box(b, f0, f1, cur_y, h, xa, xc);
         }
     }
 }
