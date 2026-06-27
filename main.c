@@ -7900,14 +7900,19 @@ static sol_u32 folder_at_board_point(AppState *st, sol_u32 board, vec3 bl) {
     return best;
 }
 
-/* Gather the board's navigable page list (sorted, deduped, '/' + active
-   always present) into out[cap][PAGE_SLUG_CAP]. Returns the count. */
+/* Gather the board's navigable page list into out[cap][PAGE_SLUG_CAP].
+   Prefers the ordered "pages" meta (creation order); falls back to
+   emergent child-tag collection (natural-sorted) for un-migrated boards. */
 static int board_pages(AppState *st, sol_u32 board,
                        char out[][PAGE_SLUG_CAP], int cap) {
+    const char *stored = scene_meta_get(&st->scene, board, "pages");
+    const char *active = scene_meta_get(&st->scene, board, "active_page");
     const char *raw[BOARD_PAGE_MAX];
-    const char *active;
     int         n = 0;
     sol_u32     i;
+    if (stored && stored[0])
+        return boardpage_list(stored, active, out, cap); /* ordered, creation order */
+    /* un-migrated / page-less board: emergent collection, natural-sorted */
     for (i = 0; i < st->scene.count && n < BOARD_PAGE_MAX; i++) {
         SceneObject *o = &st->scene.objects[i];
         const char  *pg;
@@ -7915,8 +7920,39 @@ static int board_pages(AppState *st, sol_u32 board,
         pg = scene_meta_get(&st->scene, o->handle, "page");
         if (pg) raw[n++] = pg;
     }
-    active = scene_meta_get(&st->scene, board, "active_page");
     return boardpage_collect(raw, n, active, out, cap);
+}
+
+/* Append slug to the board's ordered "pages" meta if not already listed.
+   "/" is implicit and never stored. */
+static void board_page_register(AppState *st, sol_u32 board, const char *slug) {
+    const char *cur;
+    char        buf[BOARD_PAGE_MAX * PAGE_SLUG_CAP];
+    if (!slug || !slug[0] || strcmp(slug, "/") == 0) return;
+    cur = scene_meta_get(&st->scene, board, "pages");
+    if (cur && boardpage_contains(cur, slug)) return;
+    if (cur && cur[0]) snprintf(buf, sizeof buf, "%s %s", cur, slug);
+    else               snprintf(buf, sizeof buf, "%s", slug);
+    scene_meta_set(&st->scene, board, "pages", buf);
+}
+
+/* Seed "pages" for any board lacking it, from its emergent page list (natural-
+   sorted), so empty-page persistence becomes real for pre-feature boards. No
+   save here -- the next scene_save persists it; re-running is idempotent. */
+static void boards_migrate_pages(AppState *st) {
+    Scene  *s = &st->scene;
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        char  pages[BOARD_PAGE_MAX][PAGE_SLUG_CAP];
+        int   np, j;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) continue;
+        if (scene_meta_get(s, o->handle, "pages")) continue; /* already migrated */
+        np = board_pages(st, o->handle, pages, BOARD_PAGE_MAX); /* emergent, natural-sorted */
+        if (np <= 1) continue;                               /* only "/" -> nothing to store */
+        for (j = 0; j < np; j++)
+            board_page_register(st, o->handle, pages[j]);   /* appends all non-"/" slugs */
+    }
 }
 
 /* Step the focused board's active_page through its page list by `dir`
@@ -13075,6 +13111,7 @@ static int rescan_mirrors(AppState *st) {
    to BOTH places. */
 static void world_rebuild(AppState *st) {
     windows_migrate_fills(st);   /* shaped windows -> oak fill child, before the resolve */
+    boards_migrate_pages(st);    /* seed ordered "pages" meta for un-migrated boards */
     scene_resolve_meshes(&st->scene);
     connections_rebuild(st);
     collide_rebuild(&st->colliders, &st->scene);
@@ -13185,6 +13222,7 @@ static sol_bool load_palace(AppState *st) {
     migrate_room_heights(&st->scene);   /* timber halls: 3.0m rooms -> 4.5m (idempotent) */
     scene_reimport_glbs(st);
     windows_migrate_fills(st);          /* shaped windows -> oak fill child, before the ACQUIRE */
+    boards_migrate_pages(st);          /* seed ordered "pages" meta for un-migrated boards */
     scene_resolve_meshes(&st->scene);             /* ACQUIRE (the new) */
     scene_release_meshes(&old);                   /* RELEASE (the old) */
     scene_free(&old);
