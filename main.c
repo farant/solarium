@@ -2664,6 +2664,13 @@ typedef struct AppState {
     int      bvh_count, bvh_cap;
     unsigned char *vis;          /* per-pass visibility, handle-indexed (piece 4) */
     sol_u32        vis_cap;
+    /* doorway-label routes (per-frame CPU spec, Part A): route_all is too costly
+       to run every frame, so solve at most ~4x/sec and reuse the result. Labels
+       are cosmetic; a room only moves in the editor, where a <=0.25s lag is
+       imperceptible. routes_last_t = 0 (zero-init AppState) forces a frame-1 solve. */
+    Route   routes[ROUTE_MAX];
+    int     route_count;
+    double  routes_last_t;
     /* bloom (P4 item 5): the half-res chain — level 0 is half the frame,
        each level half again; recreated with the HDR target on resize */
 #define BLOOM_LEVELS 5
@@ -4365,6 +4372,7 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define ROOF_TILE_M  2.0f        /* meters per roof texture-repeat */
 #define BOARD_VIEW_GLIDE_S  0.35f   /* seconds for the enter/exit camera glide */
 #define BOARD_VIEW_MARGIN   1.10f   /* fill the FOV to the board + a little air */
+#define ROUTE_LABEL_REFRESH_S 0.25  /* doorway-label routes resolve at most ~4x/sec */
 #define BOARD_DBL_S   0.35   /* max seconds between the two clicks of a double-click */
 #define BOARD_DBL_PX  6.0    /* max cursor drift (px) between them */
 
@@ -15657,11 +15665,15 @@ static void render(AppState *state) {
            approach. Derived from the routes, like the doorways themselves; the
            home hub is skipped (you start inside it). */
         {
-            Route droutes[ROUTE_MAX];
-            int   dn = route_all(&state->scene, droutes, ROUTE_MAX);
-            int   di, dside;
-            for (di = 0; di < dn; di++) {
-                Route *r = &droutes[di];
+            double rnow = glfwGetTime();   /* render already samples the clock (see 14861) */
+            int    di, dside;
+            if (state->routes_last_t == 0.0 ||
+                rnow - state->routes_last_t > ROUTE_LABEL_REFRESH_S) {
+                state->route_count   = route_all(&state->scene, state->routes, ROUTE_MAX);
+                state->routes_last_t = rnow;
+            }
+            for (di = 0; di < state->route_count; di++) {
+                Route *r = &state->routes[di];
                 if (!r->valid) continue;
                 for (dside = 0; dside < 2; dside++) {
                     sol_u32     room = dside ? r->room_hi : r->room_lo;
