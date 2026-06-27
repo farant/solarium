@@ -7243,6 +7243,11 @@ static void synth_book_input(AppState *st, GLFWwindow *w, sol_bool lmb) {
     }
 }
 
+/* the camera pose that frames a board head-on (defined with the board-view
+   machinery below; forward-declared so the reader can re-frame the board when a
+   book opened from board view closes) */
+static int board_view_pose(AppState *st, sol_u32 board, CameraPose *out);
+
 /* Open `handle` as a book. A codex rises as ITSELF (its own build and
    leather, read from the cover child's params — the open refs share the
    closed schema's prefix); a FILE/ALIAS card rises as the default codex:
@@ -7345,6 +7350,24 @@ static void reader_open(AppState *st, sol_u32 handle) {
     }
     st->reader_page   = 0;
     st->reader_spread = 0;
+    /* In board view the camera is pinned to the board's frame, so the reader's
+       own swing (reader_update, gated to walk/fly) never runs. Drive the
+       board-view glide instead: rotate in place to centre the held book. The
+       matching re-frame-the-board glide fires from reader_close. */
+    if (st->board_view != 0) {
+        vec3  cd   = vec3_sub(st->reader_b_pos, st->camera.pos);
+        float clen = (float)sqrt((double)vec3_dot(cd, cd));
+        st->bv_from_pos   = st->bv_to_pos   = st->camera.pos;   /* rotate, don't move */
+        st->bv_from_yaw   = st->bv_to_yaw   = st->camera.yaw;
+        st->bv_from_pitch = st->bv_to_pitch = st->camera.pitch;
+        if (clen > 1e-4f) {
+            vec3 dir = vec3_scale(cd, 1.0f / clen);
+            st->bv_to_yaw   = (float)atan2((double)dir.z, (double)dir.x);
+            st->bv_to_pitch = (float)asin((double)dir.y);
+        }
+        st->bv_t   = 0.0f;
+        st->bv_dir = 1.0f;
+    }
     printf("reading '%s' — Esc or click to put it back; left/right turn pages\n",
            object_label(s, root, lbuf));
 }
@@ -7355,6 +7378,18 @@ static void reader_build_leaf(AppState *st, float alpha, float lag);  /* below *
 static void reader_close(AppState *st) {
     if (st->reader_state == READER_IDLE || st->reader_state == READER_RETURNING)
         return;
+    /* if the book was opened from board view, glide the camera back onto the
+       board frame as the book flies home (mirror of reader_open's focus glide) */
+    if (st->board_view != 0) {
+        CameraPose p;
+        if (board_view_pose(st, st->board_view, &p)) {
+            st->bv_from_pos   = st->camera.pos;   st->bv_to_pos   = p.pos;
+            st->bv_from_yaw   = st->camera.yaw;   st->bv_to_yaw   = p.yaw;
+            st->bv_from_pitch = st->camera.pitch; st->bv_to_pitch = p.pitch;
+            st->bv_t   = 0.0f;
+            st->bv_dir = 1.0f;
+        }
+    }
     if (st->reader_app) {
         synth_book_save(st, st->reader_source);
         reader_free_pages(st);   /* pages were loaded as a codex, but reader_editable=FALSE skips the normal free */
@@ -7406,7 +7441,7 @@ static void reader_update(AppState *st, float dt) {
     /* an editable OR app book swings the look to centre as it rises (runs
        AFTER camera_update, so it overrides this frame's mouse-look) */
     if (st->reader_state == READER_RISING &&
-        (st->reader_editable || st->reader_app) &&
+        (st->reader_editable || st->reader_app) && st->board_view == 0 &&
         (st->camera.mode == CAMERA_WALK || st->camera.mode == CAMERA_FLY)) {
         float yd = st->reader_cam_yaw1 - st->reader_cam_yaw0;
         while (yd >  SOL_PI) yd -= 2.0f * SOL_PI;
@@ -9400,29 +9435,40 @@ static void wall_mount_gable(Scene *s, sol_u32 room, int wall, Ray ray,
     center->y  = cy;
 }
 
+/* The camera pose that frames `board` head-on: centred, square to the surface,
+   pulled back to fill the FOV. Shared by board_view_enter and the reader's
+   return-to-board glide. Returns 0 (leaving *out untouched) if the handle isn't
+   a board. */
+static int board_view_pose(AppState *st, sol_u32 board, CameraPose *out) {
+    SceneObject *o = scene_get(&st->scene, board);
+    vec3  cor[4], center, normal;
+    float yaw, half_w, half_h, aspect;
+    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) return 0;
+    board_world_corners(&st->scene, board, cor, NULL);
+    center = vec3_scale(vec3_add(vec3_add(cor[0], cor[1]),
+                                 vec3_add(cor[2], cor[3])), 0.25f);
+    yaw    = board_yaw(&st->scene, board);
+    normal = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
+    half_w = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w") * 0.5f;
+    half_h = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h") * 0.5f;
+    aspect = (st->fb_height > 0) ? (float)st->fb_width / (float)st->fb_height : 1.7778f;
+    *out   = camera_frame_pose(center, normal, half_w, half_h,
+                               st->camera.fov, aspect, BOARD_VIEW_MARGIN);
+    return 1;
+}
+
 /* Enter board view: frame the selected whiteboard head-on and begin the glide.
    Returns 0 (and does nothing) if the selection isn't a board, board view is
    already active, or another mode owns the keyboard/cursor. */
 static int board_view_enter(AppState *st) {
     SceneObject *o = scene_get(&st->scene, st->selected_handle);
-    vec3  cor[4], center, normal;
-    float yaw, half_w, half_h, aspect;
     CameraPose pose;
     if (st->board_view != 0) return 0;
     if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) return 0;
     if (st->carried != 0 || st->place_active || st->editor.active ||
         st->palette.open || st->inv_open || st->edit_handle != 0 ||
         st->reader_state != READER_IDLE) return 0;
-    board_world_corners(&st->scene, st->selected_handle, cor, NULL);
-    center = vec3_scale(vec3_add(vec3_add(cor[0], cor[1]),
-                                 vec3_add(cor[2], cor[3])), 0.25f);
-    yaw    = board_yaw(&st->scene, st->selected_handle);
-    normal = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
-    half_w = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "w") * 0.5f;
-    half_h = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h") * 0.5f;
-    aspect = (st->fb_height > 0) ? (float)st->fb_width / (float)st->fb_height : 1.7778f;
-    pose   = camera_frame_pose(center, normal, half_w, half_h,
-                               st->camera.fov, aspect, BOARD_VIEW_MARGIN);
+    if (!board_view_pose(st, st->selected_handle, &pose)) return 0;
     st->bv_return_pos   = st->camera.pos;
     st->bv_return_yaw   = st->camera.yaw;
     st->bv_return_pitch = st->camera.pitch;
@@ -16578,10 +16624,10 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     }
 
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        if (st && (st->board_view != 0 || st->bv_t < 1.0f))
+        if (st && st->reader_state != READER_IDLE)
+            reader_close(st);                   /* put the book back first (even in board view) */
+        else if (st && (st->board_view != 0 || st->bv_t < 1.0f))
             board_view_exit(st);                /* leave board view (or absorb Esc mid-glide-out) */
-        else if (st && st->reader_state != READER_IDLE)
-            reader_close(st);                   /* put the book back first */
         else
             glfwSetWindowShouldClose(window, GLFW_TRUE);
     }
@@ -16596,8 +16642,10 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
             if (st->board_view == 0) board_view_enter(st);
             /* already in board view: Enter on the board itself does nothing */
         }
-        else if (o && st->board_view == 0)
-            reader_open(st, st->selected_handle);
+        else if (o)
+            reader_open(st, st->selected_handle);   /* a file/alias card opens to
+                                                       read — works in board view too;
+                                                       reader_open ignores unreadable kinds */
     }
 }
 
