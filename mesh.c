@@ -279,6 +279,7 @@ static void emit_doored_wall(MeshBuilder *b, int runx, sol_f32 f0, sol_f32 f1,
     for (i = 0; i < n_ops; i++) {
         sol_f32 c, hwid;
         if (ops[i].wall != wall_id) continue;
+        if (ops[i].sill >= h) continue;   /* entirely above the wall: it's a gable window — wall stays solid */
         if (k >= ROOM_MAX_OPENINGS_PER_WALL) break;
         c = ops[i].center; hwid = ops[i].width * 0.5f;
         lo[k] = c - hwid; hi[k] = c + hwid; oy[k] = ops[i].height; sl[k] = ops[i].sill;

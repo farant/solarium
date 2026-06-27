@@ -100,6 +100,34 @@ static void test_window_glass_styles(void) {
            (unsigned)rect, (unsigned)disc, (unsigned)arch, (unsigned)pnt);
 }
 
+static void test_window_above_wall(void) {
+    MeshBuilder mb;
+    RoomOpening below, above, span;
+    sol_u32 none_idx, below_idx, above_idx, span_idx;
+
+    mb_init(&mb); make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1,1,1,1, 0, (RoomOpening*)0, 0);
+    none_idx = mb.index_count; mb_free(&mb);
+
+    below.wall = ROOM_WALL_N; below.center = 0.0f; below.width = 1.2f;
+    below.height = 2.3f; below.sill = 0.9f;                 /* fully below h=3.0 */
+    mb_init(&mb); make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1,1,1,1, 0, &below, 1);
+    below_idx = mb.index_count; mb_free(&mb);
+
+    above = below; above.sill = 3.4f; above.height = 4.4f;  /* entirely above h -> must be skipped */
+    mb_init(&mb); make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1,1,1,1, 0, &above, 1);
+    above_idx = mb.index_count; mb_free(&mb);
+
+    span = below; span.sill = 2.4f; span.height = 4.0f;     /* spans the wall top */
+    mb_init(&mb); make_room_doored(&mb, 6.0f, 4.0f, 3.0f, 0.20f, 1,1,1,1, 0, &span, 1);
+    span_idx = mb.index_count; mb_free(&mb);
+
+    assert(above_idx == none_idx);   /* above-wall window leaves the wall solid */
+    assert(below_idx != none_idx);   /* a real window cuts the wall */
+    assert(span_idx  != below_idx);  /* spanning differs (reaches the wall top, no header) */
+    printf("  window above wall: none=%u below=%u above=%u span=%u OK\n",
+           (unsigned)none_idx, (unsigned)below_idx, (unsigned)above_idx, (unsigned)span_idx);
+}
+
 int main(void) {
     /* due-east: straight, A opens E, B opens W, 0 bends */
     {
@@ -238,6 +266,7 @@ int main(void) {
     test_window_sill_panel();
     test_window_fill_styles();
     test_window_glass_styles();
+    test_window_above_wall();
     if (fails == 0) printf("route_test: OK\n");
     return fails ? 1 : 0;
 }
