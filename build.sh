@@ -13,7 +13,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c multiselect.c widget.c app_synth.c
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     exit 0
 fi
@@ -73,6 +73,18 @@ if [ "$MODE" = "scenetest" ]; then
         scene.c material.c scene_io.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mirror.c platform_fs.c component.c particles.c nid.c stml.c sol_math.c scene_test.c \
         -o scene_test
     echo "built ./scene_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
+# Build + run the pure note-caret layout test under the sanitizers. caret.c is
+# GL-free (libc only), so this links just it + the test.
+if [ "$MODE" = "carettest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        caret.c caret_test.c \
+        -o caret_test
+    echo "built ./caret_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
 
