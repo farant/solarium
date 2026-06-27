@@ -76,10 +76,10 @@ extern void  objc_autoreleasePoolPop(void *pool);
    lifetimes through static strong arrays; "delete" is nil-ing the slot
    (any in-flight command buffer holds its own reference until the GPU is
    done — Metal's retain semantics ARE the orphaning idiom). */
-#define MAX_BUFFERS        1024
+#define MAX_BUFFERS        4096   /* meshes: vbuf+ibuf per unique shape; scales with scene size */
 #define MAX_SHADERS          64
 #define MAX_PIPELINES        64
-#define MAX_TEXTURES       1024
+#define MAX_TEXTURES       4096   /* scene textures + loaded images + texgen maps */
 #define MAX_RENDER_TARGETS   48   /* engine ~14 + inventory thumbnail pool + scratch */
 #define SLOT_NONE  ((sol_u32)-1)
 
@@ -178,6 +178,8 @@ static sol_u32 slot_alloc(sol_u32 *count, sol_u32 *free_list,
         return free_list[*free_count];
     }
     if (*count >= max) {
+        fprintf(stderr, "Metal: RHI resource table exhausted (%u/%u in use) — "
+                        "raise the matching MAX_* ceiling\n", *count, max);
         assert(0 && "RHI resource table exhausted (raise the MAX_* ceiling)");
         return SLOT_NONE;
     }
