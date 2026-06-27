@@ -2850,6 +2850,8 @@ typedef struct AppState {
     int         edit_cursor;      /* byte offset into edit_buf: the caret */
     float       edit_goal_x;      /* remembered note-local x for Up/Down */
     int         edit_sel_anchor;  /* selection's fixed end; span = [min,max) with edit_cursor */
+    int         click_seq;        /* shared multi-click counter (1 single, 2 double, 3 triple) */
+    sol_bool    edit_dragging;    /* a left-drag is selecting text in the edited note */
     Mesh        caret_mesh;       /* unit caret quad; built once on first use */
     Palette     palette;           /* command palette state (palette.h) */
     /* the reader (item 9): VIEW state, never scene state — the open book
@@ -10663,8 +10665,9 @@ static void note_edit_begin(AppState *st, sol_u32 handle);
 /* defined later (after note_edit_begin); the note-body renderer calls it */
 static int caret_build(const Font *f, const char *src, float px2m, float wrap_w,
                        CaretField *out);
-/* defined later (after caret_refresh_goal); the blur path calls it */
-static int caret_click_place(AppState *st, GLFWwindow *w);
+/* defined later (after caret_refresh_goal) */
+static int caret_hit_offset(AppState *st, GLFWwindow *w, int *out);
+static int click_seq_bump(AppState *st, double mx, double my);
 
 /* Delete one selectable board card (note/picture/folder): release its keyed
    mesh, clear transient refs, remove it. Does NOT save or rebuild arrows. */
@@ -10815,10 +10818,34 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         in->zoom    = 0.0f;
         st->scroll_accum = 0.0;
         glfwGetCursorPos(w, &mx, &my);
-        if (st->edit_handle != 0) {     /* board-view click places the caret; else blur */
+        if (st->edit_handle != 0) {     /* board-view click: place/select; drag extends; else blur */
             sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-            if (lmb && !st->lmb_was_down) {
-                if (!caret_click_place(st, w)) note_edit_end(st);
+            if (lmb && !st->lmb_was_down) {            /* press */
+                int seq = click_seq_bump(st, mx, my);
+                int off;
+                if (!caret_hit_offset(st, w, &off)) {
+                    note_edit_end(st);                 /* off the note -> blur */
+                } else if (glfwGetKey(w, GLFW_KEY_LEFT_SHIFT)  == GLFW_PRESS ||
+                           glfwGetKey(w, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) {
+                    st->edit_cursor = off;             /* shift-click: extend, keep anchor */
+                    st->edit_dragging = SOL_TRUE;
+                } else if (seq == 2) {                 /* double: word */
+                    int s, e;
+                    caret_word_at(st->edit_buf, off, &s, &e);
+                    st->edit_sel_anchor = s; st->edit_cursor = e;
+                    st->edit_dragging = SOL_FALSE;
+                } else if (seq >= 3) {                 /* triple: all */
+                    st->edit_sel_anchor = 0; st->edit_cursor = st->edit_len;
+                    st->edit_dragging = SOL_FALSE;
+                } else {                               /* single: caret + arm drag */
+                    st->edit_cursor = st->edit_sel_anchor = off;
+                    st->edit_dragging = SOL_TRUE;
+                }
+            } else if (lmb && st->lmb_was_down && st->edit_dragging) {   /* drag extends */
+                int off;
+                if (caret_hit_offset(st, w, &off)) st->edit_cursor = off;
+            } else if (!lmb) {
+                st->edit_dragging = SOL_FALSE;         /* release */
             }
             st->lmb_was_down = lmb;
         } else if (reader_is_editing(st)) {  /* click closes the book (saves) */
@@ -11016,15 +11043,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 do_pick(st, w, pnx, pny);               /* select on press */
                 if (st->board_view != 0 && st->selected_handle == st->board_view)
                     st->selected_handle = 0;            /* clicked the board itself = deselect */
-                if (st->board_view != 0) {              /* board-view double-click detect */
-                    double now = glfwGetTime();
-                    is_dbl = (sol_bool)(now - st->last_press_t < BOARD_DBL_S &&
-                                        fabs(mx - st->last_press_x) < BOARD_DBL_PX &&
-                                        fabs(my - st->last_press_y) < BOARD_DBL_PX);
-                    st->last_press_t = now;
-                    st->last_press_x = mx; st->last_press_y = my;
-                    if (is_dbl) st->last_press_t = 0.0;   /* consume: a 3rd click isn't a 2nd double */
-                }
+                if (st->board_view != 0)                /* shared multi-click counter */
+                    is_dbl = (sol_bool)(click_seq_bump(st, mx, my) == 2);
                 if (is_dbl) {                           /* navigate a folder, edit a note, or create on the board */
                     SceneObject *so = scene_get(&st->scene, st->selected_handle);
                     if (so && object_is_folder(&st->scene, st->selected_handle)) {
@@ -11035,7 +11055,13 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                             scene_save(&st->scene, "scene.stml");
                         }
                     } else if (so && so->kind == KIND_NOTE) {
+                        int off;
                         note_edit_begin(st, st->selected_handle);
+                        if (caret_hit_offset(st, w, &off)) {   /* select the clicked word */
+                            int s, e;
+                            caret_word_at(st->edit_buf, off, &s, &e);
+                            st->edit_sel_anchor = s; st->edit_cursor = e;
+                        }
                     } else if (st->selected_handle == 0) {
                         vec3 bl;
                         if (board_under_ray(st, pick_ray(st, w), &bl) != 0) {  /* over the board only */
@@ -16609,9 +16635,25 @@ static void selection_delete(AppState *st) {
     caret_refresh_goal(st);
 }
 
-/* In board view, if the click ray hits the note being edited, set edit_cursor to
-   the nearest caret slot and return 1; otherwise return 0 so the caller blurs. */
-static int caret_click_place(AppState *st, GLFWwindow *w) {
+/* advance the shared multi-click counter on a left-press; returns the count within
+   the BOARD_DBL time/px window (1,2,3,...). Updates last_press_*. */
+static int click_seq_bump(AppState *st, double mx, double my) {
+    double now = glfwGetTime();
+    if (now - st->last_press_t < BOARD_DBL_S &&
+        fabs(mx - st->last_press_x) < BOARD_DBL_PX &&
+        fabs(my - st->last_press_y) < BOARD_DBL_PX)
+        st->click_seq += 1;
+    else
+        st->click_seq = 1;
+    st->last_press_t = now;
+    st->last_press_x = mx;
+    st->last_press_y = my;
+    return st->click_seq;
+}
+
+/* the source byte offset under the cursor on the note being edited; returns 1 and
+   writes *out on a hit, 0 if off the card / not board view. Sets edit_goal_x. */
+static int caret_hit_offset(AppState *st, GLFWwindow *w, int *out) {
     SceneObject *o;
     Ray   ray;
     mat4  face;
@@ -16650,12 +16692,12 @@ static int caret_click_place(AppState *st, GLFWwindow *w) {
     if (line < 0) line = 0;
     if (line >= cf.line_count) line = cf.line_count - 1;
     slot = caret_slot_nearest_x(&cf, line, lx - x0);
-    if (slot >= 0) {
-        st->edit_cursor = st->edit_sel_anchor = cf.slots[slot].src;   /* a click clears the selection */
-        st->edit_goal_x = lx - x0;
-    }
+    if (slot < 0) return 0;
+    *out = cf.slots[slot].src;
+    st->edit_goal_x = lx - x0;
     return 1;
 }
+
 
 /* Open a note for typing: seed the buffer from its text meta. */
 static void note_edit_begin(AppState *st, sol_u32 handle) {
@@ -16677,6 +16719,7 @@ static void note_edit_begin(AppState *st, sol_u32 handle) {
    same reflex as save-on-release. */
 static void note_edit_end(AppState *st) {
     if (st->edit_handle == 0) return;
+    st->click_seq = 0;          /* blur is a mode change: start the click sequence fresh */
     scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
     st->edit_handle = 0;
     scene_save(&st->scene, "scene.stml");
