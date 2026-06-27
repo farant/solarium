@@ -11055,13 +11055,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                             scene_save(&st->scene, "scene.stml");
                         }
                     } else if (so && so->kind == KIND_NOTE) {
-                        int off;
-                        note_edit_begin(st, st->selected_handle);
-                        if (caret_hit_offset(st, w, &off)) {   /* select the clicked word */
-                            int s, e;
-                            caret_word_at(st->edit_buf, off, &s, &e);
-                            st->edit_sel_anchor = s; st->edit_cursor = e;
-                        }
+                        note_edit_begin(st, st->selected_handle);   /* focus only — no word-select */
                     } else if (st->selected_handle == 0) {
                         vec3 bl;
                         if (board_under_ray(st, pick_ray(st, w), &bl) != 0) {  /* over the board only */
