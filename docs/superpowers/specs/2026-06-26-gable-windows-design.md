@@ -67,17 +67,18 @@ triangle — learns to cut a rectangular notch for a window whose top rises abov
 
 ## Architecture
 
-### 1. The wall-shell cap (`emit_doored_wall`, mesh.c)
+### 1. The wall-shell fix (`emit_doored_wall`, mesh.c)
 
-Cap each opening's sill at the wall height so a window above the wall doesn't make a too-tall sill
-box and an entirely-above window reads as solid wall:
+Skip any opening that sits **entirely above** the wall top so it doesn't cut a wall gap or emit a
+too-tall sill box — it's purely a gable window:
 ```c
-/* in the gather loop, after sl[k] = ops[i].sill; */
-if (sl[k] > h) sl[k] = h;   /* a window rising into the gable: the wall part stops at the top */
+/* in the gather loop, right after the `if (ops[i].wall != wall_id) continue;` */
+if (ops[i].sill >= h) continue;   /* entirely in the gable: the wall stays solid here */
 ```
-With this, `sill ≥ h` → sill box `[0, h]` fills the strip (solid, no wall hole); `sill < h < lintel`
-→ sill box `[0, sill]` + opening `[sill, h]` + no header (lintel ≥ h) = the wall part of a spanning
-window. (The header guard `oy[i] < h` already handles `lintel ≥ h`.)
+With this: `sill ≥ h` → no gap (solid wall — the gable cuts it); `sill < h < lintel` → the sill box
+`[0, sill]` is naturally fine (`sill < h`), the opening reaches the wall top, and the header guard
+`oy[i] < h` already skips the header (`lintel ≥ h`) — the wall part of a spanning window. (This is
+cleaner and headlessly testable: an entirely-above window emits the SAME geometry as no opening.)
 
 ### 2. The gable notch (the hard part — `room_frame_build`, main.c)
 
