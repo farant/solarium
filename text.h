@@ -42,8 +42,10 @@ void text_measure(const Font *f, const char *utf8, float scale,
 
 /* Greedy word wrap as a STRING transform: copy utf8 into out[cap] with '\n'
    inserted so no line exceeds max_width px at scale. A single word wider
-   than that gets its own line, unbroken; runs of separating spaces collapse
-   at breaks; '\n' passes through. Returns the line count (0 = nothing).
+   than that gets its own line, unbroken. Spaces are PRESERVED (leading and
+   interior runs survive, so typed double-spaces render) EXCEPT a run that
+   falls at a wrap break becomes the '\n', and trailing spaces at the very end
+   are dropped; '\n' passes through. Returns the line count (0 = nothing).
    The screen overlay and world text (item 8) both wrap through this door. */
 int text_wrap(const Font *f, const char *utf8, float scale, float max_width,
               char *out, int cap);

@@ -63,6 +63,14 @@ static void test_reconcile_hard_nl(void) {
     CHECK(n == 3 && map[0] == 0 && map[1] == 1 && map[2] == 2, "reconcile hard '\\n' passes through");
 }
 
+static void test_reconcile_preserved_spaces(void) {
+    /* text_wrap now PRESERVES interior space runs, so the wrapped string keeps
+       both spaces and the mapping is identity (no collapse mid-line). */
+    int map[16], n = caret_reconcile("ab  cd", "ab  cd", map, 16), i;
+    CHECK(n == 6, "reconcile preserved: len");
+    for (i = 0; i < 6; i++) CHECK(map[i] == i, "reconcile preserved: identity (interior spaces kept)");
+}
+
 static void test_field_plain(void) {
     CaretField cf;
     int lines = build("abc", "abc", &cf);
@@ -235,6 +243,7 @@ int main(void) {
     test_reconcile_softwrap();
     test_reconcile_multispace();
     test_reconcile_hard_nl();
+    test_reconcile_preserved_spaces();
     test_field_plain();
     test_field_softwrap();
     test_field_empty();

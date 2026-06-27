@@ -138,44 +138,40 @@ int text_wrap(const Font *f, const char *utf8, float scale, float max_width,
     limit  = max_width / scale;        /* compare in base-size units */
     line_w = 0.0f;
 
-    while (*p == ' ' && oi + 2 < (size_t)cap) {  /* the first line's indent */
-        out[oi++] = ' ';
-        line_w += space_w;
-        p++;
-    }
-
     while (*p != '\0' && oi + WORD_BUF + 2 < (size_t)cap) {
         size_t wl = 0;
         float  ww;
+        int    nsp, k;
 
         if (*p == '\n') {                       /* explicit break passes through */
             out[oi++] = '\n';
             lines++;
             line_w = 0.0f;
             p++;
-            /* LEADING whitespace survives the wrap (item 9: code
-               indentation is meaning); only interior runs collapse */
-            while (*p == ' ' && oi + 2 < (size_t)cap) {
-                out[oi++] = ' ';
-                line_w += space_w;
-                p++;
-            }
             continue;
         }
-        if (*p == ' ') { p++; continue; }       /* separators collapse at breaks */
+        nsp = 0;
+        while (*p == ' ') { p++; nsp++; }        /* count this run of spaces */
+        if (*p == '\0') break;                   /* trailing spaces at end of text: dropped */
+        if (*p == '\n') {                         /* a run before a hard '\n': keep it */
+            for (k = 0; k < nsp && oi + 2 < (size_t)cap; k++) out[oi++] = ' ';
+            continue;
+        }
 
         while (*p != '\0' && *p != ' ' && *p != '\n' && wl < WORD_BUF - 1)
             word[wl++] = *p++;
         word[wl] = '\0';
         text_measure(f, word, 1.0f, &ww, (float *)0);
 
-        if (line_w > 0.0f && line_w + space_w + ww > limit) {
-            out[oi++] = '\n';                   /* break instead of the space */
+        if (line_w > 0.0f && line_w + (float)nsp * space_w + ww > limit) {
+            out[oi++] = '\n';                   /* the word wraps; the space run is dropped */
             lines++;
             line_w = 0.0f;
-        } else if (line_w > 0.0f) {
-            out[oi++] = ' ';
-            line_w += space_w;
+        } else {                                 /* preserve the run of spaces (leading or interior) */
+            for (k = 0; k < nsp && oi + 2 < (size_t)cap; k++) {
+                out[oi++] = ' ';
+                line_w += space_w;
+            }
         }
         /* a single word wider than the limit gets its own line, unbroken */
         memcpy(out + oi, word, wl);
