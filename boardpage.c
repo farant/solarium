@@ -93,6 +93,15 @@ int boardpage_collect(const char *const *pages, int n, const char *active,
     return count;
 }
 
+/* advance past the next space-delimited token; sets start and len (len=0 at end). */
+static const char *page_next_tok(const char *p, const char **start, int *len) {
+    while (*p == ' ') p++;
+    *start = p;
+    while (*p && *p != ' ') p++;
+    *len = (int)(p - *start);
+    return p;
+}
+
 int boardpage_list(const char *stored, const char *active,
                    char out[][PAGE_SLUG_CAP], int cap) {
     int         count = 0;
@@ -103,10 +112,7 @@ int boardpage_list(const char *stored, const char *active,
         while (*p) {
             const char *start;
             int len;
-            while (*p == ' ') p++;
-            start = p;
-            while (*p && *p != ' ') p++;
-            len = (int)(p - start);
+            p = page_next_tok(p, &start, &len);
             if (len > 0 && len < PAGE_SLUG_CAP) {
                 char tok[PAGE_SLUG_CAP];
                 memcpy(tok, start, (size_t)len); tok[len] = '\0';
@@ -127,10 +133,7 @@ int boardpage_contains(const char *list, const char *slug) {
     while (*p) {
         const char *start;
         int len;
-        while (*p == ' ') p++;
-        start = p;
-        while (*p && *p != ' ') p++;
-        len = (int)(p - start);
+        p = page_next_tok(p, &start, &len);
         if (len == slen && strncmp(start, slug, (size_t)slen) == 0) return 1;
     }
     return 0;
@@ -142,12 +145,13 @@ void boardpage_serialize(const char list[][PAGE_SLUG_CAP], int n,
     if (cap <= 0) return;
     out[0] = '\0';
     for (i = 0; i < n; i++) {
-        int len;
+        int len, need;
         if (strcmp(list[i], "/") == 0) continue;
-        len = (int)strlen(list[i]);
-        if (oi > 0 && oi + 1 < cap) out[oi++] = ' ';
-        if (oi + len < cap) { memcpy(out + oi, list[i], (size_t)len); oi += len; }
-        else break;
+        len  = (int)strlen(list[i]);
+        need = (oi > 0 ? 1 : 0) + len;            /* sep + token */
+        if (oi + need >= cap) break;              /* won't fit -> stop cleanly */
+        if (oi > 0) out[oi++] = ' ';
+        memcpy(out + oi, list[i], (size_t)len); oi += len;
     }
     out[oi] = '\0';
 }

@@ -76,6 +76,12 @@ static void test_order_and_list(void) {
     CHECK(boardpage_contains("/page-1 /page-10", "/page-1") == 1, "contains: token present");
     CHECK(boardpage_contains("/page-10", "/page-1") == 0,         "contains: not a substring");
     CHECK(boardpage_contains("", "/page-1") == 0,                 "contains: empty list");
+    CHECK(boardpage_contains((const char *)0, "/x") == 0, "contains: NULL list");
+    { char o2[BOARD_PAGE_MAX][PAGE_SLUG_CAP]; int m = boardpage_list((const char *)0, "/page-1", o2, BOARD_PAGE_MAX);
+      CHECK(m == 2 && strcmp(o2[1], "/page-1") == 0, "list: NULL stored -> '/' + active"); }
+    { const char *r2[2]; char o3[BOARD_PAGE_MAX][PAGE_SLUG_CAP]; int m;
+      r2[0] = "/a1"; r2[1] = "/a"; m = boardpage_collect(r2, 2, "/", o3, BOARD_PAGE_MAX);
+      CHECK(m == 3 && strcmp(o3[1], "/a") == 0 && strcmp(o3[2], "/a1") == 0, "natural: /a before /a1"); }
 
     n = boardpage_list("/page-3 /page-1", "/", out, BOARD_PAGE_MAX);
     boardpage_serialize(out, n, ser, (int)sizeof ser);
