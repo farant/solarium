@@ -10662,6 +10662,8 @@ static void note_edit_begin(AppState *st, sol_u32 handle);
 /* defined later (after note_edit_begin); the note-body renderer calls it */
 static int caret_build(const Font *f, const char *src, float px2m, float wrap_w,
                        CaretField *out);
+/* defined later (after caret_refresh_goal); the blur path calls it */
+static int caret_click_place(AppState *st, GLFWwindow *w);
 
 /* Delete one selectable board card (note/picture/folder): release its keyed
    mesh, clear transient refs, remove it. Does NOT save or rebuild arrows. */
@@ -10812,9 +10814,11 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
         in->zoom    = 0.0f;
         st->scroll_accum = 0.0;
         glfwGetCursorPos(w, &mx, &my);
-        if (st->edit_handle != 0) {     /* note blur is edit-only */
+        if (st->edit_handle != 0) {     /* board-view click places the caret; else blur */
             sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-            if (lmb && !st->lmb_was_down) note_edit_end(st);
+            if (lmb && !st->lmb_was_down) {
+                if (!caret_click_place(st, w)) note_edit_end(st);
+            }
             st->lmb_was_down = lmb;
         } else if (reader_is_editing(st)) {  /* click closes the book (saves) */
             sol_bool lmb = glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
@@ -16542,6 +16546,54 @@ static void caret_refresh_goal(AppState *st) {
     st->edit_goal_x = (slot >= 0) ? cf.slots[slot].x : 0.0f;
 }
 
+/* In board view, if the click ray hits the note being edited, set edit_cursor to
+   the nearest caret slot and return 1; otherwise return 0 so the caller blurs. */
+static int caret_click_place(AppState *st, GLFWwindow *w) {
+    SceneObject *o;
+    Ray   ray;
+    mat4  face;
+    vec3  origin, rx, ry, nrm, hit, d;
+    float cw, ch, ct, t, rr2, ru2, lx, ly, lh, bpx2m, usable, x0, y0;
+    CaretField cf;
+    int   line, slot;
+    if (st->board_view == 0) return 0;
+    o = scene_get(&st->scene, st->edit_handle);
+    if (!o || !st->ui_font) return 0;
+    cw = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "w");
+    ch = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "h");
+    ct = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "t");
+    face = mat4_mul(scene_world_matrix(&st->scene, o),
+                    mat4_translate(vec3_make(0.0f, 0.0f, ct * 0.5f + 0.0008f)));
+    origin = mat4_mul_point(face, vec3_make(0.0f, 0.0f, 0.0f));
+    rx     = vec3_sub(mat4_mul_point(face, vec3_make(1.0f, 0.0f, 0.0f)), origin);
+    ry     = vec3_sub(mat4_mul_point(face, vec3_make(0.0f, 1.0f, 0.0f)), origin);
+    nrm    = vec3_normalize(vec3_cross(rx, ry));
+    ray    = pick_ray(st, w);
+    if (!ray_vs_plane(ray, origin, nrm, &t) || t <= 0.0f) return 0;
+    hit = vec3_add(ray.origin, vec3_scale(ray.dir, t));
+    d   = vec3_sub(hit, origin);
+    rr2 = vec3_dot(rx, rx); ru2 = vec3_dot(ry, ry);
+    if (rr2 < 1e-9f || ru2 < 1e-9f) return 0;
+    lx = vec3_dot(d, rx) / rr2;
+    ly = vec3_dot(d, ry) / ru2;
+    if (lx < -cw * 0.5f || lx > cw * 0.5f || ly < 0.0f || ly > ch) return 0;
+    lh     = font_line_height(st->ui_font);
+    usable = cw - 3.0f * 0.025f;
+    bpx2m  = note_text_size(&st->scene, st->edit_handle) / lh;
+    x0     = -cw * 0.5f + 2.0f * 0.025f;
+    y0     = ch - 2.0f * 0.025f;
+    caret_build(st->ui_font, st->edit_buf, bpx2m, usable, &cf);
+    line = (int)((y0 - ly) / cf.line_h);
+    if (line < 0) line = 0;
+    if (line >= cf.line_count) line = cf.line_count - 1;
+    slot = caret_slot_nearest_x(&cf, line, lx - x0);
+    if (slot >= 0) {
+        st->edit_cursor = cf.slots[slot].src;
+        st->edit_goal_x = lx - x0;
+    }
+    return 1;
+}
+
 /* Open a note for typing: seed the buffer from its text meta. */
 static void note_edit_begin(AppState *st, sol_u32 handle) {
     const char *t = scene_meta_get(&st->scene, handle, "text");
@@ -16762,6 +16814,27 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
                    ((unsigned char)st->edit_buf[st->edit_cursor] & 0xC0u) == 0x80u)
                 st->edit_cursor++;
             caret_refresh_goal(st);
+        } else if (key == GLFW_KEY_UP || key == GLFW_KEY_DOWN) {
+            SceneObject *o = scene_get(&st->scene, st->edit_handle);
+            if (o && st->ui_font) {
+                float      lh     = font_line_height(st->ui_font);
+                float      cw     = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "w");
+                float      usable = cw - 3.0f * 0.025f;
+                float      bpx2m  = note_text_size(&st->scene, st->edit_handle) / lh;
+                CaretField cf;
+                int        slot, line, tgt;
+                caret_build(st->ui_font, st->edit_buf, bpx2m, usable, &cf);
+                slot = caret_slot_for_offset(&cf, st->edit_cursor);
+                line = (slot >= 0) ? caret_line_of_slot(&cf, slot) : 0;
+                if (key == GLFW_KEY_UP)   line = (line > 0) ? line - 1 : -1;
+                else                      line = (line + 1 < cf.line_count) ? line + 1 : -1;
+                if (line < 0) {
+                    st->edit_cursor = (key == GLFW_KEY_UP) ? 0 : st->edit_len;
+                } else {
+                    tgt = caret_slot_nearest_x(&cf, line, st->edit_goal_x);
+                    if (tgt >= 0) st->edit_cursor = cf.slots[tgt].src;
+                }
+            }
         }
         return;                                 /* everything else stays quiet */
     }
