@@ -416,14 +416,21 @@ static int window_outline(int style, float hw, float hh, float fw,
                 xy[2*n]   = r * cosf(a);
                 xy[2*n+1] = ys + r * sinf(a); n++;
             }
-        } else {                                   /* pointed: right->apex->left */
-            for (i = 1; i < WINDOW_ARC_SEG && n < cap; i++) {
-                float u = (float)i / (float)WINDOW_ARC_SEG;
-                xy[2*n]= aw*(1.0f-u); xy[2*n+1]= ys + (ah-ys)*u; n++;
+        } else {                                   /* pointed: a gothic lancet — two arcs,
+                                                      each struck from the OPPOSITE springing
+                                                      point, meeting at the apex */
+            float cx    = (aw * aw - (ah - ys) * (ah - ys)) / (2.0f * aw);  /* arc-center offset */
+            float rr    = aw - cx;                                          /* arc radius */
+            float theta = atan2f(ah - ys, -cx);    /* sweep: springline (a=0) -> apex (a=theta) */
+            for (i = 1; i < WINDOW_ARC_SEG && n < cap; i++) {   /* right springline -> apex */
+                float a = theta * (float)i / (float)WINDOW_ARC_SEG;
+                xy[2*n]   = cx + rr * cosf(a);
+                xy[2*n+1] = ys + rr * sinf(a); n++;
             }
-            for (i = 0; i < WINDOW_ARC_SEG && n < cap; i++) {
-                float u = (float)i / (float)WINDOW_ARC_SEG;
-                xy[2*n]= -aw*u; xy[2*n+1]= ah - (ah-ys)*u; n++;
+            for (i = 0; i < WINDOW_ARC_SEG && n < cap; i++) {   /* apex -> left springline (mirror) */
+                float a = theta * (1.0f - (float)i / (float)WINDOW_ARC_SEG);
+                xy[2*n]   = -(cx + rr * cosf(a));
+                xy[2*n+1] = ys + rr * sinf(a); n++;
             }
         }
         if (n < cap) { xy[2*n]= -aw; xy[2*n+1]=  ys; n++; }  /* left springline */
