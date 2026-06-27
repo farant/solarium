@@ -23,4 +23,19 @@ int boardpage_slugify(const char *in, char *out, int cap);
 int boardpage_collect(const char *const *pages, int n, const char *active,
                       char out[][PAGE_SLUG_CAP], int cap);
 
+/* Build a board's ordered page list from its stored space-delimited slug list
+   (creation order) + the active page: "/" first, then each token in order,
+   then `active` if not already present. Dedupes; does NOT sort. Returns count. */
+int  boardpage_list(const char *stored, const char *active,
+                    char out[][PAGE_SLUG_CAP], int cap);
+
+/* 1 if `slug` is a whole space-delimited token of `list`, else 0 (so "/page-1"
+   is NOT contained in "/page-10"). */
+int  boardpage_contains(const char *list, const char *slug);
+
+/* Space-join the non-"/" entries of list[0..n) into out[cap] (NUL-terminated,
+   truncate-safe). "/" is implicit and skipped. */
+void boardpage_serialize(const char list[][PAGE_SLUG_CAP], int n,
+                         char *out, int cap);
+
 #endif
