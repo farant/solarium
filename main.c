@@ -8245,6 +8245,10 @@ static void cmd_cut_selection(AppState *st) {
     for (i = 0; i < st->sel_count; i++) st->cut[i] = st->sel[i];
     st->cut_count = st->sel_count;
     printf("cut %d card(s)\n", st->cut_count);
+    sel_clear(st);    /* deselect: the cut now lives on the clipboard (cards stay
+                         dimmed via handle_is_cut), so LEFT/RIGHT navigate pages
+                         freely to the paste target and no stale resize handles
+                         ghost-render over a page the cut card no longer sits on */
 }
 
 /* palette wrappers + availability predicates */
