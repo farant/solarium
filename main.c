@@ -7943,6 +7943,19 @@ static void boards_migrate_pages(AppState *st) {
     }
 }
 
+/* Append slug to the board's ordered "pages" meta if not already listed.
+   "/" is implicit and never stored. */
+static void board_page_register(AppState *st, sol_u32 board, const char *slug) {
+    const char *cur;
+    char        buf[BOARD_PAGE_MAX * PAGE_SLUG_CAP];
+    if (!slug || !slug[0] || strcmp(slug, "/") == 0) return;
+    cur = scene_meta_get(&st->scene, board, "pages");
+    if (cur && boardpage_contains(cur, slug)) return;
+    if (cur && cur[0]) snprintf(buf, sizeof buf, "%s %s", cur, slug);
+    else               snprintf(buf, sizeof buf, "%s", slug);
+    scene_meta_set(&st->scene, board, "pages", buf);
+}
+
 /* Step the focused board's active_page through its page list by `dir`
    (+1 next, -1 prev), wrapping. '/' is always reachable. */
 static void cycle_page(AppState *st, int dir) {
@@ -7981,6 +7994,7 @@ static void board_new_page(AppState *st) {
             if (strcmp(pages[i], slug) == 0) { taken = SOL_TRUE; break; }
         if (!taken) break;
     }
+    board_page_register(st, board, slug);          /* persist the page in creation order */
     for (i = 0; i < st->sel_count; i++)           /* move the selection, layout kept */
         scene_meta_set(&st->scene, st->sel[i], "page", slug);
     scene_meta_set(&st->scene, board, "active_page", slug);
@@ -8099,6 +8113,7 @@ static void create_folder_from_name(AppState *st, const char *typed) {
     if (!folder_backlink_exists(st, board, target, src_buf))
         (void)add_folder(st, board, target, src_buf, back_local);
     st->folder_place_has = SOL_FALSE;
+    board_page_register(st, board, target);   /* a folder-linked page persists + orders */
     scene_save(&st->scene, "scene.stml");
     printf("folder %s -> %s%s\n", src_buf, target,
            exists ? " (link to existing)" : " (new page)");
