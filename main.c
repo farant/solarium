@@ -5302,6 +5302,12 @@ static sol_u32 arrow_create(AppState *st, sol_u32 board, sol_u32 from, sol_u32 t
     scene_rel_add(&st->scene, h, "connects", to);
     scene_meta_set(&st->scene, h, "name", "arrow");
     scene_mesh_ref_set(&st->scene, h, "arrow");
+    {   /* inherit the board's active page so the arrow lands on the page you're
+           viewing, not the root (the law: anything pinned to a board must tag
+           active_page or it leaks to "/"). Read by handle = realloc-safe. */
+        const char *ap = scene_meta_get(&st->scene, board, "active_page");
+        scene_meta_set(&st->scene, h, "page", ap ? ap : "/");
+    }
     {
         SceneObject *ao = scene_get(&st->scene, h);
         if (ao) {
