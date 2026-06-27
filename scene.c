@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define SCENE_NO_INDEX ((sol_u32)-1)   /* "no object for this handle" sentinel */
+
 /* C89 has no strdup; the object owns copies of every string it's given. */
 static char *sol_strdup(const char *s) {
     size_t n = strlen(s) + 1;
@@ -22,6 +24,9 @@ void scene_init(Scene *s) {
     s->capacity = 0;
     s->next_handle = 1;       /* 0 reserved for "none" / root */
     s->active_ws[0] = '\0';
+    s->handle_index       = NULL;   /* O(1) scene_get map: lazily grown */
+    s->handle_index_cap   = 0;
+    s->handle_index_dirty = SOL_FALSE;
 }
 
 /* free every string + collection an object owns (symmetric with the setters) */
@@ -49,10 +54,41 @@ void scene_free(Scene *s) {
     s->objects = NULL;
     s->count = 0;
     s->capacity = 0;
+    free(s->handle_index);
+    s->handle_index       = NULL;
+    s->handle_index_cap   = 0;
+    s->handle_index_dirty = SOL_FALSE;
+}
+
+/* Ensure handle_index can address handles in [0, cap_needed), filling new slots
+   with SCENE_NO_INDEX. On OOM, marks the map dirty and returns 0 so the caller
+   skips the incremental write (scene_get then falls back to a linear scan). */
+static int scene_index_reserve(Scene *s, sol_u32 cap_needed) {
+    sol_u32  ncap, k;
+    sol_u32 *ni;
+    if (cap_needed <= s->handle_index_cap) return 1;
+    ncap = s->handle_index_cap ? s->handle_index_cap : 16;
+    while (ncap < cap_needed) ncap *= 2;
+    ni = (sol_u32 *)realloc(s->handle_index, (size_t)ncap * sizeof *ni);
+    if (!ni) { s->handle_index_dirty = SOL_TRUE; return 0; }
+    for (k = s->handle_index_cap; k < ncap; k++) ni[k] = SCENE_NO_INDEX;
+    s->handle_index     = ni;
+    s->handle_index_cap = ncap;
+    return 1;
+}
+
+/* Rebuild handle_index from objects[] (O(N)); called lazily after a remove. */
+static void scene_reindex(Scene *s) {
+    sol_u32 i;
+    if (!scene_index_reserve(s, s->next_handle)) return;  /* OOM: stay dirty (scan path) */
+    for (i = 0; i < s->handle_index_cap; i++) s->handle_index[i] = SCENE_NO_INDEX;
+    for (i = 0; i < s->count; i++) s->handle_index[s->objects[i].handle] = i;
+    s->handle_index_dirty = SOL_FALSE;
 }
 
 sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 scale) {
     SceneObject *o;
+    sol_u32      h;
     if (s->count == s->capacity) {
         s->capacity = s->capacity ? s->capacity * 2 : 16;
         s->objects = realloc(s->objects, (size_t)s->capacity * sizeof(SceneObject));
@@ -81,6 +117,12 @@ sol_u32 scene_add(Scene *s, sol_u32 parent, Mesh mesh, vec3 pos, quat rot, vec3 
     o->overlay_glow = 1.0f;
     o->overlay_clip  = -1;                          /* -1 = no animation override */
     o->overlay_speed = 1.0f;
+    /* keep the O(1) map current: an append never shifts existing indices, so a
+       single write suffices (so bulk load stays O(N), never O(N^2)). If the map
+       is already dirty, skip — the next scene_get reindexes everything. */
+    h = o->handle;
+    if (!s->handle_index_dirty && scene_index_reserve(s, h + 1))
+        s->handle_index[h] = s->count - 1;
     return o->handle;
 }
 
@@ -99,18 +141,28 @@ void scene_remove(Scene *s, sol_u32 handle) {
                         (size_t)(s->count - i - 1) * sizeof(SceneObject));
             }
             s->count--;
+            s->handle_index_dirty = SOL_TRUE;   /* the memmove shifted every later index */
             return;
         }
     }
 }
 
-/* Linear scan: identity is decoupled from position, so we search by handle
-   rather than indexing. Returned pointer is valid until the next scene_add
+/* O(1) lookup via the handle->index map; falls back to a linear scan on OOM or
+   a handle beyond the map. Returned pointer is valid until the next scene_add
    (which may realloc the object array). */
 SceneObject *scene_get(Scene *s, sol_u32 handle) {
-    sol_u32 i;
-    for (i = 0; i < s->count; i++) {
-        if (s->objects[i].handle == handle) return &s->objects[i];
+    sol_u32 ix;
+    if (handle == 0) return NULL;                    /* 0 = none/root */
+    if (s->handle_index_dirty) scene_reindex(s);     /* O(N), once after a remove */
+    if (!s->handle_index_dirty && handle < s->handle_index_cap) {
+        ix = s->handle_index[handle];
+        if (ix == SCENE_NO_INDEX || ix >= s->count) return NULL;
+        return &s->objects[ix];
+    }
+    {   /* fallback: reindex OOM (still dirty) or a handle beyond the map */
+        sol_u32 i;
+        for (i = 0; i < s->count; i++)
+            if (s->objects[i].handle == handle) return &s->objects[i];
     }
     return NULL;
 }

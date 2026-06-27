@@ -97,6 +97,14 @@ typedef struct {
     char     active_ws[SOL_WS_NAME_CAP];  /* runtime view filter: the workspace
                           currently shown; "" = unfiltered (show all). NEVER
                           serialized — reset on load, set by the app. */
+    /* handle -> objects[] index, for O(1) scene_get (per-frame CPU spec, Part B).
+       Sized >= next_handle; SCENE_NO_INDEX = absent. scene_add keeps it current
+       (append never shifts); scene_remove sets _dirty (its memmove shifts every
+       later index) and the next scene_get rebuilds once. ONLY scene_add/
+       scene_remove reorder objects[] — a future in-place reorder must set _dirty. */
+    sol_u32 *handle_index;
+    sol_u32  handle_index_cap;
+    sol_bool handle_index_dirty;
 } Scene;
 
 void         scene_init(Scene *s);
