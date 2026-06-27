@@ -4354,6 +4354,7 @@ static float room_half_extent(Scene *s, sol_u32 anchor) {
 #define CURB_OVER      0.04f     /* walkway trim: how far the curb juts past the deck edge (m) */
 #define DOOR_LINE_T    0.05f     /* doorway wood casing: how far it stands proud into the opening (m) */
 #define WALL_EPS       0.01f     /* inward lift off the wall face (anti z-fight) */
+#define GABLE_NOTCH_EPS 1e-3f    /* gable-window sill/lintel sliver guard (band gate == reveal gate) */
 #define ROOM_FRAME_MAX 128
 #define FRAME_COL_T  0.24f       /* corner column cross-section (m) */
 #define WOOD_TILE_M  1.0f        /* meters per wood texture-repeat along a beam */
@@ -4614,7 +4615,7 @@ static void emit_door_reveal(MeshBuilder *mbf, MeshBuilder *mbt, int wall,
 }
 
 /* push one gable-plane vertex: (s,y) -> 3D via bent_pt + offv, position UVs. */
-static sol_u32 g_push(MeshBuilder *mb, int rax, float ge, vec3 offv, vec3 n, float s, float y) {
+static sol_u32 gable_push(MeshBuilder *mb, int rax, float ge, vec3 offv, vec3 n, float s, float y) {
     vec3 p = vec3_add(bent_pt(rax, ge, s, y), offv);
     return mb_push_vertex(mb, p.x, p.y, p.z, n.x, n.y, n.z, s / WALL_TILE_M, y / WALL_TILE_M);
 }
@@ -4629,27 +4630,27 @@ static void gable_face_notched(MeshBuilder *mb, int rax, float ge, vec3 offv, ve
     float hwb   = sh * (ridge_y - yb) / spanH;
     float hwt   = sh * (ridge_y - yt) / spanH;
     sol_u32 a, b, c, d;
-    if (yb > hwall + 1e-4f) {
-        a = g_push(mb,rax,ge,offv,n, -sh,  hwall);
-        b = g_push(mb,rax,ge,offv,n,  sh,  hwall);
-        c = g_push(mb,rax,ge,offv,n,  hwb, yb);
-        d = g_push(mb,rax,ge,offv,n, -hwb, yb);
+    if (yb > hwall + GABLE_NOTCH_EPS) {
+        a = gable_push(mb,rax,ge,offv,n, -sh,  hwall);
+        b = gable_push(mb,rax,ge,offv,n,  sh,  hwall);
+        c = gable_push(mb,rax,ge,offv,n,  hwb, yb);
+        d = gable_push(mb,rax,ge,offv,n, -hwb, yb);
         mb_push_triangle(mb,a,b,c); mb_push_triangle(mb,a,c,d);
     }
-    a = g_push(mb,rax,ge,offv,n, -hwb, yb);
-    b = g_push(mb,rax,ge,offv,n,  s0,  yb);
-    c = g_push(mb,rax,ge,offv,n,  s0,  yt);
-    d = g_push(mb,rax,ge,offv,n, -hwt, yt);
+    a = gable_push(mb,rax,ge,offv,n, -hwb, yb);
+    b = gable_push(mb,rax,ge,offv,n,  s0,  yb);
+    c = gable_push(mb,rax,ge,offv,n,  s0,  yt);
+    d = gable_push(mb,rax,ge,offv,n, -hwt, yt);
     mb_push_triangle(mb,a,b,c); mb_push_triangle(mb,a,c,d);
-    a = g_push(mb,rax,ge,offv,n,  s1,  yb);
-    b = g_push(mb,rax,ge,offv,n,  hwb, yb);
-    c = g_push(mb,rax,ge,offv,n,  hwt, yt);
-    d = g_push(mb,rax,ge,offv,n,  s1,  yt);
+    a = gable_push(mb,rax,ge,offv,n,  s1,  yb);
+    b = gable_push(mb,rax,ge,offv,n,  hwb, yb);
+    c = gable_push(mb,rax,ge,offv,n,  hwt, yt);
+    d = gable_push(mb,rax,ge,offv,n,  s1,  yt);
     mb_push_triangle(mb,a,b,c); mb_push_triangle(mb,a,c,d);
-    if (yt < ridge_y - 1e-4f) {
-        a = g_push(mb,rax,ge,offv,n, -hwt, yt);
-        b = g_push(mb,rax,ge,offv,n,  hwt, yt);
-        c = g_push(mb,rax,ge,offv,n,  0.0f, ridge_y);
+    if (yt < ridge_y - GABLE_NOTCH_EPS) {
+        a = gable_push(mb,rax,ge,offv,n, -hwt, yt);
+        b = gable_push(mb,rax,ge,offv,n,  hwt, yt);
+        c = gable_push(mb,rax,ge,offv,n,  0.0f, ridge_y);
         mb_push_triangle(mb,a,b,c);
     }
 }
@@ -4661,39 +4662,15 @@ static void gable_face_notched(MeshBuilder *mb, int rax, float ge, vec3 offv, ve
 static void gable_notch_reveal(MeshBuilder *mb, int rax, float ge, vec3 off,
                                float s0, float s1, float yb, float yt, int has_bottom) {
     vec3 su = rax ? vec3_make(0.0f,0.0f,1.0f) : vec3_make(1.0f,0.0f,0.0f);  /* +s direction */
-    { vec3 n = su;                              /* left wall s=s0 (faces +s) */
-      vec3 ia=bent_pt(rax,ge,s0,yb), ib=bent_pt(rax,ge,s0,yt);
-      vec3 oa=vec3_add(ia,off), ob=vec3_add(ib,off); sol_u32 v0,v1,v2,v3;
-      v0=mb_push_vertex(mb,ia.x,ia.y,ia.z,n.x,n.y,n.z,0.0f,0.0f);
-      v1=mb_push_vertex(mb,ib.x,ib.y,ib.z,n.x,n.y,n.z,1.0f,0.0f);
-      v2=mb_push_vertex(mb,ob.x,ob.y,ob.z,n.x,n.y,n.z,1.0f,1.0f);
-      v3=mb_push_vertex(mb,oa.x,oa.y,oa.z,n.x,n.y,n.z,0.0f,1.0f);
-      mb_push_triangle(mb,v0,v1,v2); mb_push_triangle(mb,v0,v2,v3); }
-    { vec3 n = vec3_scale(su,-1.0f);            /* right wall s=s1 (faces -s) */
-      vec3 ia=bent_pt(rax,ge,s1,yt), ib=bent_pt(rax,ge,s1,yb);
-      vec3 oa=vec3_add(ia,off), ob=vec3_add(ib,off); sol_u32 v0,v1,v2,v3;
-      v0=mb_push_vertex(mb,ia.x,ia.y,ia.z,n.x,n.y,n.z,0.0f,0.0f);
-      v1=mb_push_vertex(mb,ib.x,ib.y,ib.z,n.x,n.y,n.z,1.0f,0.0f);
-      v2=mb_push_vertex(mb,ob.x,ob.y,ob.z,n.x,n.y,n.z,1.0f,1.0f);
-      v3=mb_push_vertex(mb,oa.x,oa.y,oa.z,n.x,n.y,n.z,0.0f,1.0f);
-      mb_push_triangle(mb,v0,v1,v2); mb_push_triangle(mb,v0,v2,v3); }
-    { vec3 n = vec3_make(0.0f,-1.0f,0.0f);      /* top wall y=yt (faces -y) */
-      vec3 ia=bent_pt(rax,ge,s0,yt), ib=bent_pt(rax,ge,s1,yt);
-      vec3 oa=vec3_add(ia,off), ob=vec3_add(ib,off); sol_u32 v0,v1,v2,v3;
-      v0=mb_push_vertex(mb,ia.x,ia.y,ia.z,n.x,n.y,n.z,0.0f,0.0f);
-      v1=mb_push_vertex(mb,ib.x,ib.y,ib.z,n.x,n.y,n.z,1.0f,0.0f);
-      v2=mb_push_vertex(mb,ob.x,ob.y,ob.z,n.x,n.y,n.z,1.0f,1.0f);
-      v3=mb_push_vertex(mb,oa.x,oa.y,oa.z,n.x,n.y,n.z,0.0f,1.0f);
-      mb_push_triangle(mb,v0,v1,v2); mb_push_triangle(mb,v0,v2,v3); }
-    if (has_bottom) {                           /* bottom wall y=yb (faces +y) */
-      vec3 n = vec3_make(0.0f,1.0f,0.0f);
-      vec3 ia=bent_pt(rax,ge,s1,yb), ib=bent_pt(rax,ge,s0,yb);
-      vec3 oa=vec3_add(ia,off), ob=vec3_add(ib,off); sol_u32 v0,v1,v2,v3;
-      v0=mb_push_vertex(mb,ia.x,ia.y,ia.z,n.x,n.y,n.z,0.0f,0.0f);
-      v1=mb_push_vertex(mb,ib.x,ib.y,ib.z,n.x,n.y,n.z,1.0f,0.0f);
-      v2=mb_push_vertex(mb,ob.x,ob.y,ob.z,n.x,n.y,n.z,1.0f,1.0f);
-      v3=mb_push_vertex(mb,oa.x,oa.y,oa.z,n.x,n.y,n.z,0.0f,1.0f);
-      mb_push_triangle(mb,v0,v1,v2); mb_push_triangle(mb,v0,v2,v3); }
+    { vec3 ia = bent_pt(rax,ge,s0,yb), ib = bent_pt(rax,ge,s0,yt);          /* left s=s0 (faces +s) */
+      frame_quad(mb, ia, ib, vec3_add(ib,off), vec3_add(ia,off), su, 0.0f,0.0f, 1.0f,1.0f); }
+    { vec3 ia = bent_pt(rax,ge,s1,yt), ib = bent_pt(rax,ge,s1,yb);          /* right s=s1 (faces -s) */
+      frame_quad(mb, ia, ib, vec3_add(ib,off), vec3_add(ia,off), vec3_scale(su,-1.0f), 0.0f,0.0f, 1.0f,1.0f); }
+    { vec3 ia = bent_pt(rax,ge,s0,yt), ib = bent_pt(rax,ge,s1,yt);          /* top y=yt (faces -y) */
+      frame_quad(mb, ia, ib, vec3_add(ib,off), vec3_add(ia,off), vec3_make(0.0f,-1.0f,0.0f), 0.0f,0.0f, 1.0f,1.0f); }
+    if (has_bottom) {                                                       /* bottom y=yb (faces +y) */
+      vec3 ia = bent_pt(rax,ge,s1,yb), ib = bent_pt(rax,ge,s0,yb);
+      frame_quad(mb, ia, ib, vec3_add(ib,off), vec3_add(ia,off), vec3_make(0.0f,1.0f,0.0f), 0.0f,0.0f, 1.0f,1.0f); }
 }
 
 /* build a RoomFrame (wall + timber) for a room shell from its openings and
@@ -4826,7 +4803,7 @@ static void room_frame_build(SceneObject *shell, const RoomOpening *ops, int no)
                                        sh, h, ridge_y, s0, s1, yb, yt);
                     gable_face_notched(&mb, rax, ge, off, nout,
                                        sh, h, ridge_y, s0, s1, yb, yt);
-                    gable_notch_reveal(&mb, rax, ge, off, s0, s1, yb, yt, yb > h + 1e-3f);
+                    gable_notch_reveal(&mb, rax, ge, off, s0, s1, yb, yt, yb > h + GABLE_NOTCH_EPS);
                 } else {
                     gable_tri(&mb, eL, eR, ap, nin,            /* inner face (toward the hall) */
                               -sh / WALL_TILE_M, h / WALL_TILE_M,
