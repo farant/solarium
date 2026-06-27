@@ -130,3 +130,46 @@ int caret_slot_nearest_x(const CaretField *cf, int line, float goal_x) {
     }
     return best;
 }
+
+static int caret_class(unsigned char c) {
+    if (c == ' ' || c == '\t' || c == '\n') return 0;          /* space */
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_' || c >= 0x80u) return 1;  /* word */
+    return 2;                                                  /* other (punct) */
+}
+
+void caret_word_at(const char *src, int off, int *start, int *end) {
+    int len = 0, cls, s, e;
+    while (src[len] != '\0') len++;
+    if (off < 0) off = 0;
+    if (off > len) off = len;
+    if (off >= len) {                       /* end of text: take the run ending here */
+        if (len == 0) { *start = 0; *end = 0; return; }
+        cls = caret_class((unsigned char)src[len - 1]);
+        s = len;
+        while (s > 0 && caret_class((unsigned char)src[s - 1]) == cls) s--;
+        *start = s; *end = len; return;
+    }
+    cls = caret_class((unsigned char)src[off]);
+    s = off; while (s > 0   && caret_class((unsigned char)src[s - 1]) == cls) s--;
+    e = off; while (e < len && caret_class((unsigned char)src[e])     == cls) e++;
+    *start = s; *end = e;
+}
+
+int caret_sel_spans(const CaretField *cf, int lo, int hi, CaretSpan *out, int cap) {
+    int n = 0, slo, shi, llo, lhi, li;
+    if (lo >= hi) return 0;
+    slo = caret_slot_for_offset(cf, lo);
+    shi = caret_slot_for_offset(cf, hi);
+    if (slo < 0 || shi < 0) return 0;
+    llo = caret_line_of_slot(cf, slo);
+    lhi = caret_line_of_slot(cf, shi);
+    for (li = llo; li <= lhi && n < cap; li++) {
+        int   last = cf->lines[li].slot0 + cf->lines[li].nslots - 1;
+        float x0   = (li == llo) ? cf->slots[slo].x : 0.0f;
+        float x1   = (li == lhi) ? cf->slots[shi].x : cf->slots[last].x;
+        out[n].line = li; out[n].x0 = x0; out[n].x1 = x1;
+        n++;
+    }
+    return n;
+}

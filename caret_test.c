@@ -142,6 +142,93 @@ static void test_field_trailing_space(void) {
     CHECK(caret_slot_for_offset(&cf, 3) == 3, "field trailing-space: offset 3 -> the trailing-space slot");
 }
 
+static void test_word_at(void) {
+    int s = 0, e = 0;
+    caret_word_at("the quick fox", 5, &s, &e);     /* inside "quick" (4..9) */
+    CHECK(s == 4 && e == 9, "word_at: mid word -> quick");
+    caret_word_at("the quick fox", 0, &s, &e);
+    CHECK(s == 0 && e == 3, "word_at: start -> the");
+    caret_word_at("the quick fox", 13, &s, &e);    /* off == len -> last word */
+    CHECK(s == 10 && e == 13, "word_at: end -> fox");
+    caret_word_at("the quick fox", 3, &s, &e);     /* on the space */
+    CHECK(s == 3 && e == 4, "word_at: on a space -> the space run");
+    caret_word_at("a..b", 1, &s, &e);              /* on punctuation run ".." */
+    CHECK(s == 1 && e == 3, "word_at: punctuation run");
+    caret_word_at("\xC3\xA9z", 0, &s, &e);         /* multibyte word "éz" */
+    CHECK(s == 0 && e == 3, "word_at: multibyte stays whole");
+    caret_word_at("", 0, &s, &e);
+    CHECK(s == 0 && e == 0, "word_at: empty");
+    caret_word_at("\xC3\xA9.", 0, &s, &e);          /* é then '.' */
+    CHECK(s == 0 && e == 2, "word_at: multibyte word stops at punctuation");
+}
+
+static void test_sel_spans(void) {
+    CaretField cf;
+    CaretSpan  sp[8];
+    int   n;
+    int   map[CARET_MAX_SLOTS];
+    float adv[CARET_MAX_SLOTS];
+    int   wlen = caret_reconcile("ab cd\nef", "ab cd\nef", map, CARET_MAX_SLOTS);
+    {   /* unit advance per lead byte, 0 for '\n' */
+        int i = 0;
+        while (i < wlen) {
+            int k = caret_cplen((unsigned char)"ab cd\nef"[i]);
+            adv[i] = ("ab cd\nef"[i] == '\n') ? 0.0f : 1.0f;
+            for (++i; k > 1 && i < wlen; k--, i++) adv[i] = 0.0f;
+        }
+    }
+    caret_field_build("ab cd\nef", "ab cd\nef", map, adv, wlen, 1.0f, 1.0f, &cf);
+    n = caret_sel_spans(&cf, 0, 2, sp, 8);         /* "ab" on line 0 */
+    CHECK(n == 1 && sp[0].line == 0 && sp[0].x0 == 0.0f && sp[0].x1 == 2.0f, "sel_spans: single line");
+    n = caret_sel_spans(&cf, 1, 7, sp, 8);         /* span across 2 lines */
+    CHECK(n == 2, "sel_spans: two lines -> two spans");
+    CHECK(sp[0].line == 0 && sp[0].x0 == 1.0f, "sel_spans: line0 starts at lo.x");
+    CHECK(sp[1].line == 1 && sp[1].x0 == 0.0f, "sel_spans: line1 starts at 0");
+    CHECK(sp[0].x1 == 5.0f, "sel_spans: line0 ends at line's last-slot x");
+    CHECK(sp[1].x1 == 1.0f, "sel_spans: line1 ends at hi.x");
+    n = caret_sel_spans(&cf, 3, 3, sp, 8);         /* empty */
+    CHECK(n == 0, "sel_spans: empty range -> 0");
+}
+
+static void test_sel_spans_3line(void) {
+    CaretField cf;
+    CaretSpan  sp[8];
+    int   map[CARET_MAX_SLOTS];
+    float adv[CARET_MAX_SLOTS];
+    int   n, wlen = caret_reconcile("ab\ncd\nef", "ab\ncd\nef", map, CARET_MAX_SLOTS);
+    {   int i = 0;
+        while (i < wlen) {
+            int k = caret_cplen((unsigned char)"ab\ncd\nef"[i]);
+            adv[i] = ("ab\ncd\nef"[i] == '\n') ? 0.0f : 1.0f;
+            for (++i; k > 1 && i < wlen; k--, i++) adv[i] = 0.0f;
+        }
+    }
+    caret_field_build("ab\ncd\nef", "ab\ncd\nef", map, adv, wlen, 1.0f, 1.0f, &cf);
+    n = caret_sel_spans(&cf, 1, 7, sp, 8);          /* line0 b.. , line1 full, line2 ..e */
+    CHECK(n == 3, "sel_spans 3line: three spans");
+    CHECK(sp[1].line == 1 && sp[1].x0 == 0.0f && sp[1].x1 == 2.0f, "sel_spans 3line: middle line full width");
+    CHECK(sp[2].line == 2 && sp[2].x0 == 0.0f && sp[2].x1 == 1.0f, "sel_spans 3line: last line 0->hi.x");
+}
+
+static void test_sel_spans_to_linestart(void) {
+    CaretField cf;
+    CaretSpan  sp[8];
+    int   map[CARET_MAX_SLOTS];
+    float adv[CARET_MAX_SLOTS];
+    int   n, wlen = caret_reconcile("ab\ncd", "ab\ncd", map, CARET_MAX_SLOTS);
+    {   int i = 0;
+        while (i < wlen) {
+            int k = caret_cplen((unsigned char)"ab\ncd"[i]);
+            adv[i] = ("ab\ncd"[i] == '\n') ? 0.0f : 1.0f;
+            for (++i; k > 1 && i < wlen; k--, i++) adv[i] = 0.0f;
+        }
+    }
+    caret_field_build("ab\ncd", "ab\ncd", map, adv, wlen, 1.0f, 1.0f, &cf);
+    n = caret_sel_spans(&cf, 0, 3, sp, 8);          /* selects "ab\n": line1 span is zero-width */
+    CHECK(n == 2, "sel_spans to-linestart: two spans");
+    CHECK(sp[1].x0 == 0.0f && sp[1].x1 == 0.0f, "sel_spans to-linestart: last span zero-width");
+}
+
 int main(void) {
     test_cplen();
     test_reconcile_plain();
@@ -154,6 +241,10 @@ int main(void) {
     test_field_multibyte();
     test_field_trailing_nl();
     test_field_trailing_space();
+    test_word_at();
+    test_sel_spans();
+    test_sel_spans_3line();
+    test_sel_spans_to_linestart();
     if (fails == 0) printf("caret_test: all passed\n");
     return fails ? 1 : 0;
 }

@@ -41,4 +41,15 @@ int caret_slot_for_offset(const CaretField *cf, int cursor);            /* slot 
 int caret_line_of_slot(const CaretField *cf, int slot);                 /* slot -> visual line */
 int caret_slot_nearest_x(const CaretField *cf, int line, float goal_x); /* nearest .x on `line`; -1 if line OOB */
 
+/* the maximal run of one class (word [A-Za-z0-9_ or >=0x80] / space / other) around
+   byte `off` in `src`; off clamped to [0,len]; at end-of-text takes the run ending there. */
+void caret_word_at(const char *src, int off, int *start, int *end);
+
+typedef struct { int line; float x0, x1; } CaretSpan;   /* a selection rect on one visual line */
+
+/* per-visual-line highlight rects for the selection [lo,hi). First line lo.x->line end,
+   middle lines 0->line end, last line 0->hi.x (single line: lo.x->hi.x). 0 spans if lo>=hi.
+   Returns the span count (<= cap). */
+int caret_sel_spans(const CaretField *cf, int lo, int hi, CaretSpan *out, int cap);
+
 #endif
