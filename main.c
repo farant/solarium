@@ -2849,6 +2849,7 @@ typedef struct AppState {
     int         edit_len;
     int         edit_cursor;      /* byte offset into edit_buf: the caret */
     float       edit_goal_x;      /* remembered note-local x for Up/Down */
+    int         edit_sel_anchor;  /* selection's fixed end; span = [min,max) with edit_cursor */
     Mesh        caret_mesh;       /* unit caret quad; built once on first use */
     Palette     palette;           /* command palette state (palette.h) */
     /* the reader (item 9): VIEW state, never scene state — the open book
@@ -15658,13 +15659,50 @@ static void render(AppState *state) {
                keystroke, so this renders the typing live. */
             if (o->kind == KIND_NOTE) {
                 const char *txt = scene_meta_get(&state->scene, o->handle, "text");
+                if (state->edit_handle == o->handle) {     /* selection highlight (behind ink) */
+                    float       bpx2m = note_text_size(&state->scene, o->handle) / lh;
+                    float       x0 = -cw * 0.5f + 2.0f * margin;
+                    float       y0 = ch - 2.0f * margin;
+                    const char *src = txt ? txt : "";
+                    CaretField  cf;
+                    caret_build(uf, src, bpx2m, usable, &cf);
+                    if (state->caret_mesh.index_count == 0) {
+                        MeshBuilder mb;
+                        mb_init(&mb);
+                        make_page(&mb, 1.0f, 1.0f);
+                        state->caret_mesh = mesh_from_builder(&mb);
+                        mb_free(&mb);
+                    }
+                    if (state->edit_cursor != state->edit_sel_anchor) {
+                        CaretSpan sp[CARET_MAX_LINES];
+                        int lo = state->edit_cursor < state->edit_sel_anchor
+                                     ? state->edit_cursor : state->edit_sel_anchor;
+                        int hi = state->edit_cursor > state->edit_sel_anchor
+                                     ? state->edit_cursor : state->edit_sel_anchor;
+                        int ns = caret_sel_spans(&cf, lo, hi, sp, CARET_MAX_LINES), si;
+                        Material hm = material_default();
+                        hm.base_color = vec3_make(0.30f, 0.45f, 0.85f);   /* soft blue */
+                        for (si = 0; si < ns; si++) {
+                            float w  = sp[si].x1 - sp[si].x0;
+                            vec3  hp;
+                            mat4  hmodel;
+                            if (w <= 0.0f) continue;
+                            hp = vec3_make(x0 + sp[si].x0 + w * 0.5f,
+                                           y0 - (float)sp[si].line * cf.line_h - cf.line_h * 0.5f,
+                                           0.0004f);
+                            hmodel = mat4_mul(face, mat4_from_trs(hp, quat_identity(),
+                                              vec3_make(w, cf.line_h, 1.0f)));
+                            draw_glass(state, state->caret_mesh, hmodel, view, proj, eye, hm);
+                        }
+                    }
+                }
                 if (txt && txt[0]) {
                     float bpx2m = note_text_size(&state->scene, o->handle) / lh;
                     wtext_block(uf, vp, face, txt,
                                 -cw * 0.5f + 2.0f * margin, ch - 2.0f * margin,
                                 bpx2m, usable, ink_r, ink_g, ink_b);
                 }
-                if (state->edit_handle == o->handle) {     /* the moveable caret */
+                if (state->edit_handle == o->handle) {     /* the caret quad, on top */
                     float       bpx2m = note_text_size(&state->scene, o->handle) / lh;
                     float       x0 = -cw * 0.5f + 2.0f * margin;
                     float       y0 = ch - 2.0f * margin;
@@ -15675,13 +15713,6 @@ static void render(AppState *state) {
                     caret_build(uf, src, bpx2m, usable, &cf);
                     slot  = caret_slot_for_offset(&cf, state->edit_cursor);
                     linei = (slot >= 0) ? caret_line_of_slot(&cf, slot) : 0;
-                    if (state->caret_mesh.index_count == 0) {
-                        MeshBuilder mb;
-                        mb_init(&mb);
-                        make_page(&mb, 1.0f, 1.0f);
-                        state->caret_mesh = mesh_from_builder(&mb);
-                        mb_free(&mb);
-                    }
                     if (slot >= 0) {
                         float cw_caret = 0.006f;
                         float ctop = y0 - (float)linei * cf.line_h;
@@ -16490,6 +16521,16 @@ static void render(AppState *state) {
 
 /* ---- note editing (item 8 piece 5) ---- */
 
+static int edit_sel_lo(const AppState *st) {
+    return st->edit_cursor < st->edit_sel_anchor ? st->edit_cursor : st->edit_sel_anchor;
+}
+static int edit_sel_hi(const AppState *st) {
+    return st->edit_cursor > st->edit_sel_anchor ? st->edit_cursor : st->edit_sel_anchor;
+}
+static int edit_has_sel(const AppState *st) {
+    return st->edit_cursor != st->edit_sel_anchor;
+}
+
 /* Build the note's caret field: wrap exactly as the renderer does, recover
    source offsets, gather per-char advances from the font, assemble (pure). */
 static int caret_build(const Font *f, const char *src, float px2m, float wrap_w,
@@ -16552,6 +16593,22 @@ static void caret_refresh_goal(AppState *st) {
     st->edit_goal_x = (slot >= 0) ? cf.slots[slot].x : 0.0f;
 }
 
+/* remove the current selection [lo,hi) and collapse; mirror to meta + autosize.
+   No-op when there's no selection. */
+static void selection_delete(AppState *st) {
+    int lo, hi;
+    if (!edit_has_sel(st)) return;
+    lo = edit_sel_lo(st);
+    hi = edit_sel_hi(st);
+    memmove(st->edit_buf + lo, st->edit_buf + hi, (size_t)(st->edit_len - hi));
+    st->edit_len -= (hi - lo);
+    st->edit_cursor = st->edit_sel_anchor = lo;
+    st->edit_buf[st->edit_len] = '\0';
+    scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+    note_autosize(st, st->edit_handle);
+    caret_refresh_goal(st);
+}
+
 /* In board view, if the click ray hits the note being edited, set edit_cursor to
    the nearest caret slot and return 1; otherwise return 0 so the caller blurs. */
 static int caret_click_place(AppState *st, GLFWwindow *w) {
@@ -16594,7 +16651,7 @@ static int caret_click_place(AppState *st, GLFWwindow *w) {
     if (line >= cf.line_count) line = cf.line_count - 1;
     slot = caret_slot_nearest_x(&cf, line, lx - x0);
     if (slot >= 0) {
-        st->edit_cursor = cf.slots[slot].src;
+        st->edit_cursor = st->edit_sel_anchor = cf.slots[slot].src;   /* a click clears the selection */
         st->edit_goal_x = lx - x0;
     }
     return 1;
@@ -16610,6 +16667,7 @@ static void note_edit_begin(AppState *st, sol_u32 handle) {
     st->edit_len    = (int)n;
     st->edit_handle = handle;
     st->edit_cursor = st->edit_len;    /* caret at the end, matching today's feel */
+    st->edit_sel_anchor = st->edit_cursor;   /* no selection on open */
     st->edit_goal_x = 0.0f;
     printf("editing note — type away; Enter = newline, Esc or click = done\n");
 }
@@ -16669,13 +16727,16 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     }
     if (st->edit_handle == 0) return;
     n = utf8_encode(cp, enc);
-    if (n <= 0 || st->edit_len + n >= EDIT_BUF_CAP) return;
+    if (n <= 0) return;
+    selection_delete(st);                                   /* type-over a selection */
+    if (st->edit_len + n >= EDIT_BUF_CAP) return;
     memmove(st->edit_buf + st->edit_cursor + n,
             st->edit_buf + st->edit_cursor,
             (size_t)(st->edit_len - st->edit_cursor));
     memcpy(st->edit_buf + st->edit_cursor, enc, (size_t)n);
     st->edit_len    += n;
     st->edit_cursor += n;
+    st->edit_sel_anchor = st->edit_cursor;
     st->edit_buf[st->edit_len] = '\0';
     scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
     note_autosize(st, st->edit_handle);
@@ -16776,69 +16837,96 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             note_edit_end(st);
-        } else if (key == GLFW_KEY_BACKSPACE && st->edit_cursor > 0) {
-            int e = st->edit_cursor, s = e - 1;   /* delete the codepoint before the caret */
-            while (s > 0 && ((unsigned char)st->edit_buf[s] & 0xC0u) == 0x80u) s--;
-            memmove(st->edit_buf + s, st->edit_buf + e,
-                    (size_t)(st->edit_len - e));
-            st->edit_len   -= (e - s);
-            st->edit_cursor = s;
-            st->edit_buf[st->edit_len] = '\0';
-            scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
-            note_autosize(st, st->edit_handle);
-            caret_refresh_goal(st);
-        } else if (key == GLFW_KEY_DELETE && st->edit_cursor < st->edit_len) {
-            int s = st->edit_cursor, e = s + 1;   /* delete the codepoint after the caret */
-            while (e < st->edit_len && ((unsigned char)st->edit_buf[e] & 0xC0u) == 0x80u) e++;
-            memmove(st->edit_buf + s, st->edit_buf + e,
-                    (size_t)(st->edit_len - e));
-            st->edit_len -= (e - s);
-            st->edit_buf[st->edit_len] = '\0';
-            scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
-            note_autosize(st, st->edit_handle);
-            caret_refresh_goal(st);
-        } else if (key == GLFW_KEY_ENTER && st->edit_len + 1 < EDIT_BUF_CAP) {
-            memmove(st->edit_buf + st->edit_cursor + 1,
-                    st->edit_buf + st->edit_cursor,
-                    (size_t)(st->edit_len - st->edit_cursor));
-            st->edit_buf[st->edit_cursor] = '\n';
-            st->edit_len++;
-            st->edit_cursor++;
-            st->edit_buf[st->edit_len] = '\0';
-            scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
-            note_autosize(st, st->edit_handle);
-            caret_refresh_goal(st);
-        } else if (key == GLFW_KEY_LEFT && st->edit_cursor > 0) {
-            st->edit_cursor--;
-            while (st->edit_cursor > 0 &&
-                   ((unsigned char)st->edit_buf[st->edit_cursor] & 0xC0u) == 0x80u)
-                st->edit_cursor--;
-            caret_refresh_goal(st);
-        } else if (key == GLFW_KEY_RIGHT && st->edit_cursor < st->edit_len) {
-            st->edit_cursor++;
-            while (st->edit_cursor < st->edit_len &&
-                   ((unsigned char)st->edit_buf[st->edit_cursor] & 0xC0u) == 0x80u)
+        } else if (key == GLFW_KEY_BACKSPACE && (edit_has_sel(st) || st->edit_cursor > 0)) {
+            if (edit_has_sel(st)) { selection_delete(st); }
+            else {
+                int e = st->edit_cursor, s = e - 1;
+                while (s > 0 && ((unsigned char)st->edit_buf[s] & 0xC0u) == 0x80u) s--;
+                memmove(st->edit_buf + s, st->edit_buf + e, (size_t)(st->edit_len - e));
+                st->edit_len   -= (e - s);
+                st->edit_cursor = st->edit_sel_anchor = s;
+                st->edit_buf[st->edit_len] = '\0';
+                scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+                note_autosize(st, st->edit_handle);
+                caret_refresh_goal(st);
+            }
+        } else if (key == GLFW_KEY_DELETE && (edit_has_sel(st) || st->edit_cursor < st->edit_len)) {
+            if (edit_has_sel(st)) { selection_delete(st); }
+            else {
+                int s = st->edit_cursor, e = s + 1;
+                while (e < st->edit_len && ((unsigned char)st->edit_buf[e] & 0xC0u) == 0x80u) e++;
+                memmove(st->edit_buf + s, st->edit_buf + e, (size_t)(st->edit_len - e));
+                st->edit_len -= (e - s);
+                st->edit_sel_anchor = st->edit_cursor;
+                st->edit_buf[st->edit_len] = '\0';
+                scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+                note_autosize(st, st->edit_handle);
+                caret_refresh_goal(st);
+            }
+        } else if (key == GLFW_KEY_ENTER) {
+            selection_delete(st);                            /* type-over with a newline */
+            if (st->edit_len + 1 < EDIT_BUF_CAP) {
+                memmove(st->edit_buf + st->edit_cursor + 1,
+                        st->edit_buf + st->edit_cursor,
+                        (size_t)(st->edit_len - st->edit_cursor));
+                st->edit_buf[st->edit_cursor] = '\n';
+                st->edit_len++;
                 st->edit_cursor++;
+                st->edit_sel_anchor = st->edit_cursor;
+                st->edit_buf[st->edit_len] = '\0';
+                scene_meta_set(&st->scene, st->edit_handle, "text", st->edit_buf);
+                note_autosize(st, st->edit_handle);
+                caret_refresh_goal(st);
+            }
+        } else if (key == GLFW_KEY_LEFT) {
+            int shift = (mods & GLFW_MOD_SHIFT) != 0;
+            if (!shift && edit_has_sel(st)) {
+                st->edit_cursor = st->edit_sel_anchor = edit_sel_lo(st);
+            } else if (st->edit_cursor > 0) {
+                st->edit_cursor--;
+                while (st->edit_cursor > 0 &&
+                       ((unsigned char)st->edit_buf[st->edit_cursor] & 0xC0u) == 0x80u)
+                    st->edit_cursor--;
+                if (!shift) st->edit_sel_anchor = st->edit_cursor;
+            }
+            caret_refresh_goal(st);
+        } else if (key == GLFW_KEY_RIGHT) {
+            int shift = (mods & GLFW_MOD_SHIFT) != 0;
+            if (!shift && edit_has_sel(st)) {
+                st->edit_cursor = st->edit_sel_anchor = edit_sel_hi(st);
+            } else if (st->edit_cursor < st->edit_len) {
+                st->edit_cursor++;
+                while (st->edit_cursor < st->edit_len &&
+                       ((unsigned char)st->edit_buf[st->edit_cursor] & 0xC0u) == 0x80u)
+                    st->edit_cursor++;
+                if (!shift) st->edit_sel_anchor = st->edit_cursor;
+            }
             caret_refresh_goal(st);
         } else if (key == GLFW_KEY_UP || key == GLFW_KEY_DOWN) {
-            SceneObject *o = scene_get(&st->scene, st->edit_handle);
-            if (o && st->ui_font) {
-                float      lh     = font_line_height(st->ui_font);
-                float      cw     = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "w");
-                float      usable = cw - 3.0f * 0.025f;
-                float      bpx2m  = note_text_size(&st->scene, st->edit_handle) / lh;
-                CaretField cf;
-                int        slot, line, tgt;
-                caret_build(st->ui_font, st->edit_buf, bpx2m, usable, &cf);
-                slot = caret_slot_for_offset(&cf, st->edit_cursor);
-                line = (slot >= 0) ? caret_line_of_slot(&cf, slot) : 0;
-                if (key == GLFW_KEY_UP)   line = (line > 0) ? line - 1 : -1;
-                else                      line = (line + 1 < cf.line_count) ? line + 1 : -1;
-                if (line < 0) {
-                    st->edit_cursor = (key == GLFW_KEY_UP) ? 0 : st->edit_len;
-                } else {
-                    tgt = caret_slot_nearest_x(&cf, line, st->edit_goal_x);
-                    if (tgt >= 0) st->edit_cursor = cf.slots[tgt].src;
+            int shift = (mods & GLFW_MOD_SHIFT) != 0;
+            if (!shift && edit_has_sel(st)) {
+                st->edit_cursor = st->edit_sel_anchor =
+                    (key == GLFW_KEY_UP) ? edit_sel_lo(st) : edit_sel_hi(st);
+            } else {
+                SceneObject *o = scene_get(&st->scene, st->edit_handle);
+                if (o && st->ui_font) {
+                    float      lh     = font_line_height(st->ui_font);
+                    float      cw     = mesh_ref_param("card", o->mesh_params, o->mesh_param_count, "w");
+                    float      usable = cw - 3.0f * 0.025f;
+                    float      bpx2m  = note_text_size(&st->scene, st->edit_handle) / lh;
+                    CaretField cf;
+                    int        slot, line, tgt;
+                    caret_build(st->ui_font, st->edit_buf, bpx2m, usable, &cf);
+                    slot = caret_slot_for_offset(&cf, st->edit_cursor);
+                    line = (slot >= 0) ? caret_line_of_slot(&cf, slot) : 0;
+                    if (key == GLFW_KEY_UP)   line = (line > 0) ? line - 1 : -1;
+                    else                      line = (line + 1 < cf.line_count) ? line + 1 : -1;
+                    if (line < 0) st->edit_cursor = (key == GLFW_KEY_UP) ? 0 : st->edit_len;
+                    else {
+                        tgt = caret_slot_nearest_x(&cf, line, st->edit_goal_x);
+                        if (tgt >= 0) st->edit_cursor = cf.slots[tgt].src;
+                    }
+                    if (!shift) st->edit_sel_anchor = st->edit_cursor;
                 }
             }
         }
