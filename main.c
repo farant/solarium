@@ -2853,6 +2853,7 @@ typedef struct AppState {
     int         click_seq;        /* shared multi-click counter (1 single, 2 double, 3 triple) */
     sol_bool    edit_dragging;    /* a left-drag is selecting text in the edited note */
     Mesh        caret_mesh;       /* unit caret quad; built once on first use */
+    Mesh        folderbook_leaves_mesh; /* unit box for a folder book's white page block; built once */
     Palette     palette;           /* command palette state (palette.h) */
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
@@ -5476,6 +5477,7 @@ static void hdr_reload(AppState *st, const char *path);  /* the abbey key
                                           the watcher below) */
 static void apply_time_of_day(AppState *st);   /* P8 item 9: `-toggle's sky + sun */
 static void apply_kind_materials(Scene *s);    /* likewise */
+static void folderbook_materialize(Scene *s);  /* re-apply the leather cover (textures aren't serialized) */
 static int  rescan_mirrors(AppState *st);      /* likewise */
 static sol_bool load_palace(AppState *st);     /* likewise */
 static void world_rebuild(AppState *st);       /* workspace-switch re-derive; load_palace inlines its OWN tail */
@@ -8117,6 +8119,7 @@ static sol_u32 add_folder(AppState *st, sol_u32 board, const char *page,
         o->pos = board_pin_pos(&st->scene, board, h, blocal,
                                0.0f, -0.5f * p[1]);  /* center on the point */
     }
+    folderbook_materialize(&st->scene);   /* dress the new folder in leather (keeps its blue) */
     return h;
 }
 
@@ -12605,6 +12608,7 @@ static RhiTexture load_texture_linear(const char *path) {
 #define FLOOR_CACHE_MAX 32
 
 static Material g_floor_mat;      /* sandstone; albedo_tex.id == 0 => overlay disabled */
+static Material g_book_leather;   /* folder-book cover: red_leather grain, blue-tinted; normal_tex.id 0 => flat */
 static struct { float w, d; Mesh mesh; } g_floor_cache[FLOOR_CACHE_MAX];
 static int      g_floor_cache_n = 0;
 
@@ -12686,6 +12690,26 @@ static void oak_mat_init(void) {
         "oak_veneer/oak_veneer_01_diff_1k.png",
         "oak_veneer/oak_veneer_01_nor_gl_1k.png",
         "oak_veneer/oak_veneer_01_arm_1k.png");
+}
+
+/* The folder-book cover material: red_leather (PolyHaven CC0, normal/ARM only —
+   NO albedo map), so the COLOR rides base_color (folderbook_materialize sets the
+   per-folder blue). If the files are absent it stays flat (no textures) and the
+   folders fall back to the plain-blue look. */
+static void book_leather_mat_init(void) {
+    Material m = material_default();
+    m.normal_tex = load_texture_linear("red_leather/leather_red_02_nor_gl_1k.png");
+    if (m.normal_tex.id == 0) { g_book_leather = m; return; }   /* missing -> disabled (flat) */
+    m.mr_tex = load_texture_linear("red_leather/leather_red_02_arm_1k.png");  /* ARM: R=AO,G=rough,B=metal */
+    if (m.mr_tex.id != 0) {
+        m.ao_tex      = m.mr_tex;
+        m.metallic    = 1.0f;
+        m.roughness   = 1.0f;
+        m.ao_strength = 1.0f;
+    }
+    m.normal_scale = 1.0f;
+    /* base_color stays white here — the blue is applied per folder */
+    g_book_leather = m;
 }
 
 /* a w x d floor quad (XZ, +Y up) with meter-based tiling UVs, cached by size so a
@@ -13089,6 +13113,29 @@ static void apply_kind_materials(Scene *s) {
     }
 }
 
+/* Re-apply g_book_leather to every folder book's cover, keeping each folder's
+   own blue base_color. Needed on load/rebuild because texture handles aren't
+   serialized (scene_io keeps only the scalar PBR factors). apply_kind_materials
+   skips KIND_PLAIN, so it never touches folderbooks — this is their derive. */
+static void folderbook_materialize(Scene *s) {
+    sol_u32 i;
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        vec3         keep;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "folderbook") != 0) continue;
+        keep = o->material.base_color;               /* the per-folder blue shade */
+        o->material.albedo_tex   = g_book_leather.albedo_tex;   /* id 0 (no albedo map) */
+        o->material.normal_tex   = g_book_leather.normal_tex;
+        o->material.mr_tex       = g_book_leather.mr_tex;
+        o->material.ao_tex       = g_book_leather.ao_tex;
+        o->material.metallic     = g_book_leather.metallic;
+        o->material.roughness    = g_book_leather.roughness;
+        o->material.normal_scale = g_book_leather.normal_scale;
+        o->material.ao_strength  = g_book_leather.ao_strength;
+        o->material.base_color   = keep;             /* keep the blue */
+    }
+}
+
 /* Find the PROP (KIND_PLAIN) with this name. Names are not unique across
    kinds — the archive mirrors this very repo, so a FILE card named
    "sword.glb" stands two rooms from the sword itself. The first binder
@@ -13212,6 +13259,7 @@ static void world_rebuild(AppState *st) {
     meadow_rebuild(st);
     forest_rebuild(st);
     apply_kind_materials(&st->scene);
+    folderbook_materialize(&st->scene);   /* re-apply the leather covers */
     st->routes_last_t = 0.0;   /* the world changed (workspace switch / re-derive):
                                   drop the doorway-label route cache so it re-solves
                                   next frame, not flashing the old world's routes */
@@ -13329,6 +13377,7 @@ static sol_bool load_palace(AppState *st) {
     meadow_rebuild(st);                           /* and the grass */
     forest_rebuild(st);                           /* and the woods */
     apply_kind_materials(&st->scene);
+    folderbook_materialize(&st->scene);           /* re-apply the leather covers */
     st->routes_last_t = 0.0;   /* fresh world: re-solve doorway-label routes next frame */
     bind_runtime_handles(st);
     adopt_legacy_motion(st);         /* pre-component saves get their dance back */
@@ -13881,6 +13930,7 @@ static int init_scene(AppState *state) {
     stone_mat_init();   /* stone-wall room shell (veneers cover the rest) */
     plaster_mat_init(); /* painted-plaster whiteboard */
     oak_mat_init();     /* oak-veneer file/folder tablets */
+    book_leather_mat_init();   /* folder-book covers: red_leather, blue-tinted */
 
     /* THE PALACE REMEMBERS ITSELF (6e): an existing scene.stml IS the world —
        loaded and brought fully to life. The home scene builds only on first
@@ -15093,6 +15143,35 @@ static void render(AppState *state) {
                 draw_glass(state, o->mesh, model, view, proj, eye, dm);  /* cut: dimmed (Cmd+X) */
             else
                 draw_mesh(state, o->mesh, model, view, proj, eye, hl, dm);
+        }
+        /* a folder book's white page block: a unit cube scaled to the leaf
+           cavity, drawn right after its cover so it inherits the folder's
+           visibility + selection highlight. Geometry mirrors the leaf box
+           make_folderbook used to build (board=d*0.18, inset=h*0.05, lip=w*0.03). */
+        if (o->mesh_ref && strcmp(o->mesh_ref, "folderbook") == 0) {
+            float fw = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "w");
+            float fh = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "h");
+            float fd = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "d");
+            float fboard = fd * 0.18f, finset = fh * 0.05f, flip = fw * 0.03f;
+            float lw, lh2, ld;
+            if (fboard < 1e-4f) fboard = 1e-4f;       /* match make_folderbook */
+            lw  = fw - flip - fboard;
+            lh2 = fh - 2.0f * finset;
+            ld  = fd - 2.0f * fboard;
+            if (lw > 0.0f && lh2 > 0.0f && ld > 0.0f) {
+                Material pm = material_default();      /* plain white pages */
+                vec3     c  = vec3_make((fboard - flip) * 0.5f, fh * 0.5f, fd * 0.5f);
+                mat4     lm = mat4_mul(model, mat4_from_trs(c, quat_identity(),
+                                       vec3_make(lw, lh2, ld)));
+                if (state->folderbook_leaves_mesh.index_count == 0) {
+                    MeshBuilder mb;
+                    mb_init(&mb);
+                    make_box(&mb, 1.0f, 1.0f, 1.0f);  /* centered unit cube */
+                    state->folderbook_leaves_mesh = mesh_from_builder(&mb);
+                    mb_free(&mb);
+                }
+                draw_mesh(state, state->folderbook_leaves_mesh, lm, view, proj, eye, hl, pm);
+            }
         }
         state->draws_done++;                      /* == total until culling (P4 i2 p4) */
     }
@@ -17343,6 +17422,7 @@ int main(void) {
 
     plan_overlay_drop(&state);
     mesh_destroy(&state.caret_mesh);
+    mesh_destroy(&state.folderbook_leaves_mesh);
     font_destroy(state.mono_font);
     font_destroy(state.ui_font);
     wtext_shutdown();

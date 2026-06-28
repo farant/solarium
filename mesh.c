@@ -1123,12 +1123,11 @@ void make_book_block(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t,
 void make_folderbook(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 d, int bands) {
     sol_f32 hw    = w * 0.5f;
     sol_f32 board = d * 0.18f;      /* cover-board thickness in z */
-    sol_f32 inset = h * 0.05f;      /* page block inset from top/bottom/fore-edge */
-    sol_f32 lip   = w * 0.03f;      /* covers overhang the leaves at the fore-edge */
     int     k;
     if (board < 1e-4f) board = 1e-4f;
-    /* the leaf block: flush at the spine (left), inset elsewhere */
-    box_minmax(b, -hw + board, hw - lip, inset, h - inset, board, d - board);
+    /* the leaf block is render-derived (a white make_box scaled per folder in
+       the draw loop, matching board=d*0.18 / inset=h*0.05 / lip=w*0.03) so the
+       page-block stays white without needing its own material */
     /* back + front cover boards (full footprint) */
     box_minmax(b, -hw, hw, 0.0f, h, 0.0f, board);
     box_minmax(b, -hw, hw, 0.0f, h, d - board, d);

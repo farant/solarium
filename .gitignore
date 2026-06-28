@@ -43,6 +43,7 @@
 /stone_wall/
 /painted_plaster_wall/
 /oak_veneer/
+/red_leather/
 
 # Editor / tooling
 compile_commands.json
