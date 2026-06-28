@@ -9,7 +9,7 @@
 
 #define WTCACHE_CAP   512    /* entries; MUST be a power of two (open-addressed) */
 #define WTCACHE_PROBE 16     /* linear-probe + eviction window length */
-#define WTCACHE_TEXT  2048   /* stored pre-wrap key text; matches WT_WRAP_CAP */
+#define WTCACHE_TEXT  2048   /* stored key text; the caller's len MUST be < WTCACHE_TEXT (a NUL is appended) */
 
 typedef struct {
     sol_bool    used;

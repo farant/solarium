@@ -45,11 +45,11 @@ int main(void) {
         char keys[64][16];
         int  found = 0, n, want = WTCACHE_PROBE + 1;
         sol_u32 bucket0 = 0; sol_bool have_bucket = 0;
-        WtCache cc;
+        static WtCache cc;
         wtcache_init(&cc);
         for (n = 0; found < want && n < 100000; n++) {
             char t[16]; sol_u32 h; sol_u32 bk;
-            sprintf(t, "k%d", n);
+            snprintf(t, sizeof t, "k%d", n);
             h  = wtcache_hash(F, t, (int)strlen(t), 1.0f, 0.0f, 0.0f, 0.0f);
             bk = h & (WTCACHE_CAP - 1);
             if (!have_bucket) { bucket0 = bk; have_bucket = 1; }
@@ -80,6 +80,44 @@ int main(void) {
             CHECK(wtcache_find(&cc, F, keys[WTCACHE_PROBE],
                                (int)strlen(keys[WTCACHE_PROBE]),
                                1.0f, 0.0f, 0.0f, 0.0f, 200) >= 0);
+        }
+    }
+
+    /* 5) find() bumps recency: a touched entry survives eviction while a
+       colder neighbour in the same window is evicted instead. */
+    {
+        char keys[64][16];
+        int  found = 0, n, want = WTCACHE_PROBE + 1;
+        sol_u32 bucket0 = 0; sol_bool have_bucket = 0;
+        static WtCache cc2;
+        wtcache_init(&cc2);
+        for (n = 0; found < want && n < 100000; n++) {
+            char t[16]; sol_u32 h, bk;
+            snprintf(t, sizeof t, "m%d", n);
+            h  = wtcache_hash(F, t, (int)strlen(t), 1.0f, 0.0f, 0.0f, 0.0f);
+            bk = h & (WTCACHE_CAP - 1);
+            if (!have_bucket) { bucket0 = bk; have_bucket = 1; }
+            if (bk == bucket0) { strcpy(keys[found], t); found++; }
+        }
+        CHECK(found == want);
+        for (n = 0; n < WTCACHE_PROBE; n++) {              /* fill window, frames 10..25 */
+            int s = wtcache_claim(&cc2, F, keys[n], (int)strlen(keys[n]),
+                                  1.0f, 0.0f, 0.0f, 0.0f, 10 + n, &evicted);
+            wtcache_set(&cc2, s, buf(200u + (sol_u32)n), 1);
+        }
+        /* touch keys[0] (the would-be LRU) so it becomes the most recent */
+        CHECK(wtcache_find(&cc2, F, keys[0], (int)strlen(keys[0]),
+                           1.0f, 0.0f, 0.0f, 0.0f, 50) >= 0);
+        {   /* the next claim must now evict keys[1] (frame 11), NOT keys[0] */
+            int s = wtcache_claim(&cc2, F, keys[WTCACHE_PROBE],
+                                  (int)strlen(keys[WTCACHE_PROBE]),
+                                  1.0f, 0.0f, 0.0f, 0.0f, 60, &evicted);
+            wtcache_set(&cc2, s, buf(888u), 1);
+            CHECK(evicted.id == 201u);                     /* keys[1]'s buffer, not keys[0]'s 200 */
+            CHECK(wtcache_find(&cc2, F, keys[0], (int)strlen(keys[0]),
+                               1.0f, 0.0f, 0.0f, 0.0f, 70) >= 0);  /* protected */
+            CHECK(wtcache_find(&cc2, F, keys[1], (int)strlen(keys[1]),
+                               1.0f, 0.0f, 0.0f, 0.0f, 70) < 0);   /* evicted */
         }
     }
 

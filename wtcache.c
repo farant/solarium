@@ -3,6 +3,7 @@
    opaque payload. Single-threaded engine; no locking. */
 #include "wtcache.h"
 #include <string.h>
+#include <assert.h>
 
 void wtcache_init(WtCache *c) {
     memset(c, 0, sizeof *c);
@@ -19,6 +20,8 @@ static void fnv(sol_u32 *h, const void *p, size_t n) {
     }
 }
 
+/* Assumes canonical-bit finite floats; -0.0/NaN would just cause benign extra
+   misses (never a false hit), and the real inputs are finite positives. */
 sol_u32 wtcache_hash(const void *font, const char *text, int len,
                      float px2m, float wrap, float x, float top_y) {
     sol_u32 h = 2166136261u;
@@ -66,6 +69,7 @@ int wtcache_claim(WtCache *c, const void *font, const char *text, int len,
     int           i, slot = -1, best;
     WtCacheEntry *e;
     RhiBuffer     none;
+    assert(len >= 0 && len < WTCACHE_TEXT);  /* caller's contract: leaves room for the NUL */
     none.id = 0;
     if (evicted) *evicted = none;
 
