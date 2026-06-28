@@ -22,6 +22,17 @@ static struct {
    is single-threaded and blocks are drawn immediately */
 static float g_wt_verts[WT_MAX_GLYPHS * 6 * WT_VERT_FLOATS];
 
+/* diagnostic counters (#2): blocks that drew + buffer re-uploads this frame */
+static int g_wt_blocks  = 0;
+static int g_wt_uploads = 0;
+
+void wtext_stats_reset(void) { g_wt_blocks = 0; g_wt_uploads = 0; }
+
+void wtext_stats_get(int *blocks, int *uploads) {
+    if (blocks)  *blocks  = g_wt_blocks;
+    if (uploads) *uploads = g_wt_uploads;
+}
+
 #ifdef SOL_RHI_METAL
 
 static const char *WT_VERTEX_SRC =     /* item 10 stage (e): the MSL twin */
@@ -181,6 +192,8 @@ static void wt_emit(const Font *f, mat4 viewproj, mat4 model, const char *src,
         }
     }
     if (vc == 0) return;
+    g_wt_blocks++;                  /* a block that actually drew (diagnostic) */
+    g_wt_uploads++;                 /* one buffer re-upload per block (no cache yet) */
 
     rhi_update_buffer(g_wt.vbuffer, g_wt_verts,
                       (size_t)vc * WT_VERT_FLOATS * sizeof(sol_f32));

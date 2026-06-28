@@ -41,6 +41,19 @@ static const unsigned char *utf8_decode(const unsigned char *p, unsigned long *c
     return p + len + 1;
 }
 
+/* ------------------------------------------------- shaping counters (#2) */
+/* Diagnostic only: every text_shape call bumps these so the world-text
+   section can report its per-frame shaping load. Single-threaded engine. */
+static long g_ts_calls  = 0;
+static long g_ts_glyphs = 0;
+
+void text_shape_stats_reset(void) { g_ts_calls = 0; g_ts_glyphs = 0; }
+
+void text_shape_stats_get(long *calls, long *glyphs) {
+    if (calls)  *calls  = g_ts_calls;
+    if (glyphs) *glyphs = g_ts_glyphs;
+}
+
 /* ------------------------------------------------------------- the seam */
 int text_shape(const Font *f, const char *utf8, ShapedGlyph *out, int max) {
     const unsigned char *p = (const unsigned char *)utf8;
@@ -73,6 +86,8 @@ int text_shape(const Font *f, const char *utf8, ShapedGlyph *out, int max) {
         pen_x += g->advance;
         prev = gi;
     }
+    g_ts_calls++;
+    g_ts_glyphs += count;
     return count;
 }
 

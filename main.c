@@ -2655,6 +2655,9 @@ typedef struct AppState {
     float t_frame, t_cpu, t_update, t_shadow, t_spot_shadow, t_hdr, t_post, t_swap;
     float t_frame_gpu;              /* P8 item 1: whole-frame GPU ms (Metal); < 0 = n/a (GL) */
     int   draws_done, draws_total;  /* scene objects drawn / with geometry */
+    float t_text_ms;                /* P9 perf #2 measure: world-text section wall-time */
+    int   t_text_blocks, t_text_uploads;     /* wtext blocks drawn / buffer re-uploads */
+    long  t_text_shape_calls, t_text_shape_glyphs; /* text_shape calls / glyphs shaped per frame */
     /* the spatial index (P4 item 2): world AABBs of everything with
        geometry, build-or-refit on demand (ids compared each refresh —
        same set refits, changed set rebuilds). bvh_ids/boxes are the
@@ -14935,6 +14938,7 @@ static void render(AppState *state) {
     sol_u32 i;
     sol_u32 sel_root;
     double  rt0, rt1, rt2;
+    double  t_text0;                /* P9 perf #2 measure: world-text section start */
     unsigned char *vis;
 
     ensure_render_target(state, state->fb_width, state->fb_height);
@@ -15519,6 +15523,9 @@ static void render(AppState *state) {
        INK after the opaque geometry, still inside the HDR pass — it rides
        through ACES like everything else. Same atlas as the HUD; the SDF
        fwidth threshold keeps it crisp at any distance. */
+    text_shape_stats_reset();        /* P9 perf #2 measure: scope to this section */
+    wtext_stats_reset();
+    t_text0 = glfwGetTime();
     if (state->ui_font) {
         const Font *uf  = state->ui_font;
         const float lh  = font_line_height(uf);            /* px at base size */
@@ -15985,6 +15992,17 @@ static void render(AppState *state) {
             }
         }
     }
+    {   /* P9 perf #2 measure: snapshot the world-text section's cost */
+        int  tb, tu;
+        long tc, tg;
+        text_shape_stats_get(&tc, &tg);
+        wtext_stats_get(&tb, &tu);
+        state->t_text_shape_calls  = tc;
+        state->t_text_shape_glyphs = tg;
+        state->t_text_blocks       = tb;
+        state->t_text_uploads      = tu;
+        state->t_text_ms = (float)((glfwGetTime() - t_text0) * 1000.0);
+    }
 
     /* P9 item 2: stained glass — the church_glass + window_glass objects,
        translucent, drawn AFTER all opaque (tests their depth), back-to-front
@@ -16383,8 +16401,8 @@ static void render(AppState *state) {
        retired the window-title sprintf hack). ui_text positions BASELINES.
        ':' "Toggle stats card" hides it. */
     if (state->show_hud) {
-    ui_quad(8.0f * us, 8.0f * us, 340.0f * us, 190.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
-    ui_quad_outline(8.0f * us, 8.0f * us, 340.0f * us, 190.0f * us,
+    ui_quad(8.0f * us, 8.0f * us, 340.0f * us, 212.0f * us, 0.05f, 0.07f, 0.10f, 0.55f);
+    ui_quad_outline(8.0f * us, 8.0f * us, 340.0f * us, 212.0f * us,
                     1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
     if (state->ui_font) {
         float ts   = 0.45f * us;
@@ -16474,10 +16492,15 @@ static void render(AppState *state) {
                         + asset_ref_total(&g_tex_assets)
                         + asset_ref_total(&g_texgen_assets),
                     g_loop_voices);    /* loops alive: wind + crackling flames */
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
+            mb += font_line_height(state->mono_font) * ms;
+            sprintf(line, "text %dblk %ldgly %dup %4.2fms",
+                    state->t_text_blocks, state->t_text_shape_glyphs,
+                    state->t_text_uploads, (double)state->t_text_ms);
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
-            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
+            ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.90f, 0.82f, 0.70f, 0.85f);
         }
     }
     }   /* show_hud */

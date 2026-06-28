@@ -19,6 +19,12 @@
 sol_bool wtext_init(void);      /* needs rhi_init; builds pipeline + buffer */
 void     wtext_shutdown(void);
 
+/* Per-frame world-text counters (diagnostic, P9 perf #2 measurement). `blocks`
+   = wt_emit calls that drew, `uploads` = vertex-buffer re-uploads (each a fresh
+   GPU allocation on Metal). Reset/read around the world-text section. */
+void wtext_stats_reset(void);
+void wtext_stats_get(int *blocks, int *uploads);
+
 /* One text block on the z=0 plane of `model` (a world transform), in that
    plane's LOCAL meters, y-up: (x, top_y) is the block's top-left corner.
    px_to_m converts the font's pixel units to meters (line height in m =

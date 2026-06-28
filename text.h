@@ -27,6 +27,12 @@ typedef struct {
    decodes as U+FFFD and never stalls. */
 int text_shape(const Font *f, const char *utf8, ShapedGlyph *out, int max);
 
+/* Per-frame shaping counters (diagnostic, P9 perf #2 measurement). Reset at the
+   top of the world-text section, read after it: `calls` = text_shape
+   invocations, `glyphs` = total positioned glyphs — the CPU shaping load. */
+void text_shape_stats_reset(void);
+void text_shape_stats_get(long *calls, long *glyphs);
+
 /* Draw a line (or '\n'-separated lines) of text. x,y position the FIRST
    BASELINE (not the top-left: descenders hang below, ascenders rise above —
    add font_ascent()*scale to a top edge to get the baseline). scale is a
