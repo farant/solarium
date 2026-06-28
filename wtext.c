@@ -6,6 +6,8 @@
 #include "wtext.h"
 #include "text.h"
 #include "sol_math.h"
+#include "wtcache.h"
+#include <string.h>      /* strlen, for the cache-key length */
 
 #define WT_MAX_GLYPHS 4096   /* a full book page of code (item 9) fits */
 #define WT_VERT_FLOATS 5              /* x, y, z, u, v — z carries the bend */
@@ -25,13 +27,19 @@ static float g_wt_verts[WT_MAX_GLYPHS * 6 * WT_VERT_FLOATS];
 /* diagnostic counters (#2): blocks that drew + buffer re-uploads this frame */
 static int g_wt_blocks  = 0;
 static int g_wt_uploads = 0;
+static int     g_wt_misses = 0;      /* cacheable blocks that had to rebuild this frame */
+static WtCache g_wt_cache;           /* the glyph-geometry cache (flat path) */
+static int     g_wt_frame  = 0;      /* LRU clock, advanced once per frame */
 
-void wtext_stats_reset(void) { g_wt_blocks = 0; g_wt_uploads = 0; }
+void wtext_stats_reset(void) { g_wt_blocks = 0; g_wt_uploads = 0; g_wt_misses = 0; }
 
-void wtext_stats_get(int *blocks, int *uploads) {
+void wtext_stats_get(int *blocks, int *uploads, int *misses) {
     if (blocks)  *blocks  = g_wt_blocks;
     if (uploads) *uploads = g_wt_uploads;
+    if (misses)  *misses  = g_wt_misses;
 }
+
+void wtext_frame_begin(void) { g_wt_frame++; }
 
 #ifdef SOL_RHI_METAL
 
@@ -125,11 +133,17 @@ sol_bool wtext_init(void) {
     if (!g_wt.vbuffer.id) return SOL_FALSE;
 
     g_wt.ready = SOL_TRUE;
+    wtcache_init(&g_wt_cache);
+    g_wt_frame = 0;
     return SOL_TRUE;
 }
 
 void wtext_shutdown(void) {
+    int i;
     if (!g_wt.ready) return;
+    for (i = 0; i < WTCACHE_CAP; i++)               /* free every cached entry's buffer */
+        if (g_wt_cache.e[i].used && g_wt_cache.e[i].buffer.id)
+            rhi_destroy_buffer(g_wt_cache.e[i].buffer);
     rhi_destroy_buffer(g_wt.vbuffer);
     rhi_destroy_pipeline(g_wt.pipeline);
     rhi_destroy_shader(g_wt.shader);
@@ -143,14 +157,13 @@ static int wt_vert(int vc, float px, float py, float pz, float u, float v) {
     return vc + 1;
 }
 
-/* the shared emitter: flat when bend is NULL (z = 0), else each glyph's
-   left and right edges ride the curve — a piecewise-flat chord per glyph */
-static void wt_emit(const Font *f, mat4 viewproj, mat4 model, const char *src,
+/* Build a block's glyph quads into the shared scratch; returns the vertex
+   count (0 = nothing inked). Flat when bend is NULL (z = 0), else each glyph's
+   left/right edges ride the curve — a piecewise-flat chord per glyph. */
+static int wt_build(const Font *f, const char *src,
                     float x, float top_y, float px_to_m,
-                    WtextBend bend, void *user, float lift,
-                    float r, float g, float b) {
+                    WtextBend bend, void *user, float lift) {
     ShapedGlyph shaped[WT_MAX_GLYPHS];
-    mat4        mvp;
     float       baseline;
     int         n, i, vc = 0;
 
@@ -161,8 +174,6 @@ static void wt_emit(const Font *f, mat4 viewproj, mat4 model, const char *src,
         const FontGlyph *gl = font_glyph(f, shaped[i].glyph);
         float gx, gy, gw, gh;
         if (!gl || gl->w <= 0.0f) continue;        /* ink-less: advance only */
-        /* shaped positions are px, +y DOWN; the surface is meters, +y UP —
-           flip around the first baseline */
         gx = x + (shaped[i].x + gl->xoff) * px_to_m;
         gy = baseline - (shaped[i].y + gl->yoff) * px_to_m;   /* the quad's TOP */
         gw = gl->w * px_to_m;
@@ -191,15 +202,15 @@ static void wt_emit(const Font *f, mat4 viewproj, mat4 model, const char *src,
             vc = wt_vert(vc, x0, gy - gh, z0, gl->u0, gl->v1);
         }
     }
-    if (vc == 0) return;
-    g_wt_blocks++;                  /* a block that actually drew (diagnostic) */
-    g_wt_uploads++;                 /* one buffer re-upload per block (no cache yet) */
+    return vc;
+}
 
-    rhi_update_buffer(g_wt.vbuffer, g_wt_verts,
-                      (size_t)vc * WT_VERT_FLOATS * sizeof(sol_f32));
-    mvp = mat4_mul(viewproj, model);
+/* Draw an already-built buffer of `vc` vertices for this block. */
+static void wt_draw(RhiBuffer buffer, int vc, mat4 viewproj, mat4 model,
+                    const Font *f, float r, float g, float b) {
+    mat4 mvp = mat4_mul(viewproj, model);
     rhi_set_pipeline(g_wt.pipeline);
-    rhi_bind_vertex_buffer(g_wt.vbuffer);
+    rhi_bind_vertex_buffer(buffer);
     rhi_bind_texture(font_atlas(f), 0);
     rhi_set_uniform_int("uTex", 0);
     rhi_set_uniform_mat4("uMVP", mvp.m);
@@ -212,21 +223,62 @@ void wtext_block(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
                  float r, float g, float b) {
     char        wrapped[WT_WRAP_CAP];
     const char *src = utf8;
+    int         len, slot, vc;
+    RhiBuffer   buf, evicted;
 
     if (!g_wt.ready || !f || !utf8 || px_to_m <= 0.0f) return;
+    len = (int)strlen(utf8);
+
+    if (len < WTCACHE_TEXT) {                       /* cacheable: the common case */
+        slot = wtcache_find(&g_wt_cache, (const void *)f, utf8, len,
+                            px_to_m, wrap_w_m, x, top_y, g_wt_frame);
+        if (slot >= 0) {                            /* HIT — no shape, no upload */
+            g_wt_blocks++;
+            wt_draw(g_wt_cache.e[slot].buffer, g_wt_cache.e[slot].vc,
+                    viewproj, model, f, r, g, b);
+            return;
+        }
+        if (wrap_w_m > 0.0f) {                      /* MISS — build once, store */
+            if (text_wrap(f, utf8, px_to_m, wrap_w_m, wrapped, WT_WRAP_CAP) > 0)
+                src = wrapped;
+        }
+        vc = wt_build(f, src, x, top_y, px_to_m, (WtextBend)0, (void *)0, 0.0f);
+        if (vc == 0) return;                        /* whitespace-only: nothing to cache */
+        slot = wtcache_claim(&g_wt_cache, (const void *)f, utf8, len,
+                             px_to_m, wrap_w_m, x, top_y, g_wt_frame, &evicted);
+        if (evicted.id) rhi_destroy_buffer(evicted);
+        buf = rhi_create_buffer(RHI_BUFFER_VERTEX, g_wt_verts,
+                                (size_t)vc * WT_VERT_FLOATS * sizeof(sol_f32));
+        wtcache_set(&g_wt_cache, slot, buf, vc);
+        g_wt_blocks++; g_wt_uploads++; g_wt_misses++;
+        wt_draw(buf, vc, viewproj, model, f, r, g, b);
+        return;
+    }
+
+    /* uncacheable (huge string, e.g. a big reader page): the immediate path on
+       the shared scratch buffer — one block, no scaling concern */
     if (wrap_w_m > 0.0f) {
         if (text_wrap(f, utf8, px_to_m, wrap_w_m, wrapped, WT_WRAP_CAP) > 0)
             src = wrapped;
     }
-    wt_emit(f, viewproj, model, src, x, top_y, px_to_m,
-            (WtextBend)0, (void *)0, 0.0f, r, g, b);
+    vc = wt_build(f, src, x, top_y, px_to_m, (WtextBend)0, (void *)0, 0.0f);
+    if (vc == 0) return;
+    rhi_update_buffer(g_wt.vbuffer, g_wt_verts,
+                      (size_t)vc * WT_VERT_FLOATS * sizeof(sol_f32));
+    g_wt_blocks++; g_wt_uploads++;
+    wt_draw(g_wt.vbuffer, vc, viewproj, model, f, r, g, b);
 }
 
 void wtext_block_bent(const Font *f, mat4 viewproj, mat4 model,
                       const char *utf8, float x, float top_y, float px_to_m,
                       WtextBend bend, void *user, float lift,
                       float r, float g, float b) {
+    int vc;
     if (!g_wt.ready || !f || !utf8 || px_to_m <= 0.0f || !bend) return;
-    wt_emit(f, viewproj, model, utf8, x, top_y, px_to_m,
-            bend, user, lift, r, g, b);
+    vc = wt_build(f, utf8, x, top_y, px_to_m, bend, user, lift);   /* the leaf turns: rebuild */
+    if (vc == 0) return;
+    rhi_update_buffer(g_wt.vbuffer, g_wt_verts,
+                      (size_t)vc * WT_VERT_FLOATS * sizeof(sol_f32));
+    g_wt_blocks++; g_wt_uploads++;
+    wt_draw(g_wt.vbuffer, vc, viewproj, model, f, r, g, b);
 }

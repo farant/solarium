@@ -2656,7 +2656,7 @@ typedef struct AppState {
     float t_frame_gpu;              /* P8 item 1: whole-frame GPU ms (Metal); < 0 = n/a (GL) */
     int   draws_done, draws_total;  /* scene objects drawn / with geometry */
     float t_text_ms;                /* P9 perf #2 measure: world-text section wall-time */
-    int   t_text_blocks, t_text_uploads;     /* wtext blocks drawn / buffer re-uploads */
+    int   t_text_blocks, t_text_uploads, t_text_misses; /* wtext blocks / re-uploads / cache misses */
     long  t_text_shape_calls, t_text_shape_glyphs; /* text_shape calls / glyphs shaped per frame */
     /* the spatial index (P4 item 2): world AABBs of everything with
        geometry, build-or-refit on demand (ids compared each refresh —
@@ -15524,6 +15524,7 @@ static void render(AppState *state) {
        through ACES like everything else. Same atlas as the HUD; the SDF
        fwidth threshold keeps it crisp at any distance. */
     text_shape_stats_reset();        /* P9 perf #2 measure: scope to this section */
+    wtext_frame_begin();             /* advance the glyph-cache LRU clock */
     wtext_stats_reset();
     t_text0 = glfwGetTime();
     if (state->ui_font) {
@@ -15993,14 +15994,15 @@ static void render(AppState *state) {
         }
     }
     {   /* P9 perf #2 measure: snapshot the world-text section's cost */
-        int  tb, tu;
+        int  tb, tu, tm;
         long tc, tg;
         text_shape_stats_get(&tc, &tg);
-        wtext_stats_get(&tb, &tu);
+        wtext_stats_get(&tb, &tu, &tm);
         state->t_text_shape_calls  = tc;
         state->t_text_shape_glyphs = tg;
         state->t_text_blocks       = tb;
         state->t_text_uploads      = tu;
+        state->t_text_misses       = tm;
         state->t_text_ms = (float)((glfwGetTime() - t_text0) * 1000.0);
     }
 
@@ -16494,9 +16496,10 @@ static void render(AppState *state) {
                     g_loop_voices);    /* loops alive: wind + crackling flames */
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
-            sprintf(line, "text %dblk %ldgly %dup %4.2fms",
+            sprintf(line, "text %dblk %ldgly %dup %dmiss %4.2fms",
                     state->t_text_blocks, state->t_text_shape_glyphs,
-                    state->t_text_uploads, (double)state->t_text_ms);
+                    state->t_text_uploads, state->t_text_misses,
+                    (double)state->t_text_ms);
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif

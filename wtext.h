@@ -23,7 +23,8 @@ void     wtext_shutdown(void);
    = wt_emit calls that drew, `uploads` = vertex-buffer re-uploads (each a fresh
    GPU allocation on Metal). Reset/read around the world-text section. */
 void wtext_stats_reset(void);
-void wtext_stats_get(int *blocks, int *uploads);
+void wtext_stats_get(int *blocks, int *uploads, int *misses);
+void wtext_frame_begin(void);    /* advance the LRU clock; call once per frame */
 
 /* One text block on the z=0 plane of `model` (a world transform), in that
    plane's LOCAL meters, y-up: (x, top_y) is the block's top-left corner.
