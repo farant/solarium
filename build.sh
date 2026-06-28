@@ -13,7 +13,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c
+        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c scene.c mirror.c material.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     exit 0
 fi
@@ -85,6 +85,19 @@ if [ "$MODE" = "carettest" ]; then
         caret.c caret_test.c \
         -o caret_test
     echo "built ./caret_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
+# Build + run the pure world-text glyph cache test under the sanitizers.
+# wtcache.c calls no rhi_* and includes only header-declared types, so it links
+# with no GL.
+if [ "$MODE" = "wtcachetest" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        wtcache.c wtcache_test.c \
+        -o wtcache_test
+    echo "built ./wtcache_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
 
@@ -405,7 +418,7 @@ if [ "$MODE" = "metal" ]; then
     clang -fobjc-arc -g -O0 -Wall -Wextra \
         -c platform_clipboard.m $(pkg-config --cflags glfw3) -o platform_clipboard.o
     clang -std=c11 -g -O0 -Wall -Wextra -DSOL_RHI_METAL \
-        main.c rhi_metal.o platform_clipboard.o mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c \
+        main.c rhi_metal.o platform_clipboard.o mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c \
         $(pkg-config --cflags --libs glfw3) \
         -framework Metal -framework QuartzCore -framework Cocoa -framework IOKit -framework AudioToolbox \
         -o solarium-metal
@@ -424,7 +437,7 @@ if [ "$MODE" = "asan" ]; then
     clang -std=c11 -g -O1 -fno-omit-frame-pointer \
         -fsanitize=address,undefined \
         -Wall -Wextra \
-        main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c platform_clipboard.o \
+        main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c platform_clipboard.o \
         $(pkg-config --cflags --libs glfw3) \
         -framework OpenGL -framework Cocoa -framework IOKit -framework AudioToolbox \
         -o solarium-asan
@@ -442,7 +455,7 @@ fi
 clang -fobjc-arc $FLAGS -Wall -Wextra \
     -c platform_clipboard.m $(pkg-config --cflags glfw3) -o platform_clipboard.o
 clang -std=c11 $FLAGS -Wall -Wextra \
-    main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c platform_clipboard.o \
+    main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c scene.c mirror.c material.c scene_io.c nid.c stml.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c platform_audio.c image.c font.c platform_fs.c json.c glb.c fuzzy.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c multiselect.c widget.c app_synth.c platform_clipboard.o \
     $(pkg-config --cflags --libs glfw3) \
     -framework OpenGL -framework Cocoa -framework IOKit -framework AudioToolbox \
     -o solarium
