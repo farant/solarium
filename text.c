@@ -113,7 +113,9 @@ void text_measure(const Font *f, const char *utf8, float scale,
 }
 
 /* ---------------------------------------------- the measure cache (#2b) */
-static TmCache g_tm_cache;   /* zero-init in BSS == a valid empty cache */
+static TmCache g_tm_cache;   /* zero-init in BSS == a valid empty cache. Keyed on
+                                the Font* identity — safe because fonts are
+                                load-once + immutable for the process lifetime. */
 static int     g_tm_frame = 0;
 
 void text_measure_frame_begin(void) { g_tm_frame++; }

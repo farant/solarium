@@ -14936,7 +14936,9 @@ static void editor_draw_overlay(AppState *st) {
    hit). Conservative (positive-vertex AABB) — culling stays an optimization. */
 static int label_in_view(const Frustum *f, vec3 anchor) {
     Aabb  b;
-    float m = 3.0f;
+    float m = 5.0f;   /* half-extent margin: covers a deep path's half-width so a
+                         wide label whose centre is just off-screen isn't culled
+                         while an end is still visible. One tunable constant. */
     b.min = vec3_make(anchor.x - m, anchor.y - m, anchor.z - m);
     b.max = vec3_make(anchor.x + m, anchor.y + m, anchor.z + m);
     return (int)frustum_intersects_aabb(f, b);
