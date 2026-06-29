@@ -2584,6 +2584,14 @@ static RhiTexture build_decal_atlas(void) {
 #define INV_THUMB_POOL 16   /* cached thumbnail render targets (bounds GPU RT slots:
                                only the visible page is built, a few spill cached) */
 
+/* One browser entity row: a display name + an opaque provider-defined ref the
+   provider resolves back to a thing (a picture path, a place handle, ...). The
+   TypeProvider struct (function-pointer table) lives down in the browser shell,
+   since its signatures need the AppState type defined first. */
+#define BROWSER_NAME_CAP 64
+#define BROWSER_REF_CAP  256
+typedef struct { char name[BROWSER_NAME_CAP]; char ref[BROWSER_REF_CAP]; } BrowserItem;
+
 typedef struct AppState {
     int         fb_width, fb_height;
     Editor      editor;         /* top-down spatial-tree editor (zero = inactive) */
@@ -2865,6 +2873,18 @@ typedef struct AppState {
     Palette     palette;           /* command palette state (palette.h) */
     sol_bool    browser_open;      /* the entity-browser HUD is up */
     Browser     browser;           /* Miller-columns nav state (browser.h) */
+    /* per-open browser cache: the selected type's enumerated items, the active
+       command set, the ranked-visible orders/counts per column, and the lazily
+       built preview texture (re-fetched only when the focused ref changes). */
+    BrowserItem browser_items[256];
+    int         browser_item_count;
+    int         browser_items_type;          /* provider index whose items are cached; -1 = none */
+    const char *browser_cmds[16];
+    int         browser_cmd_count;
+    int         browser_type_order[8], browser_ent_order[256], browser_cmd_order[16];
+    int         browser_type_n, browser_ent_n, browser_cmd_n;   /* ranked visible counts */
+    RhiTexture  browser_preview_tex;
+    char        browser_preview_ref[BROWSER_REF_CAP];
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
        persists. The source object hides while its book is aloft. */
@@ -15114,18 +15134,102 @@ static void inventory_draw_overlay(AppState *st) {
 }
 
 /* ---- entity browser HUD (Miller columns) ----------------------------------
-   The pure nav state lives in browser.c; this is the shell: stub column data
-   for v1 (real providers arrive in Task 4), the key handler that translates a
-   BrowserKey into a browser_key() call + open/close, and the 3-column draw. */
+   The pure nav state lives in browser.c; this is the shell. A TypeProvider
+   registry drives all three columns: each provider enumerates its entities,
+   names the commands for a selected ref, runs the chosen command, and supplies
+   a preview texture. browser_refresh recomputes the ranked per-column orders
+   and enumerates the selected type lazily; browser_ensure_preview (frame top)
+   fetches the focused ref's texture only when it changes. The two providers
+   (Pictures, Places) carry stub bodies here — Tasks 5/6 fill them in. */
 
-static const char *BROWSER_TYPES[2] = { "Pictures", "Places" };
+typedef struct {
+    const char *name;                                          /* "Pictures" */
+    int        (*enumerate)(AppState *st, BrowserItem *out, int cap);
+    int        (*commands)(AppState *st, const char *ref, const char **out, int cap);
+    void       (*run)(AppState *st, const char *ref, int cmd);
+    RhiTexture (*preview)(AppState *st, const char *ref);       /* texture to blit; id 0 = none */
+} TypeProvider;
 
-/* Per-column visible row counts. Stub for v1; Task 4 swaps in provider counts. */
-static void browser_columns_counts(AppState *st, int counts[3]) {
+/* --- Pictures provider (STUB bodies — Task 5 implements) --- */
+static int pictures_enumerate(AppState *st, BrowserItem *out, int cap) {
     (void)st;
-    counts[0] = 2;   /* the two types */
-    counts[1] = 3;   /* stub entities */
-    counts[2] = 1;   /* stub command: "Place" */
+    if (cap < 1) return 0;
+    strcpy(out[0].name, "(pictures: task 5)"); out[0].ref[0] = '\0';
+    return 1;
+}
+static int pictures_commands(AppState *st, const char *ref, const char **out, int cap) {
+    (void)st; (void)ref; if (cap < 1) return 0; out[0] = "Place"; return 1;
+}
+static void pictures_run(AppState *st, const char *ref, int cmd) { (void)st; (void)ref; (void)cmd; }
+static RhiTexture pictures_preview(AppState *st, const char *ref) {
+    RhiTexture t; (void)st; (void)ref; t.id = 0; return t;
+}
+/* --- Places provider (STUB bodies — Task 6 implements) --- */
+static int places_enumerate(AppState *st, BrowserItem *out, int cap) {
+    (void)st;
+    if (cap < 1) return 0;
+    strcpy(out[0].name, "(places: task 6)"); out[0].ref[0] = '\0';
+    return 1;
+}
+static int places_commands(AppState *st, const char *ref, const char **out, int cap) {
+    (void)st; (void)ref; if (cap < 1) return 0; out[0] = "Place"; return 1;
+}
+static void places_run(AppState *st, const char *ref, int cmd) { (void)st; (void)ref; (void)cmd; }
+static RhiTexture places_preview(AppState *st, const char *ref) {
+    RhiTexture t; (void)st; (void)ref; t.id = 0; return t;
+}
+
+static const TypeProvider g_providers[] = {
+    { "Pictures", pictures_enumerate, pictures_commands, pictures_run, pictures_preview },
+    { "Places",   places_enumerate,   places_commands,   places_run,   places_preview }
+};
+#define G_PROVIDER_COUNT ((int)(sizeof g_providers / sizeof g_providers[0]))
+typedef char browser_provider_cap_check[G_PROVIDER_COUNT <= 8 ? 1 : -1];  /* typenames[8]/type_order[8] */
+
+/* Recompute the ranked per-column orders/counts; enumerate the selected type's
+   items (cached until the type changes); then clamp selections into range. */
+static void browser_refresh(AppState *st) {
+    const char *typenames[8];
+    const char *itemnames[256];
+    int counts[3];
+    int ti, i;
+    const char *ref;
+    for (i = 0; i < G_PROVIDER_COUNT; i++) typenames[i] = g_providers[i].name;
+    st->browser_type_n = browser_rank(st->browser.filter[0], typenames, G_PROVIDER_COUNT,
+                                      st->browser_type_order, 8);
+    ti = (st->browser_type_n > 0 && st->browser.sel[0] < st->browser_type_n)
+         ? st->browser_type_order[st->browser.sel[0]] : -1;
+    if (ti >= 0 && ti != st->browser_items_type) {
+        st->browser_item_count = g_providers[ti].enumerate(st, st->browser_items, 256);
+        st->browser_items_type = ti;
+    } else if (ti < 0) {
+        st->browser_item_count = 0; st->browser_items_type = -1;
+    }
+    for (i = 0; i < st->browser_item_count; i++) itemnames[i] = st->browser_items[i].name;
+    st->browser_ent_n = browser_rank(st->browser.filter[1], itemnames, st->browser_item_count,
+                                     st->browser_ent_order, 256);
+    ref = (st->browser_ent_n > 0 && st->browser.sel[1] < st->browser_ent_n)
+          ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
+    if (ti >= 0 && ref) st->browser_cmd_count = g_providers[ti].commands(st, ref, st->browser_cmds, 16);
+    else st->browser_cmd_count = 0;
+    st->browser_cmd_n = browser_rank(st->browser.filter[2], st->browser_cmds, st->browser_cmd_count,
+                                     st->browser_cmd_order, 16);
+    counts[0] = st->browser_type_n; counts[1] = st->browser_ent_n; counts[2] = st->browser_cmd_n;
+    browser_clamp(&st->browser, counts);
+}
+
+/* Per-column visible row counts — read straight from the cached ranked counts. */
+static void browser_columns_counts(AppState *st, int counts[3]) {
+    counts[0] = st->browser_type_n; counts[1] = st->browser_ent_n; counts[2] = st->browser_cmd_n;
+}
+
+static void browser_open_now(AppState *st) {
+    browser_reset(&st->browser);
+    st->browser_items_type   = -1;
+    st->browser_preview_ref[0] = '\0';
+    st->browser_preview_tex.id = 0;
+    browser_refresh(st);
+    st->browser_open = SOL_TRUE;
 }
 
 static void browser_handle_key(AppState *st, BrowserKey pk) {
@@ -15135,9 +15239,30 @@ static void browser_handle_key(AppState *st, BrowserKey pk) {
     a = browser_key(&st->browser, pk, counts);
     if (a == BROWSER_CLOSE) { st->browser_open = SOL_FALSE; return; }
     if (a == BROWSER_ACTIVATE) {
-        /* Task 4 wires provider->run here. */
+        int ti  = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
+        const char *ref = (st->browser_ent_n > 0)
+            ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
+        int cmd = (st->browser_cmd_n > 0) ? st->browser_cmd_order[st->browser.sel[2]] : -1;
+        if (ti >= 0 && ref && cmd >= 0) g_providers[ti].run(st, ref, cmd);
         st->browser_open = SOL_FALSE;
+        return;
     }
+    browser_refresh(st);
+}
+
+/* Frame-top: fetch the focused entity's preview texture, but only when the
+   focused ref differs from the one already cached (provider blit can be heavy). */
+static void browser_ensure_preview(AppState *st) {
+    int ti;
+    const char *ref;
+    ti  = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
+    ref = (st->browser_ent_n  > 0)
+          ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
+    if (ti < 0 || !ref) { st->browser_preview_tex.id = 0; st->browser_preview_ref[0] = '\0'; return; }
+    if (strcmp(ref, st->browser_preview_ref) == 0) return;       /* unchanged */
+    st->browser_preview_tex = g_providers[ti].preview(st, ref);
+    strncpy(st->browser_preview_ref, ref, BROWSER_REF_CAP - 1);
+    st->browser_preview_ref[BROWSER_REF_CAP - 1] = '\0';
 }
 
 static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
@@ -15147,7 +15272,6 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
     float       pad, row_h, ts, hdr_h;
     int         counts[3];
     int         col;
-    const char *labels1[3];
 
     if (font == NULL) return;
 
@@ -15155,10 +15279,6 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
     us = sh / 1080.0f;
 
     browser_columns_counts(st, counts);
-
-    labels1[0] = "entity 0";
-    labels1[1] = "entity 1";
-    labels1[2] = "entity 2";
 
     margin  = sw * 0.06f;
     panel_x = margin;
@@ -15212,9 +15332,9 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
             float       ty = ry + font_ascent(font) * ts;
             const char *label;
             if (ry + row_h > cy + panel_h) break;            /* clip to panel */
-            if (col == 0)      label = (r < 2) ? BROWSER_TYPES[r] : "?";
-            else if (col == 1) label = labels1[r];
-            else               label = "Place";
+            if (col == 0)      label = g_providers[st->browser_type_order[r]].name;
+            else if (col == 1) label = st->browser_items[st->browser_ent_order[r]].name;
+            else               label = st->browser_cmds[st->browser_cmd_order[r]];
             if (r == st->browser.sel[col]) {                 /* selection / breadcrumb */
                 if (focused)
                     ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.20f, 0.24f, 0.30f, 0.9f);
@@ -15223,6 +15343,18 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
             }
             ui_text(font, label, cx + pad, ty, ts, 0.92f, 0.92f, 0.92f, 1.0f);
         }
+    }
+
+    /* preview box — sits in the third region, anchored at the bottom of the
+       command column. Stub providers return id 0, so nothing draws yet; Tasks
+       5/6 light it up. (Letterbox is skipped for v1 — square-ish is fine.) */
+    if (st->browser_preview_tex.id) {
+        float cx2  = panel_x + (col_w + gap) * 2.0f;
+        float side = col_w - pad;
+        float pvh  = (side < panel_h * 0.5f) ? side : panel_h * 0.5f;
+        float pvx  = cx2 + pad * 0.5f;
+        float pvy  = panel_y + panel_h - pvh - pad;
+        ui_textured_quad(st->browser_preview_tex, pvx, pvy, side, pvh);
     }
 }
 
@@ -15314,6 +15446,7 @@ static void render(AppState *state) {
     ensure_render_target(state, state->fb_width, state->fb_height);
     if (state->inv_open) inventory_ensure_thumbs(state);   /* build missing bag thumbnails
                                                               inside the frame stream */
+    if (state->browser_open) browser_ensure_preview(state);   /* fetch focused preview tex */
     rt0 = glfwGetTime();
     state->draws_total = 0;
     state->draws_done  = 0;
@@ -17252,7 +17385,7 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     int       n;
     if (!st) return;
     if (st->palette.open) { palette_input_char(&st->palette, cp); return; }
-    if (st->browser_open) { if (st->browser.filtering) browser_char(&st->browser, (char)cp); return; }
+    if (st->browser_open) { if (st->browser.filtering) { browser_char(&st->browser, (char)cp); browser_refresh(st); } return; }
     if (reader_is_editing(st)) {
         n = utf8_encode(cp, enc);
         if (n > 0) reader_page_append(st, enc, n);
@@ -17437,8 +17570,7 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && !(mods & GLFW_MOD_SHIFT)
         && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0
         && !st->palette.open && !st->inv_open && !st->editor.active) {
-        browser_reset(&st->browser);
-        st->browser_open = SOL_TRUE;
+        browser_open_now(st);
         return;
     }
 
