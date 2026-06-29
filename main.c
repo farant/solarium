@@ -8805,6 +8805,8 @@ static sol_u32 carry_target(AppState *st, sol_u32 hit) {
         if (!o) return 0;
         if (codex_cover_child(&st->scene, target) != 0) return target;  /* a book
                                           carries even when shelved (like cards) */
+        if (o->mesh_ref && strcmp(o->mesh_ref, "map") == 0) return target;  /* a mounted map
+            re-grabs: the cmd_carry_toggle detach block restores its world transform */
         if (o->parent != 0) return 0;
         return target;
     }
@@ -9208,7 +9210,8 @@ static void cmd_carry_toggle(AppState *st) {
                         (furniture_is_table(par->mesh_ref) || furniture_is_shelf(par->mesh_ref)));
                     sol_bool mounted = (sol_bool)(co->parent != 0 && co->mesh_ref &&
                         (strcmp(co->mesh_ref, "board") == 0 ||
-                         strcmp(co->mesh_ref, "picture") == 0));
+                         strcmp(co->mesh_ref, "picture") == 0 ||
+                         strcmp(co->mesh_ref, "map") == 0));
                     if (on_furn || mounted) {
                         vec3     wp  = object_world_pos(&st->scene, t);  /* world pos before detach */
                         sol_u32  src = co->parent;                       /* the shelf, if any */
@@ -9264,6 +9267,17 @@ static sol_bool picture_on_board(Scene *s, sol_u32 h) {
     SceneObject *o = scene_get(s, h);
     return (sol_bool)(o && o->mesh_ref && strcmp(o->mesh_ref, "picture") == 0 &&
                       object_is_board(s, o->parent));
+}
+
+/* a world map mounted on a wall OR pinned to a whiteboard: corner-resizable like
+   a picture, but its OWNED quad re-crops on resize. Kept SEPARATE from
+   board_is_mounted (the slide gate already admits maps via picture_move_pick's
+   o->parent!=0 test) so slide logic is untouched. A floor map (parent==0) is not
+   resizable, matching free pictures/boards. */
+static sol_bool map_resizable(Scene *s, sol_u32 h) {
+    SceneObject *o = scene_get(s, h);
+    return (sol_bool)(o && o->mesh_ref && strcmp(o->mesh_ref, "map") == 0 &&
+                      o->parent != 0);
 }
 
 /* a "window" parented to a room wall — selectable/slidable/resizable like a
@@ -9781,6 +9795,32 @@ static void carry_update(AppState *st) {
                 return;
             }
         }
+    }
+    /* a carried MAP aimed at a whiteboard pins to the board (the picture/file
+       drop path re-parents to file_target); a board standing in front of a wall
+       wins because the wall test below ignores furniture. No board aimed -> fall
+       through to is_wall_mountable for a normal wall mount. */
+    if (o->mesh_ref && strcmp(o->mesh_ref, "map") == 0) {
+        Ray     ray;
+        vec3    bloc;
+        sol_u32 board;
+        float   mh = mesh_ref_param("map", o->mesh_params, o->mesh_param_count, "h");
+        ray.origin = st->camera.pos;
+        ray.dir    = camera_forward(&st->camera);
+        board = board_under_ray(st, ray, &bloc);     /* whiteboard in front beats wall behind */
+        if (board != 0) {
+            vec3 lp = board_pin_pos(&st->scene, board, st->carried, bloc, 0.0f, -0.5f * mh);
+            mat4 bm = scene_world_matrix(&st->scene, scene_get(&st->scene, board));
+            vec3 wp = mat4_mul_point(bm, lp);
+            st->file_aim    = SOL_TRUE;
+            st->file_target = board;
+            st->file_local  = lp;
+            st->file_rot    = quat_identity();
+            o->pos = scene_world_to_local(&st->scene, o->parent, wp);
+            o->rot = scene_world_rotation(&st->scene, board);
+            return;
+        }
+        /* no board aimed: fall through to is_wall_mountable -> wall mount */
     }
     if (o->mesh_ref && is_wall_mountable(o->mesh_ref)) {
         const char *mr   = o->mesh_ref;            /* re-mount a board OR a picture */
@@ -11120,7 +11160,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                            (board_is_mounted(&st->scene, st->selected_handle) ||
                             note_resizable(&st->scene, st->selected_handle) ||
                             picture_on_board(&st->scene, st->selected_handle) ||
-                            window_on_wall(&st->scene, st->selected_handle)) &&
+                            window_on_wall(&st->scene, st->selected_handle) ||
+                            map_resizable(&st->scene, st->selected_handle)) &&
                            resize_corner_pick(st, w)) {
                     /* grabbed a corner handle — resize (single selection only) */
                 } else if (st->sel_count <= 1 && st->selected_handle != 0 &&
@@ -11317,14 +11358,14 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 Ray   ray = pick_ray(st, w);
                 float yaw = board_yaw(&st->scene, st->resize_board);
                 vec3  n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
-                float pt  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "t");
+                float pt  = mesh_ref_param(o->mesh_ref, o->mesh_params, o->mesh_param_count, "t");
                 float tt;
                 if (ray_vs_plane(ray, st->resize_anchor, n, &tt) && tt > 0.0f) {
                     vec3         hit = vec3_add(vec3_add(ray.origin, vec3_scale(ray.dir, tt)),
                                                 st->resize_grab);   /* no jump on grab */
                     SceneObject *par = scene_get(&st->scene, st->resize_room);
-                    float cw  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "w");
-                    float ch  = mesh_ref_param("picture", o->mesh_params, o->mesh_param_count, "h");
+                    float cw  = mesh_ref_param(o->mesh_ref, o->mesh_params, o->mesh_param_count, "w");
+                    float ch  = mesh_ref_param(o->mesh_ref, o->mesh_params, o->mesh_param_count, "h");
                     float bw  = par ? mesh_ref_param("board", par->mesh_params, par->mesh_param_count, "w") : 1.8f;
                     float bh  = par ? mesh_ref_param("board", par->mesh_params, par->mesh_param_count, "h") : 1.2f;
                     float aspect = (ch > 0.0f) ? cw / ch : 0.0f;
@@ -11344,7 +11385,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     if (o) {
                         vec3  lp;
                         float lx = bw * 0.5f - nw * 0.5f;
-                        memset(&o->mesh, 0, sizeof o->mesh);     /* drop the borrow */
+                        if (o->mesh_ref && strcmp(o->mesh_ref, "map") == 0)
+                            mesh_destroy(&o->mesh);        /* owned quad: free GPU buffers */
+                        else
+                            memset(&o->mesh, 0, sizeof o->mesh);   /* shared borrow: drop it */
                         lp = scene_world_to_local(&st->scene, o->parent, origin);
                         if (lx < 0.0f) lx = 0.0f;                /* clamp to the board face */
                         if (lp.x >  lx) lp.x =  lx;
@@ -11438,10 +11482,11 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                                          vec3_scale(st->resize_u, du));
                     {   /* pictures lock to their image aspect; whiteboards stay free */
                         float aspect = 0.0f;
-                        if (o->mesh_ref && strcmp(o->mesh_ref, "picture") == 0) {
-                            float cw = mesh_ref_param("picture", o->mesh_params,
+                        if (o->mesh_ref && (strcmp(o->mesh_ref, "picture") == 0 ||
+                                            strcmp(o->mesh_ref, "map") == 0)) {
+                            float cw = mesh_ref_param(o->mesh_ref, o->mesh_params,
                                                       o->mesh_param_count, "w");
-                            float ch = mesh_ref_param("picture", o->mesh_params,
+                            float ch = mesh_ref_param(o->mesh_ref, o->mesh_params,
                                                       o->mesh_param_count, "h");
                             if (ch > 0.0f) aspect = cw / ch;
                         }
@@ -11459,7 +11504,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                     if (keyed) asset_release(&g_mesh_assets, oldkey);
                     o = scene_get(&st->scene, st->resize_board);
                     if (o) {
-                        memset(&o->mesh, 0, sizeof o->mesh);   /* drop the borrow */
+                        if (o->mesh_ref && strcmp(o->mesh_ref, "map") == 0)
+                            mesh_destroy(&o->mesh);        /* owned quad: free GPU buffers */
+                        else
+                            memset(&o->mesh, 0, sizeof o->mesh);   /* shared borrow: drop it */
                         o->pos = scene_world_to_local(&st->scene, o->parent, origin);
                     }
                     scene_resolve_meshes(&st->scene);
@@ -11768,7 +11816,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                (board_is_mounted(&st->scene, st->selected_handle) ||
                 note_resizable(&st->scene, st->selected_handle) ||
                 picture_on_board(&st->scene, st->selected_handle) ||
-                window_on_wall(&st->scene, st->selected_handle))) {
+                window_on_wall(&st->scene, st->selected_handle) ||
+                map_resizable(&st->scene, st->selected_handle))) {
         int c = resize_corner_at(st, w, (vec3 *)0, (vec3 *)0);
         if (c >= 0) {
             float   nx = 0.0f, ny = 0.0f, pt;
@@ -13141,9 +13190,12 @@ static void scene_resolve_meshes(Scene *s) {
         const char *slat, *slon, *szoom, *style;
         double lon, lat, u0, v0, u1, v1;
         int z;
+        float mw, mh;
         MeshBuilder mb;
         if (!o->mesh_ref || strcmp(o->mesh_ref, "map") != 0) continue;
         if (o->mesh.index_count != 0) continue;
+        mw = mesh_ref_param("map", o->mesh_params, o->mesh_param_count, "w");
+        mh = mesh_ref_param("map", o->mesh_params, o->mesh_param_count, "h");
         slat  = scene_meta_get(s, o->handle, "lat");
         slon  = scene_meta_get(s, o->handle, "lon");
         szoom = scene_meta_get(s, o->handle, "zoom");
@@ -13153,10 +13205,12 @@ static void scene_resolve_meshes(Scene *s) {
         z   = szoom ? atoi(szoom) : 0;
         if (z < 0) z = 0;
         if (z > MAP_ZMAX) z = MAP_ZMAX;
-        mapmath_window(lon, lat, z, (double)(MAP_BOARD_W / MAP_BOARD_H),
+        if (mw <= 0.0f) mw = MAP_BOARD_W;   /* fallback; mesh_ref_param already returns the registry default */
+        if (mh <= 0.0f) mh = MAP_BOARD_H;
+        mapmath_window(lon, lat, z, (double)(mw / mh),
                        &u0, &v0, &u1, &v1);
         mb_init(&mb);
-        make_map_quad(&mb, MAP_BOARD_W, MAP_BOARD_H,
+        make_map_quad(&mb, mw, mh,
                       (sol_f32)u0, (sol_f32)v0, (sol_f32)u1, (sol_f32)v1);
         o->mesh = mesh_from_builder(&mb);
         mb_free(&mb);
@@ -16168,7 +16222,8 @@ static void render(AppState *state) {
             (board_is_mounted(&state->scene, state->selected_handle) ||
              note_resizable(&state->scene, state->selected_handle) ||
              picture_on_board(&state->scene, state->selected_handle) ||
-             window_on_wall(&state->scene, state->selected_handle))) {
+             window_on_wall(&state->scene, state->selected_handle) ||
+             map_resizable(&state->scene, state->selected_handle))) {
             vec3     cor[4], u, n;
             float    yaw = board_yaw(&state->scene, state->selected_handle);
             Material hm  = material_default();
