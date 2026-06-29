@@ -10512,6 +10512,8 @@ static void window_set_style(AppState *st, sol_u32 win, int style) {
 /* Note: 'N' (note card) and 'Z' (abbey) stay inline, not in the registry:
    N's body needs the GLFW window (pick_ray for cursor placement); Z is a
    fixed-parameter scene compositor, not a generic mint. */
+/* forward decl: the body lives after scene_resolve_meshes (it calls it). */
+static void cmd_place_map(AppState *st);
 static Command g_commands[] = {
     { "Toggle bloom",                "K", GLFW_KEY_K, cmd_toggle_bloom,      NULL,                  SOL_FALSE },
     { "Toggle god-rays",             NULL, 0,         cmd_toggle_godrays,    NULL,                  SOL_FALSE },
@@ -10545,6 +10547,7 @@ static Command g_commands[] = {
     { "Mint fox",                    "Y", GLFW_KEY_Y, cmd_mint_fox,          NULL,                  SOL_FALSE },
     { "New root...",                 NULL, 0,          cmd_new_root,          NULL,                  SOL_FALSE },
     { "Place furniture",             NULL, 0,          cmd_place_furniture,   NULL,                  SOL_FALSE },
+    { "Place map",                   NULL, 0,          cmd_place_map,         NULL,                  SOL_FALSE },
     { "Top-down editor",             NULL, 0,          cmd_toggle_editor,     NULL,                  SOL_FALSE },
     { "Disconnect selected",         NULL, 0,          cmd_disconnect,        can_disconnect,        SOL_FALSE },
     { "Add room",                    NULL, 0,          cmd_add_room,          NULL,                  SOL_FALSE },
@@ -12335,6 +12338,23 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 scene_save(&st->scene, "scene.stml");
                 printf("removed arrow — the connection is gone\n");
             } else if (o && o->mesh_ref != NULL &&
+                       strcmp(o->mesh_ref, "map") == 0) {
+                /* a world-map board: its quad carries UNIQUE per-object UVs, so it
+                   is built directly (NOT routed through the shared mesh asset
+                   store) — free the owned GPU buffer here like an arrow, NOT via
+                   asset_release (that would no-op and leak). The basemap texture
+                   is a shared, session-lived asset and stays. */
+                sol_u32 doomed = st->selected_handle;
+                mesh_destroy(&o->mesh);
+                st->selected_handle = 0;
+                if (st->resize_board == doomed) st->resize_board = 0;
+                if (st->move_board   == doomed) st->move_board   = 0;
+                if (st->carried      == doomed) st->carried      = 0;
+                if (st->drag_handle  == doomed) st->drag_handle  = 0;
+                scene_remove(&st->scene, doomed);
+                scene_save(&st->scene, "scene.stml");
+                printf("deleted map #%u\n", (unsigned)doomed);
+            } else if (o && o->mesh_ref != NULL &&
                        strcmp(o->mesh_ref, "picture") == 0) {
                 /* a placed image (on a wall or pinned to a whiteboard): remove
                    the display copy. The file card already returned to its shelf
@@ -13131,6 +13151,54 @@ static void scene_resolve_meshes(Scene *s) {
         if (!o->material.albedo_tex.id)
             o->material.base_color = vec3_make(0.32f, 0.34f, 0.38f); /* "no basemap" */
     }
+}
+
+/* spawn a map board in front of the player (like a dropped card). lat/lon/zoom
+   + basemap go to meta (auto-persisted); geometry+texture are built by the
+   map-resolve pass in scene_resolve_meshes. The board's +Z face looks back at
+   you (yaw = atan2(-fwd.x, -fwd.z)), the same facing the whiteboard mint uses. */
+static sol_u32 spawn_map_board(AppState *st, double lat, double lon, int z,
+                               const char *style) {
+    Mesh    empty;
+    vec3    f   = camera_forward(&st->camera);
+    vec3    pos = carry_place_point(st);
+    quat    rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                       atan2f(-f.x, -f.z));
+    sol_u32 h;
+    char    buf[32];
+    memset(&empty, 0, sizeof empty);
+    h = scene_add(&st->scene, 0, empty, pos, rot, vec3_make(1.0f, 1.0f, 1.0f));
+    scene_mesh_ref_set(&st->scene, h, "map");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    sprintf(buf, "%.6f", lat);  scene_meta_set(&st->scene, h, "lat",  buf);
+    sprintf(buf, "%.6f", lon);  scene_meta_set(&st->scene, h, "lon",  buf);
+    sprintf(buf, "%d",    z);   scene_meta_set(&st->scene, h, "zoom", buf);
+#pragma clang diagnostic pop
+    scene_meta_set(&st->scene, h, "basemap", style && style[0] ? style : "relief");
+    mint_tag_ws(st, h);
+    scene_resolve_meshes(&st->scene);
+    return h;
+}
+
+static void place_map_from_coords(AppState *st, const char *s) {
+    double lat = 0.0, lon = 0.0;
+    int    z = 0, n;
+    char   style[16];
+    if (!s || !s[0]) return;
+    style[0] = '\0';
+    n = sscanf(s, "%lf , %lf , %d , %15s", &lat, &lon, &z, style);
+    if (n < 3) { printf("map: enter 'lat,lon,zoom' e.g. 48.85,2.35,5\n"); return; }
+    if (lat < -90.0)  lat = -90.0;  if (lat > 90.0)  lat = 90.0;
+    if (lon < -180.0) lon = -180.0; if (lon > 180.0) lon = 180.0;
+    if (z < 0) z = 0; if (z > MAP_ZMAX) z = MAP_ZMAX;
+    spawn_map_board(st, lat, lon, z, style);
+    scene_save(&st->scene, "scene.stml");
+    printf("placed map @ %.4f,%.4f z%d\n", lat, lon, z);
+}
+
+static void cmd_place_map(AppState *st) {
+    palette_prompt(&st->palette, "map (lat,lon,zoom)", place_map_from_coords);
 }
 
 /* Cosmetic until 6e serializes materials: a card's color DERIVES from its
