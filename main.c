@@ -15150,19 +15150,77 @@ typedef struct {
     RhiTexture (*preview)(AppState *st, const char *ref);       /* texture to blit; id 0 = none */
 } TypeProvider;
 
-/* --- Pictures provider (STUB bodies — Task 5 implements) --- */
+/* --- Pictures provider --- enumerate the library/ image files and every
+   image referenced by a scene object; preview the real (cached, sRGB) texture;
+   Place spawns a fresh image "card" onto the cursor for hanging on a wall. */
 static int pictures_enumerate(AppState *st, BrowserItem *out, int cap) {
-    (void)st;
+    FsListing l;
+    int       n = 0, i, j;
     if (cap < 1) return 0;
-    strcpy(out[0].name, "(pictures: task 5)"); out[0].ref[0] = '\0';
-    return 1;
+    /* library/ image files first (skip if the directory can't be opened) */
+    if (fs_scan_dir("library", &l)) {
+        for (i = 0; i < l.count && n < cap; i++) {
+            if (l.entries[i].is_dir) continue;
+            if (!reader_is_image_path(l.entries[i].name)) continue;
+            strncpy(out[n].name, l.entries[i].name, BROWSER_NAME_CAP - 1);
+            out[n].name[BROWSER_NAME_CAP - 1] = '\0';
+            strcpy(out[n].ref, "library/");          /* 8 chars */
+            strncat(out[n].ref, l.entries[i].name, BROWSER_REF_CAP - 1 - 8);
+            n++;
+        }
+        fs_listing_free(&l);
+    }
+    /* then every image referenced by a scene object, deduped by exact ref */
+    for (i = 0; i < (int)st->scene.count && n < cap; i++) {
+        const char *c = st->scene.objects[i].content;
+        const char *base;
+        int         dup = 0;
+        if (!c || !reader_is_image_path(c)) continue;
+        for (j = 0; j < n; j++)
+            if (strcmp(out[j].ref, c) == 0) { dup = 1; break; }
+        if (dup) continue;
+        base = strrchr(c, '/');
+        base = base ? base + 1 : c;
+        strncpy(out[n].ref, c, BROWSER_REF_CAP - 1);
+        out[n].ref[BROWSER_REF_CAP - 1] = '\0';
+        strncpy(out[n].name, base, BROWSER_NAME_CAP - 1);
+        out[n].name[BROWSER_NAME_CAP - 1] = '\0';
+        n++;
+    }
+    return n;
 }
 static int pictures_commands(AppState *st, const char *ref, const char **out, int cap) {
-    (void)st; (void)ref; if (cap < 1) return 0; out[0] = "Place"; return 1;
+    (void)st; (void)ref;
+    if (cap < 1) return 0;
+    out[0] = "Place";
+    return 1;
 }
-static void pictures_run(AppState *st, const char *ref, int cmd) { (void)st; (void)ref; (void)cmd; }
+/* Place (cmd 0): spawn a fresh image card and put it on the cursor exactly as
+   inventory_take does for an image card — re-parented to the world, carried,
+   with carry_prev_parent = the bag so hanging it on a wall returns the card to
+   the bag (the reusable-stamp rule). We delegate to inventory_take so the
+   carried-state setup stays in one place and can't drift. */
+static void pictures_run(AppState *st, const char *ref, int cmd) {
+    Mesh    empty;
+    vec3    p   = carry_place_point(st);
+    quat    q   = quat_identity();
+    vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
+    sol_u32 anchor, h;
+    if (cmd != 0) return;                    /* only "Place" */
+    if (!ref || !ref[0]) return;             /* nothing to carry */
+    memset(&empty, 0, sizeof empty);
+    anchor = inventory_anchor(st);           /* may scene_add -> realloc; handle only */
+    h = scene_add(&st->scene, anchor, empty, p, q, one);
+    scene_kind_set(&st->scene, h, KIND_PLAIN);     /* keeps the image albedo */
+    scene_mesh_ref_set(&st->scene, h, "card");
+    scene_content_set(&st->scene, h, ref);
+    scene_resolve_meshes(&st->scene);              /* builds the card mesh + sRGB albedo */
+    inventory_take(st, h);                         /* image-card carry setup */
+}
 static RhiTexture pictures_preview(AppState *st, const char *ref) {
-    RhiTexture t; (void)st; (void)ref; t.id = 0; return t;
+    (void)st;
+    if (!ref || !ref[0]) { RhiTexture t; t.id = 0; return t; }
+    return load_texture(ref);                /* the actual image, cached sRGB */
 }
 /* --- Places provider (STUB bodies — Task 6 implements) --- */
 static int places_enumerate(AppState *st, BrowserItem *out, int cap) {
