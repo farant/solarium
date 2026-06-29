@@ -9510,6 +9510,7 @@ static int board_view_enter(AppState *st) {
     st->bv_t   = 0.0f;
     st->bv_dir = 1.0f;
     st->board_view = st->selected_handle;
+    st->selected_handle = 0;   /* entering board mode clears the board's highlight */
     return 1;
 }
 
