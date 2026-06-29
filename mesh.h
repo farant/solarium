@@ -38,6 +38,11 @@ void    make_plane(MeshBuilder *b, sol_f32 w, sol_f32 d);
 void    make_grid(MeshBuilder *b, sol_f32 w, sol_f32 d, sol_u32 subdiv);
 void    make_page(MeshBuilder *b, sol_f32 w, sol_f32 h);   /* upright XY quad, +Z, upright UVs */
 void    make_picture(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t);  /* bottom-origin quad, +Z, 0..1 UVs (no tile) */
+/* like make_picture but with an explicit UV crop window (for map boards that
+   sample a sub-rectangle of a shared equirectangular basemap). Bottom-origin
+   +Z quad, w x h meters, UVs (u0,v0)=bottom-left .. (u1,v1)=top-right. */
+void    make_map_quad(MeshBuilder *b, sol_f32 w, sol_f32 h,
+                      sol_f32 u0, sol_f32 v0, sol_f32 u1, sol_f32 v1);
 #define WINDOW_FRAME_W  0.08f   /* window frame border; the "window" registry "fw" default must match this */
 void    make_window(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, sol_f32 style);
 void    make_window_fill(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t, sol_f32 fw, sol_f32 style);

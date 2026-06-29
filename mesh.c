@@ -380,6 +380,18 @@ void make_picture(MeshBuilder *b, sol_f32 w, sol_f32 h, sol_f32 t) {
     mb_push_triangle(b, v0, v2, v3);
 }
 
+void make_map_quad(MeshBuilder *b, sol_f32 w, sol_f32 h,
+                   sol_f32 u0, sol_f32 v0, sol_f32 u1, sol_f32 v1) {
+    sol_f32 hw = w * 0.5f;
+    sol_u32 a, c, d, e;
+    a = mb_push_vertex(b, -hw, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  u0, v0);  /* BL */
+    c = mb_push_vertex(b,  hw, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  u1, v0);  /* BR */
+    d = mb_push_vertex(b,  hw, h,    0.0f,  0.0f, 0.0f, 1.0f,  u1, v1);  /* TR */
+    e = mb_push_vertex(b, -hw, h,    0.0f,  0.0f, 0.0f, 1.0f,  u0, v1);  /* TL */
+    mb_push_triangle(b, a, c, d);
+    mb_push_triangle(b, a, d, e);
+}
+
 /* ---- shaped-window geometry (Window styles, Phase 2) ----------------------
    The aperture OUTLINE = the glass edge, inset fw inside the w/2 x h/2 opening,
    as a CLOSED CCW loop of (x,y). Shared by the opaque fill (Task 2) and the
