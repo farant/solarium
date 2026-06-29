@@ -27,6 +27,7 @@
 #include "wtext.h"               /* world-space SDF text — note cards (P3 item 8) */
 #include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
 #include "platform_clipboard.h"  /* clipboard_read_image — Cmd+V paste (clipboard-paste-images) */
+#include "platform_window.h"     /* platform_window_fullscreen — native macOS fullscreen Space */
 #include "nid.h"                 /* nid_generate — library/<nid>.png filenames */
 #include "collide.h"             /* the world's lateral push-back (P4 item 1) */
 #include "route.h"
@@ -17229,21 +17230,9 @@ int main(void) {
 
     rhi_configure_window();   /* backend sets the API/context hints */
 
-    {   /* launch fullscreen on the primary monitor, matching its current video
-           mode so there's no display-mode switch; fall back to a window if no
-           monitor is reported (headless) */
-        GLFWmonitor       *mon  = glfwGetPrimaryMonitor();
-        const GLFWvidmode *mode = mon ? glfwGetVideoMode(mon) : (const GLFWvidmode *)0;
-        if (mon && mode) {
-            glfwWindowHint(GLFW_RED_BITS,     mode->redBits);
-            glfwWindowHint(GLFW_GREEN_BITS,   mode->greenBits);
-            glfwWindowHint(GLFW_BLUE_BITS,    mode->blueBits);
-            glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
-            window = glfwCreateWindow(mode->width, mode->height, "solarium", mon, NULL);
-        } else {
-            window = glfwCreateWindow(960, 540, "solarium", NULL, NULL);
-        }
-    }
+    /* a normal window (the size it returns to if you leave fullscreen); we then
+       enter macOS NATIVE fullscreen below, which gives it its own Space */
+    window = glfwCreateWindow(1280, 720, "solarium", NULL, NULL);
     if (!window) {
         fprintf(stderr, "glfwCreateWindow failed\n");
         glfwTerminate();
@@ -17382,6 +17371,9 @@ int main(void) {
     }
 
     last = glfwGetTime();
+
+    glfwPollEvents();                     /* realize the window before toggling */
+    platform_window_fullscreen(window);   /* enter the native macOS fullscreen Space */
 
     while (!glfwWindowShouldClose(window)) {
         double      now, dt, y1, y2;
