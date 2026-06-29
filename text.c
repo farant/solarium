@@ -6,6 +6,7 @@
 #include "ui.h"
 
 #include <string.h>
+#include "tmcache.h"
 
 /* ----------------------------------------------------------------- UTF-8 */
 /* Decode one UTF-8 sequence at p into *cp; return the byte after it. The
@@ -109,6 +110,35 @@ void text_measure(const Font *f, const char *utf8, float scale,
     }
     if (out_w) *out_w = w * scale;
     if (out_h) *out_h = (max_y + font_line_height(f)) * scale;
+}
+
+/* ---------------------------------------------- the measure cache (#2b) */
+static TmCache g_tm_cache;   /* zero-init in BSS == a valid empty cache */
+static int     g_tm_frame = 0;
+
+void text_measure_frame_begin(void) { g_tm_frame++; }
+
+void text_measure_cached(const Font *f, const char *utf8, float scale,
+                         float *out_w, float *out_h) {
+    int   len, slot;
+    float w0, h0;
+    if (!f || !utf8) { if (out_w) *out_w = 0.0f; if (out_h) *out_h = 0.0f; return; }
+    len = (int)strlen(utf8);
+    if (len >= TMCACHE_TEXT) {                      /* uncacheable: measure directly */
+        text_measure(f, utf8, scale, out_w, out_h);
+        return;
+    }
+    slot = tmcache_find(&g_tm_cache, (const void *)f, utf8, len, g_tm_frame);
+    if (slot >= 0) {                                /* HIT — no shaping */
+        w0 = g_tm_cache.e[slot].w;
+        h0 = g_tm_cache.e[slot].h;
+    } else {                                        /* MISS — shape once, store */
+        text_measure(f, utf8, 1.0f, &w0, &h0);
+        slot = tmcache_claim(&g_tm_cache, (const void *)f, utf8, len, g_tm_frame);
+        tmcache_set(&g_tm_cache, slot, w0, h0);
+    }
+    if (out_w) *out_w = w0 * scale;
+    if (out_h) *out_h = h0 * scale;
 }
 
 void ui_text(const Font *f, const char *utf8, float x, float y, float scale,

@@ -14930,6 +14930,18 @@ static void editor_draw_overlay(AppState *st) {
     }
 }
 
+/* A label whose world anchor is outside the view (plus a generous margin) is
+   skipped before it measures or draws. The margin keeps edge labels from
+   popping as you pan; over-inclusion is cheap (a surviving measure is a cache
+   hit). Conservative (positive-vertex AABB) — culling stays an optimization. */
+static int label_in_view(const Frustum *f, vec3 anchor) {
+    Aabb  b;
+    float m = 3.0f;
+    b.min = vec3_make(anchor.x - m, anchor.y - m, anchor.z - m);
+    b.max = vec3_make(anchor.x + m, anchor.y + m, anchor.z + m);
+    return (int)frustum_intersects_aabb(f, b);
+}
+
 static void render(AppState *state) {
     float   aspect;
     float   us;        /* UI scale: sizes track the framebuffer (see pass 3) */
@@ -15525,12 +15537,14 @@ static void render(AppState *state) {
        fwidth threshold keeps it crisp at any distance. */
     text_shape_stats_reset();        /* P9 perf #2 measure: scope to this section */
     wtext_frame_begin();             /* advance the glyph-cache LRU clock */
+    text_measure_frame_begin();      /* advance the measure-cache LRU clock */
     wtext_stats_reset();
     t_text0 = glfwGetTime();
     if (state->ui_font) {
         const Font *uf  = state->ui_font;
         const float lh  = font_line_height(uf);            /* px at base size */
         mat4        vp  = mat4_mul(proj, view);
+        Frustum     lf  = frustum_from_vp(vp);   /* label-cull frustum (this section) */
 
         /* the reader's pages (item 9): the page plane is book-local xz at
            the text-field height; the text frame is R_x(-90), so text-up =
@@ -15600,7 +15614,7 @@ static void render(AppState *state) {
                     else        nm = object_label(&state->scene,
                                                   state->reader_source, lbuf);
                     cpx = (bp[1] * 0.020f) / lh;
-                    text_measure(uf, nm, 1.0f, &nw, (float *)0);
+                    text_measure_cached(uf, nm, 1.0f, &nw, (float *)0);
                     if (nw * cpx > field_w_left && nw > 0.0f)
                         cpx = field_w_left / nw;
                     wtext_block(uf, vp, page, nm, -wb + mg, zh - mg, cpx, 0.0f,
@@ -15716,7 +15730,7 @@ static void render(AppState *state) {
                     float spx = 0.020f / lh;                 /* small spine letters */
                     mat4  spine;
                     nm = object_label(&state->scene, o->handle, lbuf);
-                    text_measure(uf, nm, 1.0f, &name_w, (float *)0);
+                    text_measure_cached(uf, nm, 1.0f, &name_w, (float *)0);
                     if (name_w * spx > ch - 0.05f && name_w > 0.0f)
                         spx = (ch - 0.05f) / name_w;         /* fit the spine height */
                     /* The text's "up" (toward top_y) maps to the card's +z, i.e.
@@ -15741,7 +15755,7 @@ static void render(AppState *state) {
             if (o->kind != KIND_NOTE) {
                 nm = object_label(&state->scene, o->handle, lbuf);
                 px2m = 0.038f / lh;                             /* ~3.8cm line */
-                text_measure(uf, nm, 1.0f, &name_w, (float *)0);
+                text_measure_cached(uf, nm, 1.0f, &name_w, (float *)0);
                 if (name_w * px2m > usable && name_w > 0.0f)
                     px2m = usable / name_w;                     /* shrink, don't clip */
                 wtext_block(uf, vp, face, nm,
@@ -15866,7 +15880,10 @@ static void render(AppState *state) {
                     else if (wall == ROOM_WALL_S) { yaw = 0.0f;                nx = 0.0f;  nz = 1.0f;  }
                     else                          { yaw = sol_radians(-90.0f); nx = -1.0f; nz = 0.0f;  }
                     lpx = 0.35f / lh;                       /* ~35 cm tall letters */
-                    text_measure(uf, nm, 1.0f, &nw, (float *)0);
+                    if (!label_in_view(&lf, vec3_make(door.x + nx * 0.30f,
+                            door.y + ROUTE_DOOR_H + 0.2f, door.z + nz * 0.30f)))
+                        continue;                           /* off-screen: skip measure + draw */
+                    text_measure_cached(uf, nm, 1.0f, &nw, (float *)0);
                     x0  = -nw * lpx * 0.5f;                 /* centered over the opening */
                     dm  = mat4_mul(
                               mat4_translate(vec3_make(door.x + nx * 0.30f, door.y,
@@ -15896,7 +15913,10 @@ static void render(AppState *state) {
                 if (!lbl || !lbl[0]) continue;
                 h   = mesh_ref_param("bookshelf", o->mesh_params, o->mesh_param_count, "h");
                 lpx = 0.18f / lh;                          /* ~18 cm letters */
-                text_measure(uf, lbl, 1.0f, &nw, (float *)0);
+                if (!label_in_view(&lf, mat4_mul_point(scene_world_matrix(&state->scene, o),
+                        vec3_make(0.0f, h + 0.02f + 2.0f * lpx * lh, 0.16f))))
+                    continue;                              /* off-screen: skip measure + draw */
+                text_measure_cached(uf, lbl, 1.0f, &nw, (float *)0);
                 x0  = -nw * lpx * 0.5f;                    /* centered on the shelf */
                 m   = mat4_mul(scene_world_matrix(&state->scene, o),
                                mat4_translate(vec3_make(0.0f,
@@ -15921,7 +15941,10 @@ static void render(AppState *state) {
                 if (!lnk || !lnk[0]) continue;
                 fh  = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "h");
                 lpx = 0.135f / lh;                       /* ~13.5 cm letters (3x) */
-                text_measure(uf, lnk, 1.0f, &nw, (float *)0);
+                if (!label_in_view(&lf, mat4_mul_point(scene_world_matrix(&state->scene, o),
+                        vec3_make(0.0f, fh + 2.0f * lpx * lh, 0.06f))))
+                    continue;                            /* off-screen: skip measure + draw */
+                text_measure_cached(uf, lnk, 1.0f, &nw, (float *)0);
                 x0  = -nw * lpx * 0.5f;
                 m   = mat4_mul(scene_world_matrix(&state->scene, o),
                                mat4_translate(vec3_make(0.0f,
@@ -15948,7 +15971,10 @@ static void render(AppState *state) {
                     continue;                            /* plain root board: stay clean */
                 bh  = mesh_ref_param("board", o->mesh_params, o->mesh_param_count, "h");
                 lpx = 0.12f / lh;                        /* ~12 cm letters */
-                text_measure(uf, ap, 1.0f, &nw, (float *)0);
+                if (!label_in_view(&lf, mat4_mul_point(scene_world_matrix(&state->scene, o),
+                        vec3_make(0.0f, bh + 0.04f + 2.0f * lpx * lh, 0.04f))))
+                    continue;                            /* off-screen: skip measure + draw */
+                text_measure_cached(uf, ap, 1.0f, &nw, (float *)0);
                 x0  = -nw * lpx * 0.5f;
                 m   = mat4_mul(scene_world_matrix(&state->scene, o),
                                mat4_translate(vec3_make(0.0f,

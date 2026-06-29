@@ -46,6 +46,14 @@ void ui_text(const Font *f, const char *utf8, float x, float y, float scale,
 void text_measure(const Font *f, const char *utf8, float scale,
                   float *out_w, float *out_h);
 
+/* Cached text_measure (P9 perf #2b): same result, but (font,text)->(w,h) is
+   memoized so a per-frame label stops re-shaping for its width. Identical to
+   text_measure for any given (font,text,scale). Advance the LRU clock once per
+   frame with text_measure_frame_begin(). */
+void text_measure_cached(const Font *f, const char *utf8, float scale,
+                         float *out_w, float *out_h);
+void text_measure_frame_begin(void);
+
 /* Greedy word wrap as a STRING transform: copy utf8 into out[cap] with '\n'
    inserted so no line exceeds max_width px at scale. A single word wider
    than that gets its own line, unbroken. Spaces are PRESERVED (leading and
