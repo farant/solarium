@@ -2683,6 +2683,7 @@ typedef struct AppState {
     int             bloom_w[BLOOM_LEVELS], bloom_h[BLOOM_LEVELS];
     RhiPipeline     bloom_extract_pipeline, bloom_down_pipeline, bloom_up_pipeline;
     sol_bool        bloom_on;      /* 'K' toggles, for honest A/B */
+    sol_bool        godrays_on;    /* palette toggle, honest A/B (skips the raymarch pass) */
     /* god-rays (P8 item 3): a half-res raymarch of the spot-light shadow
        volume, composited additively in post like a bloom level */
     RhiRenderTarget godray_rt;
@@ -7661,6 +7662,11 @@ static void cmd_toggle_bloom(AppState *st) {
     printf("bloom %s\n", st->bloom_on ? "on" : "off");
 }
 
+static void cmd_toggle_godrays(AppState *st) {
+    st->godrays_on = !st->godrays_on;
+    printf("god-rays %s\n", st->godrays_on ? "on" : "off");
+}
+
 static void cmd_toggle_mute(AppState *st) {
     (void)st;
     g_muted = !g_muted;
@@ -10505,6 +10511,7 @@ static void window_set_style(AppState *st, sol_u32 win, int style) {
    fixed-parameter scene compositor, not a generic mint. */
 static Command g_commands[] = {
     { "Toggle bloom",                "K", GLFW_KEY_K, cmd_toggle_bloom,      NULL,                  SOL_FALSE },
+    { "Toggle god-rays",             NULL, 0,         cmd_toggle_godrays,    NULL,                  SOL_FALSE },
     { "Toggle walk/fly",             "F", GLFW_KEY_F, cmd_toggle_fly,        can_toggle_fly,        SOL_FALSE },
     { "Toggle ghost (no-clip)",      "X", GLFW_KEY_X, cmd_toggle_ghost,      NULL,                  SOL_FALSE },
     { "Toggle shadow-map inspector", "M", GLFW_KEY_M, cmd_toggle_shadowmap,  NULL,                  SOL_FALSE },
@@ -13733,6 +13740,7 @@ static int init_scene(AppState *state) {
             state->bloom_up_pipeline      = rhi_create_pipeline(&bd);
         }
         state->bloom_on = SOL_TRUE;
+        state->godrays_on = SOL_TRUE;
     }
     state->show_hud = SOL_TRUE;        /* the stats card shows by default */
 
@@ -16254,7 +16262,7 @@ static void render(AppState *state) {
            level. Now directional (P8 item 6): the rays rake the whole island
            instead of a 20m cone — the §1.4 payoff (improve the author, every
            reader benefits). ---- */
-        {
+        if (state->godrays_on) {
             mat4 grivp = mat4_inverse(mat4_mul(proj, view));
             vec3 grld  = vec3_normalize(vec3_sub(state->light_target, state->light_pos));
             rhi_begin_pass(state->godray_rt, RHI_CLEAR_COLOR, 0.0f, 0.0f, 0.0f, 1.0f);
@@ -16354,7 +16362,9 @@ static void render(AppState *state) {
             rhi_set_pipeline(state->post_pipeline);
             rhi_bind_texture(rhi_render_target_texture(state->hdr_rt), 0);
             rhi_bind_texture(rhi_render_target_texture(state->bloom_rt[0]), 1);
-            rhi_bind_texture(rhi_render_target_texture(state->godray_rt), 3);
+            rhi_bind_texture(state->godrays_on
+                                 ? rhi_render_target_texture(state->godray_rt)
+                                 : state->inv_black_tex, 3);   /* off: add black = no shafts */
             rhi_bind_texture(rhi_render_target_texture(state->ssao_blur_rt), 4);
             rhi_set_uniform_int("uHdr", 0);             /* sampler -> texture unit 0 */
             rhi_set_uniform_int("uBloom", 1);
