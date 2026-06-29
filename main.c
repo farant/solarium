@@ -2653,6 +2653,7 @@ typedef struct AppState {
        numbers that can MOVE are encode/update cost and the draw counts —
        culling and instancing claims point here, not at fps. All in ms. */
     float t_frame, t_cpu, t_update, t_shadow, t_spot_shadow, t_hdr, t_post, t_swap;
+    float t_overlay;               /* the 2D overlay/HUD slice, split out of the old t_post bracket */
     float t_frame_gpu;              /* P8 item 1: whole-frame GPU ms (Metal); < 0 = n/a (GL) */
     int   draws_done, draws_total;  /* scene objects drawn / with geometry */
     float t_text_ms;                /* P9 perf #2 measure: world-text section wall-time */
@@ -14951,7 +14952,7 @@ static void render(AppState *state) {
     mat4    view, proj;
     sol_u32 i;
     sol_u32 sel_root;
-    double  rt0, rt1, rt2;
+    double  rt0, rt1, rt2, rt3;
     double  t_text0;                /* P9 perf #2 measure: world-text section start */
     unsigned char *vis;
 
@@ -16424,6 +16425,8 @@ static void render(AppState *state) {
        grows — fixed pixels stay the same physical size while everything
        else scales (the DPI-relative unit family); POSITIONS keep their
        px / vw / vh anchors. ---- */
+    rt3 = glfwGetTime();
+    yardstick_ms(&state->t_post, rt3 - rt2);   /* GPU post passes only: god-rays/bloom/ssao/tonemap encode */
     ui_begin(state->fb_width, state->fb_height);
     us = (float)state->fb_height / 1080.0f;
 
@@ -16501,8 +16504,8 @@ static void render(AppState *state) {
                     (double)state->t_spot_shadow, (double)state->t_hdr);
             ui_text(state->mono_font, line, 20.0f * us, mb, ms, 0.70f, 0.90f, 0.70f, 0.85f);
             mb += font_line_height(state->mono_font) * ms;
-            sprintf(line, "post %4.2f draws %d/%d parts %d",
-                    (double)state->t_post,
+            sprintf(line, "post %4.2f over %4.2f draws %d/%d parts %d",
+                    (double)state->t_post, (double)state->t_overlay,
                     state->draws_done, state->draws_total,
                     state->part_count);    /* §1.7: the pool's live count —
                                               thousands at one draw, says the
@@ -16669,7 +16672,7 @@ static void render(AppState *state) {
                  g_commands, G_COMMAND_COUNT, state->fb_width, state->fb_height);
     editor_draw_overlay(state);
     ui_end();
-    yardstick_ms(&state->t_post, glfwGetTime() - rt2);
+    yardstick_ms(&state->t_overlay, glfwGetTime() - rt3);   /* the 2D overlay/HUD slice */
 }
 
 /* ---- note editing (item 8 piece 5) ---- */
