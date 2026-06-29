@@ -15222,19 +15222,135 @@ static RhiTexture pictures_preview(AppState *st, const char *ref) {
     if (!ref || !ref[0]) { RhiTexture t; t.id = 0; return t; }
     return load_texture(ref);                /* the actual image, cached sRGB */
 }
-/* --- Places provider (STUB bodies — Task 6 implements) --- */
+/* --- Places provider --- a seeded saved-locations catalog kept under a hidden
+   global anchor (meta["places"], persisted in scene.stml, re-found by tag — the
+   inventory-bag pattern). Each child carries lat/lon/zoom/basemap meta; Place
+   spawns a map board at that view (spawn_map_board), and the preview renders a
+   head-on map thumbnail into one persistent render target. */
+static sol_u32 places_anchor_find(AppState *st) {
+    sol_u32 i;
+    for (i = 0; i < st->scene.count; i++)
+        if (scene_meta_get(&st->scene, st->scene.objects[i].handle, "places"))
+            return st->scene.objects[i].handle;
+    return 0;
+}
+static sol_u32 places_anchor(AppState *st) {
+    Mesh empty; vec3 z; quat q; vec3 one; sol_u32 a; int i;
+    /* seed list (find-or-create: only built the first time) */
+    static const struct { const char *name; double lat, lon; int zoom; } SEED[] = {
+        { "London",     51.51,   -0.13, 5 }, { "Paris",      48.85,    2.35, 5 },
+        { "New York",   40.71,  -74.01, 5 }, { "Tokyo",      35.68,  139.69, 6 },
+        { "Cairo",      30.04,   31.24, 5 }, { "Sydney",    -33.87,  151.21, 5 },
+        { "Rio",       -22.91,  -43.17, 5 }, { "Reykjavik",  64.15,  -21.94, 5 }
+    };
+    a = places_anchor_find(st);
+    if (a) return a;
+    memset(&empty, 0, sizeof empty);
+    z = vec3_make(0.0f, 0.0f, 0.0f); q = quat_identity(); one = vec3_make(1.0f, 1.0f, 1.0f);
+    a = scene_add(&st->scene, 0, empty, z, q, one);
+    scene_meta_set(&st->scene, a, "places", "1");
+    for (i = 0; i < (int)(sizeof SEED / sizeof SEED[0]); i++) {
+        sol_u32 c = scene_add(&st->scene, a, empty, z, q, one);
+        char buf[32];
+        scene_meta_set(&st->scene, c, "name", SEED[i].name);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        sprintf(buf, "%.6f", SEED[i].lat);  scene_meta_set(&st->scene, c, "lat",  buf);
+        sprintf(buf, "%.6f", SEED[i].lon);  scene_meta_set(&st->scene, c, "lon",  buf);
+        sprintf(buf, "%d",    SEED[i].zoom); scene_meta_set(&st->scene, c, "zoom", buf);
+#pragma clang diagnostic pop
+        scene_meta_set(&st->scene, c, "basemap", "relief");
+    }
+    return a;
+}
 static int places_enumerate(AppState *st, BrowserItem *out, int cap) {
-    (void)st;
-    if (cap < 1) return 0;
-    strcpy(out[0].name, "(places: task 6)"); out[0].ref[0] = '\0';
-    return 1;
+    sol_u32 anchor = places_anchor(st);   /* creates + seeds on first call */
+    int     i, n = 0;
+    for (i = 0; i < (int)st->scene.count && n < cap; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        const char  *name;
+        if (o->parent != anchor) continue;
+        name = scene_meta_get(&st->scene, o->handle, "name");
+        strncpy(out[n].name, name ? name : "?", BROWSER_NAME_CAP - 1);
+        out[n].name[BROWSER_NAME_CAP - 1] = '\0';
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        sprintf(out[n].ref, "%u", (unsigned)o->handle);   /* the handle, as a decimal ref */
+#pragma clang diagnostic pop
+        n++;
+    }
+    return n;
 }
 static int places_commands(AppState *st, const char *ref, const char **out, int cap) {
-    (void)st; (void)ref; if (cap < 1) return 0; out[0] = "Place"; return 1;
+    (void)st; (void)ref;
+    if (cap < 1) return 0;
+    out[0] = "Place";
+    return 1;
 }
-static void places_run(AppState *st, const char *ref, int cmd) { (void)st; (void)ref; (void)cmd; }
+/* Place (cmd 0): spawn a map board at the catalog entry's stored view, then save. */
+static void places_run(AppState *st, const char *ref, int cmd) {
+    sol_u32     h;
+    const char *slat, *slon, *szoom, *style;
+    if (cmd != 0) return;                    /* only "Place" */
+    if (!ref || !ref[0]) return;
+    h = (sol_u32)atoi(ref);
+    if (!scene_get(&st->scene, h)) return;
+    slat  = scene_meta_get(&st->scene, h, "lat");
+    slon  = scene_meta_get(&st->scene, h, "lon");
+    szoom = scene_meta_get(&st->scene, h, "zoom");
+    style = scene_meta_get(&st->scene, h, "basemap");
+    spawn_map_board(st, slat ? atof(slat) : 0.0, slon ? atof(slon) : 0.0,
+                    szoom ? atoi(szoom) : 0, style ? style : "relief");
+    scene_save(&st->scene, "scene.stml");
+}
+
+static RhiRenderTarget g_browser_map_rt;   /* persistent; reused every call (no per-call alloc) */
+
 static RhiTexture places_preview(AppState *st, const char *ref) {
-    RhiTexture t; (void)st; (void)ref; t.id = 0; return t;
+    sol_u32     h;
+    const char *slat, *slon, *szoom, *style;
+    double      lon, lat, u0, v0, u1, v1;
+    int         z;
+    MeshBuilder mb;
+    Mesh        mesh;
+    Material    mat;
+    mat4        view, proj, model;
+    vec3        ctr, eye;
+    RhiTexture  none;
+    none.id = 0;
+    if (!ref || !ref[0]) return none;
+    h = (sol_u32)atoi(ref);
+    if (!scene_get(&st->scene, h)) return none;
+    slat  = scene_meta_get(&st->scene, h, "lat");
+    slon  = scene_meta_get(&st->scene, h, "lon");
+    szoom = scene_meta_get(&st->scene, h, "zoom");
+    style = scene_meta_get(&st->scene, h, "basemap");
+    lat = slat ? atof(slat) : 0.0;
+    lon = slon ? atof(slon) : 0.0;
+    z   = szoom ? atoi(szoom) : 0;
+    if (z < 0) z = 0;
+    if (z > MAP_ZMAX) z = MAP_ZMAX;
+    mapmath_window(lon, lat, z, (double)(MAP_BOARD_W / MAP_BOARD_H), &u0, &v0, &u1, &v1);
+    mb_init(&mb);
+    make_map_quad(&mb, MAP_BOARD_W, MAP_BOARD_H, (sol_f32)u0, (sol_f32)v0, (sol_f32)u1, (sol_f32)v1);
+    mesh = mesh_from_builder(&mb);
+    mb_free(&mb);
+    mat = material_default();
+    mat.albedo_tex = load_texture(basemap_path(style));
+    if (!mat.albedo_tex.id) mat.base_color = vec3_make(0.32f, 0.34f, 0.38f);
+    if (!g_browser_map_rt.id)
+        g_browser_map_rt = rhi_create_render_target(INV_THUMB_SIZE, INV_THUMB_SIZE, RHI_TEX_RGBA8);
+    ctr   = vec3_make(0.0f, MAP_BOARD_H * 0.5f, 0.0f);          /* head-on: flat quad faces +Z */
+    eye   = vec3_make(0.0f, MAP_BOARD_H * 0.5f, MAP_BOARD_W * 1.2f);
+    view  = mat4_look_at(eye, ctr, vec3_make(0.0f, 1.0f, 0.0f));
+    proj  = mat4_perspective(sol_radians(35.0f), 1.0f, 0.05f, 100.0f);
+    model = mat4_identity();
+    rhi_begin_pass(st->inv_thumb_hdr, RHI_CLEAR_ALL, 0.10f, 0.12f, 0.15f, 1.0f);
+    draw_mesh(st, mesh, model, view, proj, eye, 0.0f, mat);
+    rhi_end_pass();
+    inventory_thumb_tonemap(st, g_browser_map_rt);
+    mesh_destroy(&mesh);
+    return rhi_render_target_texture(g_browser_map_rt);
 }
 
 static const TypeProvider g_providers[] = {
