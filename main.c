@@ -9,6 +9,7 @@
 
 #include "rhi.h"                 /* the graphics seam — no GL above here */
 #include "mesh.h"
+#include "mapmath.h"             /* equirect lon/lat<->UV crop window (world-map boards) */
 #include "gothic.h"              /* the kit: church_plan + queries (P6) */
 #include "flora.h"               /* trees: the canopy + species (P7) */
 #include "rock.h"                /* boulders + the pebble unit (P7 item 6) */
@@ -13006,6 +13007,17 @@ static void watch_poll(AppState *st) {
     }
 }
 
+/* world-map boards: bundled public-domain equirectangular basemaps (gitignored
+   sourced-binary exception). A map board is a quad cropped to a lon/lat window. */
+#define MAP_BOARD_W 1.6f
+#define MAP_BOARD_H 0.8f          /* aspect 2:1, matching the equirect source */
+#define MAP_ZMAX    6
+
+static const char *basemap_path(const char *style) {
+    if (style && strcmp(style, "satellite") == 0) return "basemap_satellite.jpg";
+    return "basemap_relief.jpg";  /* default: Natural Earth relief */
+}
+
 /* The mesh-ref resolver, GPU half (P3 item 1): realize geometry for every
    object whose ref names a generator and whose mesh is still empty. Runs
    AFTER rhi_init (it uploads) and after scene_load or scene-building — the
@@ -13025,6 +13037,7 @@ static void scene_resolve_meshes(Scene *s) {
         if (!o->mesh_ref || o->mesh.index_count != 0) continue;
         if (strcmp(o->mesh_ref, "arrow") == 0) continue;   /* scene-derived:
                                                               arrows_rebuild owns it */
+        if (strcmp(o->mesh_ref, "map") == 0) continue;     /* built from meta below */
         keyed = mesh_asset_key(o, key);
         if (keyed && asset_acquire(&g_mesh_assets, key, &o->mesh, sizeof o->mesh))
             continue;                          /* the shape already lives: borrow it */
@@ -13083,6 +13096,40 @@ static void scene_resolve_meshes(Scene *s) {
         if (o->mesh_ref && strcmp(o->mesh_ref, "picture") == 0 &&
             o->content && o->content[0] && !o->material.albedo_tex.id)
             o->material.albedo_tex = load_texture(o->content);
+    }
+
+    /* map boards: build the lon/lat-cropped quad from meta and bind the bundled
+       equirectangular basemap. Geometry is per-object (unique UVs) so it is NOT
+       routed through the shared mesh asset store; the basemap texture IS shared
+       via load_texture. Missing basemap file -> a flat placeholder tint. */
+    for (i = 0; i < s->count; i++) {
+        SceneObject *o = &s->objects[i];
+        const char *slat, *slon, *szoom, *style;
+        double lon, lat, u0, v0, u1, v1;
+        int z;
+        MeshBuilder mb;
+        if (!o->mesh_ref || strcmp(o->mesh_ref, "map") != 0) continue;
+        if (o->mesh.index_count != 0) continue;
+        slat  = scene_meta_get(s, o->handle, "lat");
+        slon  = scene_meta_get(s, o->handle, "lon");
+        szoom = scene_meta_get(s, o->handle, "zoom");
+        style = scene_meta_get(s, o->handle, "basemap");
+        lat = slat  ? atof(slat)  : 0.0;
+        lon = slon  ? atof(slon)  : 0.0;
+        z   = szoom ? atoi(szoom) : 0;
+        if (z < 0) z = 0;
+        if (z > MAP_ZMAX) z = MAP_ZMAX;
+        mapmath_window(lon, lat, z, (double)(MAP_BOARD_W / MAP_BOARD_H),
+                       &u0, &v0, &u1, &v1);
+        mb_init(&mb);
+        make_map_quad(&mb, MAP_BOARD_W, MAP_BOARD_H,
+                      (sol_f32)u0, (sol_f32)v0, (sol_f32)u1, (sol_f32)v1);
+        o->mesh = mesh_from_builder(&mb);
+        mb_free(&mb);
+        o->material = material_default();
+        o->material.albedo_tex = load_texture(basemap_path(style));
+        if (!o->material.albedo_tex.id)
+            o->material.base_color = vec3_make(0.32f, 0.34f, 0.38f); /* "no basemap" */
     }
 }
 
