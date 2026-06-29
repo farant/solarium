@@ -6425,6 +6425,9 @@ static sol_bool mesh_asset_key(const SceneObject *o, char *buf) {
        buffer-id reuse, blanking an unrelated object (the disappearing room). */
     if (strcmp(o->mesh_ref, "room") == 0 ||
         strcmp(o->mesh_ref, "walkway") == 0) return SOL_FALSE;
+    if (o->mesh_ref && strcmp(o->mesh_ref, "map") == 0) return SOL_FALSE;  /* unique
+        per-object UVs (lon/lat crop): owned, never shared -> freed via mesh_destroy
+        like an arrow, not the asset store */
     n = mesh_ref_schema(o->mesh_ref, &names, &defaults);
     if (n < 0) return SOL_FALSE;
     (void)defaults;
@@ -9021,6 +9024,15 @@ static void inventory_stow(AppState *st) {
     printf("stowed an item\n");
 }
 
+/* A flat wall display that hangs and slides like a picture: image pictures, the
+   whiteboard slab, and world maps. Deliberately NOT used by board_is_mounted
+   (which stays picture/board-only) so maps never enter the corner-RESIZE path. */
+static sol_bool is_wall_mountable(const char *mr) {
+    return (sol_bool)(mr && (strcmp(mr, "picture") == 0 ||
+                             strcmp(mr, "board")   == 0 ||
+                             strcmp(mr, "map")     == 0));
+}
+
 /* An image card (mesh_ref "card" with an image content) is the reusable
    "picture" the spec means: the carry/place path (the picture branch in
    cmd_carry_toggle) already HANGS a copy on the wall and snaps the card back
@@ -9362,9 +9374,12 @@ static int picture_move_pick(AppState *st, GLFWwindow *w) {
     if (!o || !o->mesh_ref) return 0;
     if (strcmp(o->mesh_ref, "picture") != 0 &&
         strcmp(o->mesh_ref, "window")  != 0) {     /* a window slides on its wall too */
-        if (strcmp(o->mesh_ref, "board") != 0 ||
-            !board_is_mounted(&st->scene, st->selected_handle))
-            return 0;
+        sol_bool slide_ok = SOL_FALSE;
+        if (strcmp(o->mesh_ref, "board") == 0)
+            slide_ok = board_is_mounted(&st->scene, st->selected_handle);
+        else if (strcmp(o->mesh_ref, "map") == 0)
+            slide_ok = (sol_bool)(o->parent != 0);  /* a map slides only on a wall */
+        if (!slide_ok) return 0;
     }
     yaw = board_yaw(&st->scene, st->selected_handle);
     n   = vec3_make((float)sin((double)yaw), 0.0f, (float)cos((double)yaw));
@@ -9767,8 +9782,7 @@ static void carry_update(AppState *st) {
             }
         }
     }
-    if (o->mesh_ref && (strcmp(o->mesh_ref, "board") == 0 ||
-                        strcmp(o->mesh_ref, "picture") == 0)) {
+    if (o->mesh_ref && is_wall_mountable(o->mesh_ref)) {
         const char *mr   = o->mesh_ref;            /* re-mount a board OR a picture */
         sol_u32 room = descend_room_at(&st->scene, st->camera.pos);
         if (room != 0) {
@@ -13159,16 +13173,49 @@ static void scene_resolve_meshes(Scene *s) {
    you (yaw = atan2(-fwd.x, -fwd.z)), the same facing the whiteboard mint uses. */
 static sol_u32 spawn_map_board(AppState *st, double lat, double lon, int z,
                                const char *style) {
-    Mesh    empty;
-    vec3    f   = camera_forward(&st->camera);
-    vec3    pos = carry_place_point(st);
-    quat    rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
-                                       atan2f(-f.x, -f.z));
-    sol_u32 h;
-    char    buf[32];
+    Mesh     empty;
+    sol_u32  room = descend_room_at(&st->scene, st->camera.pos);
+    sol_u32  parent = 0, h;
+    vec3     pos;
+    quat     rot;
+    sol_bool mounted = SOL_FALSE;
+    Ray      ray;
+    char     buf[32];
+    ray.origin = st->camera.pos;
+    ray.dir    = camera_forward(&st->camera);
+    if (room != 0) {
+        RoomRect r = editor_room_rect(&st->scene, room);
+        int   wall;
+        vec3  center;
+        float ceil_y = r.floor_y + room_interior_height(&st->scene, room);
+        if (descend_wall_mount(r, ray, ceil_y,
+                               MAP_BOARD_W * 0.5f, MAP_BOARD_H * 0.5f, 0.03f,
+                               &wall, &center)) {
+            static const float wyaw[4] = { 0.0f, -90.0f, 180.0f, 90.0f };
+            vec3 P;
+            wall_mount_gable(&st->scene, room, wall, ray,
+                             MAP_BOARD_W * 0.5f, MAP_BOARD_H * 0.5f, 0.03f, &center);
+            P       = vec3_make(center.x, center.y - MAP_BOARD_H * 0.5f, center.z);
+            parent  = room;
+            pos     = scene_world_to_local(&st->scene, room, P);
+            rot     = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f),
+                                           sol_radians(wyaw[wall]));
+            mounted = SOL_TRUE;
+        }
+    }
+    if (!mounted) {                                 /* floor fallback (original behavior) */
+        vec3 f = camera_forward(&st->camera);
+        pos = carry_place_point(st);
+        rot = quat_from_axis_angle(vec3_make(0.0f, 1.0f, 0.0f), atan2f(-f.x, -f.z));
+    }
     memset(&empty, 0, sizeof empty);
-    h = scene_add(&st->scene, 0, empty, pos, rot, vec3_make(1.0f, 1.0f, 1.0f));
+    h = scene_add(&st->scene, parent, empty, pos, rot, vec3_make(1.0f, 1.0f, 1.0f));
     scene_mesh_ref_set(&st->scene, h, "map");
+    {
+        float mp[3];
+        mp[0] = MAP_BOARD_W; mp[1] = MAP_BOARD_H; mp[2] = 0.03f;
+        scene_mesh_params_set(&st->scene, h, mp, 3);   /* dims for the shared mount/slide math */
+    }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     sprintf(buf, "%.6f", lat);  scene_meta_set(&st->scene, h, "lat",  buf);
@@ -13176,7 +13223,10 @@ static sol_u32 spawn_map_board(AppState *st, double lat, double lon, int z,
     sprintf(buf, "%d",    z);   scene_meta_set(&st->scene, h, "zoom", buf);
 #pragma clang diagnostic pop
     scene_meta_set(&st->scene, h, "basemap", style && style[0] ? style : "relief");
-    mint_tag_ws(st, h);
+    if (parent == 0)
+        mint_tag_ws(st, h);          /* floor: tag active ws. A mounted map inherits
+                                        the workspace via its room parent (like
+                                        spawn_image_picture). */
     scene_resolve_meshes(&st->scene);
     return h;
 }

@@ -1270,6 +1270,13 @@ static void emit_picture(MeshBuilder *b, const float *p) { make_picture(b, p[0],
 static void emit_window(MeshBuilder *b, const float *p) { make_window(b, p[0], p[1], p[2], p[3], p[4]); }
 static void emit_window_fill(MeshBuilder *b, const float *p) { make_window_fill(b, p[0], p[1], p[2], p[3], p[4]); }
 static void emit_window_glass(MeshBuilder *b, const float *p) { make_window_glass(b, p[0], p[1], p[2]); }
+static void emit_map(MeshBuilder *b, const float *p) {
+    /* Never actually called: scene_resolve_meshes special-cases "map" before
+       mesh_ref_build. Present so the registry is well-formed and as a safe
+       fallback (full basemap, no crop). Dimensions only used via mesh_ref_param
+       by the shared wall-mount/slide math. */
+    make_map_quad(b, p[0], p[1], 0.0f, 0.0f, 1.0f, 1.0f);
+}
 #define BOARD_TILE_M 3.0f   /* meters per board-texture repeat (the plaster tile size) */
 static void emit_board(MeshBuilder *b, const float *p) {
     make_card(b, p[0], p[1], p[2]);
@@ -1457,6 +1464,7 @@ static const MeshRefEntry REGISTRY[] = {
     { "gate", 4, { "w", "h", "t", "post" }, { 1.6f, 2.4f, 0.18f, 0.16f }, emit_gate },
     { "card", 3, { "w", "h", "t" },   { 0.35f, 0.5f, 0.03f }, emit_card },
     { "picture", 3, { "w", "h", "t" }, { 1.2f, 0.9f, 0.03f }, emit_picture },
+    { "map",     3, { "w", "h", "t" }, { 1.6f, 0.8f, 0.03f }, emit_map },     /* keep w,h in sync with MAP_BOARD_W/H */
     { "window", 5, { "w", "h", "t", "fw", "style" }, { 1.2f, 1.4f, 0.20f, 0.08f /* == WINDOW_FRAME_W */, 0.0f }, emit_window },
     { "window_fill", 5, { "w", "h", "t", "fw", "style" }, { 1.2f, 1.4f, 0.20f, 0.08f, 0.0f }, emit_window_fill },
     { "window_glass", 3, { "w", "h", "style" }, { 1.2f, 1.4f, 0.0f }, emit_window_glass },
