@@ -21,6 +21,7 @@
 #include "glb.h"
 #include "command.h"             /* the shared command registry (palette) */
 #include "palette.h"             /* the command palette overlay (Task 3) */
+#include "browser.h"             /* the entity-browser Miller-columns HUD */
 #include "ui.h"                  /* the 2D overlay (P3 item 2) */
 #include "mirror.h"              /* mirror rooms reflect real folders (P3 item 6) */
 #include "font.h"                /* the SDF glyph atlas (P3 item 3) */
@@ -2862,6 +2863,8 @@ typedef struct AppState {
     Mesh        caret_mesh;       /* unit caret quad; built once on first use */
     Mesh        folderbook_leaves_mesh; /* unit box for a folder book's white page block; built once */
     Palette     palette;           /* command palette state (palette.h) */
+    sol_bool    browser_open;      /* the entity-browser HUD is up */
+    Browser     browser;           /* Miller-columns nav state (browser.h) */
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
        persists. The source object hides while its book is aloft. */
@@ -10894,7 +10897,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
        the first click leaves the field, the next one acts. The inventory
        screen joins this gate: it suppresses movement and click-takes items. */
     if (st->edit_handle != 0 || st->palette.open || reader_is_editing(st) ||
-        st->inv_open || reader_is_app(st)) {
+        st->inv_open || reader_is_app(st) || st->browser_open) {
         in->forward = in->back = in->left = in->right = SOL_FALSE;
         in->up = in->down = SOL_FALSE;
         in->look_dx = 0.0f;
@@ -15110,6 +15113,119 @@ static void inventory_draw_overlay(AppState *st) {
     }
 }
 
+/* ---- entity browser HUD (Miller columns) ----------------------------------
+   The pure nav state lives in browser.c; this is the shell: stub column data
+   for v1 (real providers arrive in Task 4), the key handler that translates a
+   BrowserKey into a browser_key() call + open/close, and the 3-column draw. */
+
+static const char *BROWSER_TYPES[2] = { "Pictures", "Places" };
+
+/* Per-column visible row counts. Stub for v1; Task 4 swaps in provider counts. */
+static void browser_columns_counts(AppState *st, int counts[3]) {
+    (void)st;
+    counts[0] = 2;   /* the two types */
+    counts[1] = 3;   /* stub entities */
+    counts[2] = 1;   /* stub command: "Place" */
+}
+
+static void browser_handle_key(AppState *st, BrowserKey pk) {
+    int           counts[3];
+    BrowserAction a;
+    browser_columns_counts(st, counts);
+    a = browser_key(&st->browser, pk, counts);
+    if (a == BROWSER_CLOSE) { st->browser_open = SOL_FALSE; return; }
+    if (a == BROWSER_ACTIVATE) {
+        /* Task 4 wires provider->run here. */
+        st->browser_open = SOL_FALSE;
+    }
+}
+
+static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
+    Font       *font = st->ui_font;
+    float       us, sw, sh;
+    float       margin, panel_x, panel_y, panel_w, panel_h, gap, col_w;
+    float       pad, row_h, ts, hdr_h;
+    int         counts[3];
+    int         col;
+    const char *labels1[3];
+
+    if (font == NULL) return;
+
+    sw = (float)fb_w; sh = (float)fb_h;
+    us = sh / 1080.0f;
+
+    browser_columns_counts(st, counts);
+
+    labels1[0] = "entity 0";
+    labels1[1] = "entity 1";
+    labels1[2] = "entity 2";
+
+    margin  = sw * 0.06f;
+    panel_x = margin;
+    panel_w = sw - margin * 2.0f;
+    panel_h = sh * 0.60f;
+    panel_y = sh * 0.18f;
+
+    gap   = 10.0f * us;
+    col_w = (panel_w - gap * 2.0f) / 3.0f;
+    pad   = 12.0f * us;
+    row_h = 26.0f * us;
+    ts    = 0.45f * us;
+    hdr_h = 24.0f * us;   /* filter strip height */
+
+    ui_quad(0.0f, 0.0f, sw, sh, 0.03f, 0.03f, 0.05f, 0.55f);   /* dim backdrop */
+
+    for (col = 0; col < BROWSER_COLS; col++) {
+        float    cx = panel_x + (col_w + gap) * (float)col;
+        float    cy = panel_y;
+        int      rows = counts[col];
+        int      r;
+        float    by;
+        sol_bool focused = (st->browser.focus == col) ? SOL_TRUE : SOL_FALSE;
+
+        ui_quad(cx, cy, col_w, panel_h, 0.08f, 0.09f, 0.11f, 0.92f);
+        if (focused)
+            ui_quad_outline(cx, cy, col_w, panel_h, 1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
+        else
+            ui_quad_outline(cx, cy, col_w, panel_h, 1.0f * us, 0.45f, 0.47f, 0.52f, 0.7f);
+
+        by = cy + pad;
+
+        /* filter strip: visible only on the focused column while filtering. */
+        if (focused && st->browser.filtering) {
+            char  line[BROWSER_FILTER_CAP + 4];
+            int   ll = 0, q;
+            float fy;
+            ui_quad(cx + pad * 0.5f, by, col_w - pad, hdr_h, 0.16f, 0.18f, 0.12f, 0.95f);
+            line[ll++] = '/';
+            for (q = 0; q < st->browser.flen[col] && ll < (int)sizeof line - 2; q++)
+                line[ll++] = st->browser.filter[col][q];
+            line[ll++] = '_';
+            line[ll]   = '\0';
+            fy = by + font_ascent(font) * ts;
+            ui_text(font, line, cx + pad, fy, ts, 0.95f, 0.92f, 0.70f, 1.0f);
+            by += hdr_h + 4.0f * us;
+        }
+
+        for (r = 0; r < rows; r++) {
+            float       ry = by + row_h * (float)r;
+            float       ty = ry + font_ascent(font) * ts;
+            const char *label;
+            if (ry + row_h > cy + panel_h) break;            /* clip to panel */
+            if (col == 0)      label = (r < 2) ? BROWSER_TYPES[r] : "?";
+            else if (col == 1) label = labels1[r];
+            else               label = "Place";
+            if (r == st->browser.sel[col]) {                 /* selection / breadcrumb */
+                if (focused)
+                    ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.20f, 0.24f, 0.30f, 0.9f);
+                else
+                    ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.13f, 0.14f, 0.17f, 0.8f);
+            }
+            ui_text(font, label, cx + pad, ty, ts, 0.92f, 0.92f, 0.92f, 1.0f);
+        }
+    }
+}
+
 /* The editor's 2D affordances, drawn inside the open UI batch. */
 static void editor_draw_overlay(AppState *st) {
     float   aspect = (st->fb_height > 0)
@@ -16912,6 +17028,7 @@ static void render(AppState *state) {
     inventory_draw_overlay(state);
     palette_draw(&state->palette, state, state->mono_font,
                  g_commands, G_COMMAND_COUNT, state->fb_width, state->fb_height);
+    if (state->browser_open) browser_draw_overlay(state, state->fb_width, state->fb_height);
     editor_draw_overlay(state);
     ui_end();
     yardstick_ms(&state->t_overlay, glfwGetTime() - rt3);   /* the 2D overlay/HUD slice */
@@ -17135,6 +17252,7 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     int       n;
     if (!st) return;
     if (st->palette.open) { palette_input_char(&st->palette, cp); return; }
+    if (st->browser_open) { if (st->browser.filtering) browser_char(&st->browser, (char)cp); return; }
     if (reader_is_editing(st)) {
         n = utf8_encode(cp, enc);
         if (n > 0) reader_page_append(st, enc, n);
@@ -17257,6 +17375,30 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         return;
     }
 
+    /* The entity browser owns the keyboard while open (ranger-style). Esc/
+       Enter/Backspace/Up/Down always map; hjkl + Left/Right + '/' map only in
+       nav mode, so in filter mode the letters fall through to on_char. */
+    if (st->browser_open) {
+        if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+            BrowserKey pk = BROWSER_KEY_NONE;
+            if      (key == GLFW_KEY_ESCAPE)    pk = BROWSER_KEY_CANCEL;
+            else if (key == GLFW_KEY_ENTER ||
+                     key == GLFW_KEY_KP_ENTER)  pk = BROWSER_KEY_ENTER;
+            else if (key == GLFW_KEY_BACKSPACE) pk = BROWSER_KEY_BACKSPACE;
+            else if (key == GLFW_KEY_UP)        pk = BROWSER_KEY_UP;
+            else if (key == GLFW_KEY_DOWN)      pk = BROWSER_KEY_DOWN;
+            else if (!st->browser.filtering) {  /* nav-only keys */
+                if      (key == GLFW_KEY_LEFT  || key == GLFW_KEY_H) pk = BROWSER_KEY_LEFT;
+                else if (key == GLFW_KEY_RIGHT || key == GLFW_KEY_L) pk = BROWSER_KEY_RIGHT;
+                else if (key == GLFW_KEY_K)     pk = BROWSER_KEY_UP;
+                else if (key == GLFW_KEY_J)     pk = BROWSER_KEY_DOWN;
+                else if (key == GLFW_KEY_SLASH) pk = BROWSER_KEY_FILTER;
+            }
+            if (pk != BROWSER_KEY_NONE) browser_handle_key(st, pk);
+        }
+        return;
+    }
+
     /* Place mode owns the keyboard while previewing furniture. */
     if (st->place_active) {
         if (action == GLFW_PRESS || action == GLFW_REPEAT) {
@@ -17288,6 +17430,15 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && (mods & GLFW_MOD_SHIFT)
         && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0) {
         palette_open_now(&st->palette);
+        return;
+    }
+
+    /* ';' (plain) opens the entity browser when nothing else owns the keyboard. */
+    if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && !(mods & GLFW_MOD_SHIFT)
+        && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0
+        && !st->palette.open && !st->inv_open && !st->editor.active) {
+        browser_reset(&st->browser);
+        st->browser_open = SOL_TRUE;
         return;
     }
 
