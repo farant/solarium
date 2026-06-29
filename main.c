@@ -17229,7 +17229,21 @@ int main(void) {
 
     rhi_configure_window();   /* backend sets the API/context hints */
 
-    window = glfwCreateWindow(960, 540, "solarium", NULL, NULL);
+    {   /* launch fullscreen on the primary monitor, matching its current video
+           mode so there's no display-mode switch; fall back to a window if no
+           monitor is reported (headless) */
+        GLFWmonitor       *mon  = glfwGetPrimaryMonitor();
+        const GLFWvidmode *mode = mon ? glfwGetVideoMode(mon) : (const GLFWvidmode *)0;
+        if (mon && mode) {
+            glfwWindowHint(GLFW_RED_BITS,     mode->redBits);
+            glfwWindowHint(GLFW_GREEN_BITS,   mode->greenBits);
+            glfwWindowHint(GLFW_BLUE_BITS,    mode->blueBits);
+            glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
+            window = glfwCreateWindow(mode->width, mode->height, "solarium", mon, NULL);
+        } else {
+            window = glfwCreateWindow(960, 540, "solarium", NULL, NULL);
+        }
+    }
     if (!window) {
         fprintf(stderr, "glfwCreateWindow failed\n");
         glfwTerminate();
