@@ -37,6 +37,7 @@ int tmcache_find(TmCache *c, const void *font, const char *text, int len, int fr
     sol_u32 hash  = tmcache_hash(font, text, len);
     int     start = (int)(hash & (TMCACHE_CAP - 1));
     int     i;
+    assert(len >= 0 && len < TMCACHE_TEXT);
     for (i = 0; i < TMCACHE_PROBE; i++) {
         int           s = (start + i) & (TMCACHE_CAP - 1);
         TmCacheEntry *e = &c->e[s];

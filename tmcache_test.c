@@ -31,6 +31,10 @@ int main(void) {
     CHECK(tmcache_find(&c, F, "hell",  4, 3) < 0);                       /* len  */
     CHECK(tmcache_find(&c, (const void *)0x2000, "hello", 5, 3) < 0);    /* font */
 
+    /* 3b) len bounds the compare: "hello" is stored at len 5; querying "helloX"
+       with len 5 HITS (only the first 5 bytes are compared). */
+    CHECK(tmcache_find(&c, F, "helloX", 5, 4) == slot);
+
     /* 4) LRU eviction within a full probe window evicts the oldest. Engineer
        TMCACHE_PROBE+1 texts that collide to one start bucket. */
     {
