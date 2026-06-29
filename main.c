@@ -9162,10 +9162,20 @@ static void cmd_carry_toggle(AppState *st) {
                 o->parent = st->file_target;          /* re-parent: the furniture owns it now */
                 o->pos    = st->file_local;           /* furniture-local resting pos */
                 o->rot    = st->file_rot;
-                {   /* a shelf re-flows all its items tight after the drop */
+                {   /* a shelf re-flows its items tight after the drop; a board
+                       adopts the dropped item onto its currently-visible page
+                       (else it lands on the root page "/" and is hidden on the
+                       page that was actually showing) */
                     SceneObject *ft = scene_get(&st->scene, st->file_target);
                     if (ft && ft->mesh_ref && furniture_is_shelf(ft->mesh_ref))
                         shelf_repack(st, st->file_target);
+                    else if (ft && ft->mesh_ref &&
+                             strcmp(ft->mesh_ref, "board") == 0) {
+                        const char *ap = scene_meta_get(&st->scene,
+                                             st->file_target, "active_page");
+                        scene_meta_set(&st->scene, st->carried, "page",
+                                       ap ? ap : "/");
+                    }
                 }
                 scene_resolve_meshes(&st->scene);
                 apply_kind_materials(&st->scene);
