@@ -53,6 +53,11 @@ void ui_line(float x0, float y0, float x1, float y1, float t,
    (sampled to linear) will come out dark here. */
 void ui_textured_quad(RhiTexture tex, float x, float y, float w, float h);
 
+/* Like ui_textured_quad but with the texture flipped vertically (texture row 0
+   at the quad's BOTTOM) — for stb-loaded images (flipped for GL at decode) and
+   GL render-targets, whose row 0 is the bottom. */
+void ui_textured_quad_flip(RhiTexture tex, float x, float y, float w, float h);
+
 /* One SDF glyph quad with explicit UVs, drawn through the TEXT pipeline
    (the smoothstep threshold decode — see ui.c). text.c's ui_text is the
    intended caller; the batch breaks between geometry and text spans. */

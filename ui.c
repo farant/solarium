@@ -307,6 +307,12 @@ void ui_textured_quad(RhiTexture tex, float x, float y, float w, float h) {
     push_rect(tex, x, y, w, h, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
 }
 
+void ui_textured_quad_flip(RhiTexture tex, float x, float y, float w, float h) {
+    if (!g_ui.ready || !tex.id) return;
+    /* v swapped: texture row 0 at the quad's BOTTOM (stb images + GL RTs). */
+    push_rect(tex, x, y, w, h, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+}
+
 void ui_glyph_quad(RhiTexture atlas, float x, float y, float w, float h,
                    float u0, float v0, float u1, float v1,
                    float r, float g, float b, float a) {

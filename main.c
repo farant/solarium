@@ -15501,6 +15501,15 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
             by += hdr_h + 4.0f * us;
         }
 
+        if (col == 2 && st->browser_preview_tex.id) {   /* preview the highlighted entity, ABOVE the command list */
+            float pv_w = col_w - pad;
+            float pv_h = pv_w * 0.6f;
+            if (pv_h > panel_h * 0.5f) pv_h = panel_h * 0.5f;
+            ui_textured_quad_flip(st->browser_preview_tex, cx + pad * 0.5f, by, pv_w, pv_h);
+            ui_quad_outline(cx + pad * 0.5f, by, pv_w, pv_h, 1.0f * us, 0.45f, 0.47f, 0.52f, 0.7f);
+            by += pv_h + pad;                            /* command rows start below the preview */
+        }
+
         for (r = 0; r < rows; r++) {
             float       ry = by + row_h * (float)r;
             float       ty = ry + font_ascent(font) * ts;
@@ -15519,17 +15528,8 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
         }
     }
 
-    /* preview box — sits in the third region, anchored at the bottom of the
-       command column. Stub providers return id 0, so nothing draws yet; Tasks
-       5/6 light it up. (Letterbox is skipped for v1 — square-ish is fine.) */
-    if (st->browser_preview_tex.id) {
-        float cx2  = panel_x + (col_w + gap) * 2.0f;
-        float side = col_w - pad;
-        float pvh  = (side < panel_h * 0.5f) ? side : panel_h * 0.5f;
-        float pvx  = cx2 + pad * 0.5f;
-        float pvy  = panel_y + panel_h - pvh - pad;
-        ui_textured_quad(st->browser_preview_tex, pvx, pvy, side, pvh);
-    }
+    /* (the preview box is drawn inside the col==2 iteration above, at the top of
+       the third region with the command list beneath it.) */
 }
 
 /* The editor's 2D affordances, drawn inside the open UI batch. */
