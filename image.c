@@ -60,6 +60,14 @@ void image_free(Image *img) {
     }
 }
 
+sol_bool image_dims(const char *path, int *out_w, int *out_h) {
+    int x, y, comp;
+    if (!stbi_info(path, &x, &y, &comp)) return SOL_FALSE;   /* header-only, no decode */
+    if (out_w) *out_w = x;
+    if (out_h) *out_h = y;
+    return SOL_TRUE;
+}
+
 sol_bool image_load_hdr(const char *path, HdrImage *out) {
     int    w, h, ch;
     float *data;

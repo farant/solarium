@@ -23,6 +23,10 @@ sol_bool image_load(const char *path, Image *out);                          /* f
 sol_bool image_load_from_memory(const unsigned char *data, int len, Image *out);  /* embedded bytes */
 void     image_free(Image *img);
 
+/* Pixel dimensions of an image file via a cheap header-only read (no full
+   decode). Returns false if the file can't be inspected. */
+sol_bool image_dims(const char *path, int *out_w, int *out_h);
+
 sol_bool image_load_hdr(const char *path, HdrImage *out);   /* Radiance .hdr -> linear float */
 void     image_hdr_free(HdrImage *img);
 

@@ -2885,6 +2885,7 @@ typedef struct AppState {
     int         browser_type_n, browser_ent_n, browser_cmd_n;   /* ranked visible counts */
     RhiTexture  browser_preview_tex;
     char        browser_preview_ref[BROWSER_REF_CAP];
+    float       browser_preview_aspect;
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
        persists. The source object hides while its book is aloft. */
@@ -14963,11 +14964,11 @@ static sol_bool inventory_thumb_mesh(AppState *st, sol_u32 item, Mesh *mesh, Mat
 /* Tonemap+encode the HDR scratch into `dst` using the EXISTING post pipeline,
    driven with neutral inputs (no bloom/godray/fog/grade/vignette) so the
    thumbnail is a clean sRGB-encoded RGBA8 that ui_textured_quad can show. */
-static void inventory_thumb_tonemap(AppState *st, RhiRenderTarget dst) {
+static void inventory_thumb_tonemap(AppState *st, RhiRenderTarget src_hdr, RhiRenderTarget dst) {
     mat4 ident = mat4_identity();
     rhi_begin_pass(dst, RHI_CLEAR_ALL, 0.0f, 0.0f, 0.0f, 1.0f);
     rhi_set_pipeline(st->post_pipeline);
-    rhi_bind_texture(rhi_render_target_texture(st->inv_thumb_hdr), 0);
+    rhi_bind_texture(rhi_render_target_texture(src_hdr), 0);
     rhi_bind_texture(st->inv_black_tex, 1);   /* uBloom (gated to 0 anyway)   */
     rhi_bind_texture(st->inv_black_tex, 2);   /* uDepth (fog gated off)       */
     rhi_bind_texture(st->inv_black_tex, 3);   /* uGodray = black (added raw)  */
@@ -15018,7 +15019,7 @@ static void inventory_thumb_render(AppState *st, sol_u32 item, RhiRenderTarget d
     rhi_begin_pass(st->inv_thumb_hdr, RHI_CLEAR_ALL, 0.10f, 0.12f, 0.15f, 1.0f);
     draw_mesh(st, mesh, model, view, proj, eye, 0.0f, mat);
     rhi_end_pass();
-    inventory_thumb_tonemap(st, dst);
+    inventory_thumb_tonemap(st, st->inv_thumb_hdr, dst);
 }
 
 /* Look up (or build) the cached thumbnail target for an item. {0} if the item
@@ -15147,7 +15148,7 @@ typedef struct {
     int        (*enumerate)(AppState *st, BrowserItem *out, int cap);
     int        (*commands)(AppState *st, const char *ref, const char **out, int cap);
     void       (*run)(AppState *st, const char *ref, int cmd);
-    RhiTexture (*preview)(AppState *st, const char *ref);       /* texture to blit; id 0 = none */
+    RhiTexture (*preview)(AppState *st, const char *ref, float *out_aspect);  /* tex (id 0=none); *out_aspect=w/h */
 } TypeProvider;
 
 /* --- Pictures provider --- enumerate the library/ image files and every
@@ -15217,9 +15218,12 @@ static void pictures_run(AppState *st, const char *ref, int cmd) {
     scene_resolve_meshes(&st->scene);              /* builds the card mesh + sRGB albedo */
     inventory_take(st, h);                         /* image-card carry setup */
 }
-static RhiTexture pictures_preview(AppState *st, const char *ref) {
+static RhiTexture pictures_preview(AppState *st, const char *ref, float *out_aspect) {
+    int w, h;
     (void)st;
     if (!ref || !ref[0]) { RhiTexture t; t.id = 0; return t; }
+    if (out_aspect && image_dims(ref, &w, &h) && h > 0)
+        *out_aspect = (float)w / (float)h;
     return load_texture(ref);                /* the actual image, cached sRGB */
 }
 /* --- Places provider --- a seeded saved-locations catalog kept under a hidden
@@ -15304,9 +15308,10 @@ static void places_run(AppState *st, const char *ref, int cmd) {
     scene_save(&st->scene, "scene.stml");
 }
 
-static RhiRenderTarget g_browser_map_rt;   /* persistent; reused every call (no per-call alloc) */
+static RhiRenderTarget g_browser_map_hdr;  /* persistent 2:1 HDR scratch for the map preview */
+static RhiRenderTarget g_browser_map_rt;   /* persistent 2:1 RGBA8; reused every call (no per-call alloc) */
 
-static RhiTexture places_preview(AppState *st, const char *ref) {
+static RhiTexture places_preview(AppState *st, const char *ref, float *out_aspect) {
     sol_u32     h;
     const char *slat, *slon, *szoom, *style;
     double      lon, lat, u0, v0, u1, v1;
@@ -15316,6 +15321,7 @@ static RhiTexture places_preview(AppState *st, const char *ref) {
     Material    mat;
     mat4        view, proj, model;
     vec3        ctr, eye;
+    float       fit;
     RhiTexture  none;
     none.id = 0;
     if (!ref || !ref[0]) return none;
@@ -15338,18 +15344,22 @@ static RhiTexture places_preview(AppState *st, const char *ref) {
     mat = material_default();
     mat.albedo_tex = load_texture(basemap_path(style));
     if (!mat.albedo_tex.id) mat.base_color = vec3_make(0.32f, 0.34f, 0.38f);
+    if (!g_browser_map_hdr.id)                                   /* 2:1 target so the 2:1 map fills it */
+        g_browser_map_hdr = rhi_create_render_target(INV_THUMB_SIZE, INV_THUMB_SIZE / 2, RHI_TEX_RGBA16F);
     if (!g_browser_map_rt.id)
-        g_browser_map_rt = rhi_create_render_target(INV_THUMB_SIZE, INV_THUMB_SIZE, RHI_TEX_RGBA8);
+        g_browser_map_rt = rhi_create_render_target(INV_THUMB_SIZE, INV_THUMB_SIZE / 2, RHI_TEX_RGBA8);
+    fit   = MAP_BOARD_H * 0.5f / (float)tan((double)sol_radians(17.5f)) * 1.08f;  /* fit the quad height */
     ctr   = vec3_make(0.0f, MAP_BOARD_H * 0.5f, 0.0f);          /* head-on: flat quad faces +Z */
-    eye   = vec3_make(0.0f, MAP_BOARD_H * 0.5f, MAP_BOARD_W * 1.2f);
+    eye   = vec3_make(0.0f, MAP_BOARD_H * 0.5f, fit);
     view  = mat4_look_at(eye, ctr, vec3_make(0.0f, 1.0f, 0.0f));
-    proj  = mat4_perspective(sol_radians(35.0f), 1.0f, 0.05f, 100.0f);
+    proj  = mat4_perspective(sol_radians(35.0f), MAP_BOARD_W / MAP_BOARD_H, 0.05f, 100.0f);
     model = mat4_identity();
-    rhi_begin_pass(st->inv_thumb_hdr, RHI_CLEAR_ALL, 0.10f, 0.12f, 0.15f, 1.0f);
+    rhi_begin_pass(g_browser_map_hdr, RHI_CLEAR_ALL, 0.05f, 0.05f, 0.07f, 1.0f);
     draw_mesh(st, mesh, model, view, proj, eye, 0.0f, mat);
     rhi_end_pass();
-    inventory_thumb_tonemap(st, g_browser_map_rt);
+    inventory_thumb_tonemap(st, g_browser_map_hdr, g_browser_map_rt);
     mesh_destroy(&mesh);
+    if (out_aspect) *out_aspect = MAP_BOARD_W / MAP_BOARD_H;
     return rhi_render_target_texture(g_browser_map_rt);
 }
 
@@ -15434,7 +15444,8 @@ static void browser_ensure_preview(AppState *st) {
           ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
     if (ti < 0 || !ref) { st->browser_preview_tex.id = 0; st->browser_preview_ref[0] = '\0'; return; }
     if (strcmp(ref, st->browser_preview_ref) == 0) return;       /* unchanged */
-    st->browser_preview_tex = g_providers[ti].preview(st, ref);
+    st->browser_preview_aspect = 1.0f;
+    st->browser_preview_tex = g_providers[ti].preview(st, ref, &st->browser_preview_aspect);
     strncpy(st->browser_preview_ref, ref, BROWSER_REF_CAP - 1);
     st->browser_preview_ref[BROWSER_REF_CAP - 1] = '\0';
 }
@@ -15502,12 +15513,20 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
         }
 
         if (col == 2 && st->browser_preview_tex.id) {   /* preview the highlighted entity, ABOVE the command list */
-            float pv_w = col_w - pad;
-            float pv_h = pv_w * 0.6f;
-            if (pv_h > panel_h * 0.5f) pv_h = panel_h * 0.5f;
-            ui_textured_quad_flip(st->browser_preview_tex, cx + pad * 0.5f, by, pv_w, pv_h);
-            ui_quad_outline(cx + pad * 0.5f, by, pv_w, pv_h, 1.0f * us, 0.45f, 0.47f, 0.52f, 0.7f);
-            by += pv_h + pad;                            /* command rows start below the preview */
+            float box_x = cx + pad * 0.5f;
+            float box_w = col_w - pad;
+            float box_h = box_w * 0.6f;
+            float a, iw, ih, ix, iy;
+            if (box_h > panel_h * 0.5f) box_h = panel_h * 0.5f;
+            a  = st->browser_preview_aspect > 0.0f ? st->browser_preview_aspect : 1.0f;
+            iw = box_w; ih = box_w / a;                       /* fit width... */
+            if (ih > box_h) { ih = box_h; iw = box_h * a; }   /* ...else fit height */
+            ix = box_x + (box_w - iw) * 0.5f;
+            iy = by + (box_h - ih) * 0.5f;
+            ui_quad(box_x, by, box_w, box_h, 0.05f, 0.05f, 0.07f, 0.95f);    /* letterbox backdrop */
+            ui_textured_quad_flip(st->browser_preview_tex, ix, iy, iw, ih);
+            ui_quad_outline(box_x, by, box_w, box_h, 1.0f * us, 0.45f, 0.47f, 0.52f, 0.7f);
+            by += box_h + pad;                           /* command rows start below the preview */
         }
 
         for (r = 0; r < rows; r++) {
