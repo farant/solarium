@@ -15584,7 +15584,7 @@ static void browser_handle_key(AppState *st, BrowserKey pk) {
                 strncpy(st->browser_disk_cwd, parent, sizeof st->browser_disk_cwd - 1);
                 st->browser_disk_cwd[sizeof st->browser_disk_cwd - 1] = '\0';
                 st->browser_items_type   = -1;
-                st->browser.sel[1]       = 0;
+                st->browser.sel[1]       = FILES_ACTIONS;   /* land on the contents, not the action rows */
                 st->browser.filter[1][0] = '\0';
                 st->browser.flen[1]      = 0;
                 browser_refresh(st);
@@ -15609,7 +15609,7 @@ static void browser_handle_key(AppState *st, BrowserKey pk) {
                     strncpy(st->browser_disk_cwd, ref, sizeof st->browser_disk_cwd - 1);
                     st->browser_disk_cwd[sizeof st->browser_disk_cwd - 1] = '\0';
                     st->browser_items_type   = -1;
-                    st->browser.sel[1]       = 0;
+                    st->browser.sel[1]       = FILES_ACTIONS;   /* land on the contents, not the action rows */
                     st->browser.filter[1][0] = '\0';
                     st->browser.flen[1]      = 0;
                     browser_refresh(st);
@@ -15763,6 +15763,43 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
         }
 
         by = cy + pad;
+
+        /* Current-folder header: fixed above the scrolling list, Files col 1 only. */
+        if (col == 1 && is_files) {
+            char        hdr[1024];
+            char        probe[1027];
+            const char *cwd;
+            float       budget;
+            float       w;
+            int         len, start;
+            cwd    = st->browser_disk_cwd;
+            budget = col_w - pad * 2.0f;
+            if (cwd[0] == '\0') cwd = "/";
+            len = (int)strlen(cwd);
+            text_measure(font, cwd, ts, &w, (float *)0);
+            start = 0;
+            if (w > budget) {
+                while (start < len) {
+                    probe[0] = '.'; probe[1] = '.'; probe[2] = '.';
+                    strncpy(probe + 3, cwd + start, sizeof probe - 4);
+                    probe[sizeof probe - 1] = '\0';
+                    text_measure(font, probe, ts, &w, (float *)0);
+                    if (w <= budget) break;
+                    start++;
+                }
+                while (start < len && ((unsigned char)cwd[start] & 0xC0) == 0x80) start++;  /* don't split a UTF-8 codepoint */
+                hdr[0] = '.'; hdr[1] = '.'; hdr[2] = '.';
+                strncpy(hdr + 3, cwd + start, sizeof hdr - 4);
+                hdr[sizeof hdr - 1] = '\0';
+            } else {
+                strncpy(hdr, cwd, sizeof hdr - 1);
+                hdr[sizeof hdr - 1] = '\0';
+            }
+            ui_quad(cx + pad * 0.5f, by, col_w - pad, row_h, 0.12f, 0.13f, 0.16f, 0.95f);
+            ui_text(font, hdr, cx + pad, by + font_ascent(font) * ts, ts,
+                    0.95f, 0.92f, 0.70f, 1.0f);
+            by += row_h + 4.0f * us;
+        }
 
         /* filter strip: visible only on the focused column while filtering. */
         if (focused && st->browser.filtering) {
