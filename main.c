@@ -2888,6 +2888,9 @@ typedef struct AppState {
     char        browser_preview_ref[BROWSER_REF_CAP];
     float       browser_preview_aspect;
     char        browser_disk_cwd[1024];      /* Files provider cwd; session-persistent, not serialized */
+    char        browser_dir_preview[24][BROWSER_NAME_CAP]; /* highlighted folder's contents (text preview) */
+    int         browser_dir_preview_n;                     /* lines used; -1 when the target isn't a folder, 0 when an empty/unreadable folder */
+    char        browser_dir_preview_ref[BROWSER_REF_CAP];  /* the target whose listing is cached */
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
        persists. The source object hides while its book is aloft. */
@@ -15457,17 +15460,8 @@ static int disk_enumerate(AppState *st, BrowserItem *out, int cap) {
 }
 
 static int disk_commands(AppState *st, const char *ref, const char **out, int cap) {
-    int n = 0;
-    (void)st;
-    if (cap < 1 || !ref || !ref[0]) return 0;
-    if (fs_is_dir(ref)) {
-        out[n++] = "Open";
-        if (n < cap) out[n++] = "Mount as root";
-        if (n < cap) out[n++] = "Carry";
-    } else {
-        out[n++] = "Carry";
-    }
-    return n;
+    (void)st; (void)ref; (void)out; (void)cap;
+    return 0;   /* Files uses the ranger preview pane, not a command list */
 }
 
 static int disk_run(AppState *st, const char *ref, int cmd) {
@@ -15570,6 +15564,8 @@ static void browser_open_now(AppState *st) {
     st->browser_items_type   = -1;
     st->browser_preview_ref[0] = '\0';
     st->browser_preview_tex.id = 0;
+    st->browser_dir_preview_n   = -1;
+    st->browser_dir_preview_ref[0] = '\0';
     browser_refresh(st);
     st->browser_open = SOL_TRUE;
 }
@@ -15642,20 +15638,26 @@ static void browser_handle_key(AppState *st, BrowserKey pk) {
     browser_refresh(st);
 }
 
+/* The disk-content ref of the highlighted Files Entities row, or NULL for an
+   action row (sel[1] < FILES_ACTIONS) or an out-of-range/empty selection.
+   Single source of truth for the FILES_ACTIONS offset arithmetic. */
+static const char *files_highlighted_content_ref(AppState *st) {
+    int idx;
+    if (st->browser.sel[1] < FILES_ACTIONS) return (const char *)0;
+    idx = st->browser.sel[1] - FILES_ACTIONS;
+    if (st->browser_ent_n > 0 && idx < st->browser_ent_n)
+        return st->browser_items[st->browser_ent_order[idx]].ref;
+    return (const char *)0;
+}
+
 /* Frame-top: fetch the focused entity's preview texture, but only when the
    focused ref differs from the one already cached (provider blit can be heavy). */
 static void browser_ensure_preview(AppState *st) {
     int ti;
     const char *ref;
-    int idx;
     ti  = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
     if (provider_is_files(ti)) {
-        if (st->browser.sel[1] < FILES_ACTIONS) ref = (const char *)0;     /* action row: no image */
-        else {
-            idx = st->browser.sel[1] - FILES_ACTIONS;
-            ref = (st->browser_ent_n > 0 && idx < st->browser_ent_n)
-                  ? st->browser_items[st->browser_ent_order[idx]].ref : (const char *)0;
-        }
+        ref = files_highlighted_content_ref(st);   /* NULL for action rows -> no image */
     } else {
         ref = (st->browser_ent_n  > 0)
               ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
@@ -15666,6 +15668,47 @@ static void browser_ensure_preview(AppState *st) {
     st->browser_preview_tex = g_providers[ti].preview(st, ref, &st->browser_preview_aspect);
     strncpy(st->browser_preview_ref, ref, BROWSER_REF_CAP - 1);
     st->browser_preview_ref[BROWSER_REF_CAP - 1] = '\0';
+}
+
+/* Frame-top: cache the highlighted Files row's target-folder listing for the
+   preview pane (action row -> the current folder; ../ or a folder -> that dir).
+   Rebuilds only when the target changes. browser_dir_preview_n = -1 when the
+   highlighted target is not a folder. */
+static void browser_ensure_dir_preview(AppState *st) {
+    int         ti = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
+    const char *target = (const char *)0;
+    FsListing   l;
+    int         i, n;
+    if (!provider_is_files(ti)) {
+        st->browser_dir_preview_n = -1;
+        st->browser_dir_preview_ref[0] = '\0';
+        return;
+    }
+    if (st->browser.sel[1] < FILES_ACTIONS) {
+        target = st->browser_disk_cwd;                 /* action row -> the current folder */
+    } else {
+        const char *ref = files_highlighted_content_ref(st);
+        if (ref && fs_is_dir(ref)) target = ref;       /* ../ or a folder */
+    }
+    if (!target) {
+        st->browser_dir_preview_n = -1;
+        st->browser_dir_preview_ref[0] = '\0';
+        return;
+    }
+    if (strcmp(target, st->browser_dir_preview_ref) == 0) return;   /* unchanged */
+    strncpy(st->browser_dir_preview_ref, target, BROWSER_REF_CAP - 1);
+    st->browser_dir_preview_ref[BROWSER_REF_CAP - 1] = '\0';
+    n = 0;
+    /* a failed or empty scan caches n=0 (not -1) until the target changes */
+    if (fs_scan_dir(target, &l)) {
+        for (i = 0; i < l.count && n < 24; i++) {
+            strncpy(st->browser_dir_preview[n], l.entries[i].name, BROWSER_NAME_CAP - 1);
+            st->browser_dir_preview[n][BROWSER_NAME_CAP - 1] = '\0';
+            n++;
+        }
+        fs_listing_free(&l);
+    }
+    st->browser_dir_preview_n = n;
 }
 
 static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
@@ -15712,10 +15755,12 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
         sol_bool focused = (st->browser.focus == col) ? SOL_TRUE : SOL_FALSE;
 
         ui_quad(cx, cy, col_w, panel_h, 0.08f, 0.09f, 0.11f, 0.92f);
-        if (focused)
-            ui_quad_outline(cx, cy, col_w, panel_h, 1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
-        else
-            ui_quad_outline(cx, cy, col_w, panel_h, 1.0f * us, 0.45f, 0.47f, 0.52f, 0.7f);
+        if (!(col == 2 && is_files)) {   /* Files column 2 is not focusable in ranger mode */
+            if (focused)
+                ui_quad_outline(cx, cy, col_w, panel_h, 1.0f * us, 0.95f, 0.80f, 0.45f, 0.9f);
+            else
+                ui_quad_outline(cx, cy, col_w, panel_h, 1.0f * us, 0.45f, 0.47f, 0.52f, 0.7f);
+        }
 
         by = cy + pad;
 
@@ -15750,6 +15795,20 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
             ui_textured_quad_flip(st->browser_preview_tex, ix, iy, iw, ih);
             ui_quad_outline(box_x, by, box_w, box_h, 1.0f * us, 0.45f, 0.47f, 0.52f, 0.7f);
             by += box_h + pad;                           /* command rows start below the preview */
+        }
+
+        if (col == 2 && is_files && !st->browser_preview_tex.id && st->browser_dir_preview_n > 0) {
+            /* Files ranger: highlighted folder -> show its contents as text lines */
+            int   dp;
+            float max_y = cy + panel_h - row_h;
+            for (dp = 0; dp < st->browser_dir_preview_n; dp++) {
+                float ry = by + row_h * (float)dp;
+                float ty;
+                if (ry > max_y) break;
+                ty = ry + font_ascent(font) * ts;
+                ui_text(font, st->browser_dir_preview[dp], cx + pad, ty, ts,
+                        0.92f, 0.92f, 0.92f, 1.0f);
+            }
         }
 
         {   /* scroll window: keep the selection visible (centered) when rows overflow */
@@ -15893,6 +15952,7 @@ static void render(AppState *state) {
     if (state->inv_open) inventory_ensure_thumbs(state);   /* build missing bag thumbnails
                                                               inside the frame stream */
     if (state->browser_open) browser_ensure_preview(state);   /* fetch focused preview tex */
+    if (state->browser_open) browser_ensure_dir_preview(state);   /* Files ranger: folder listing cache */
     rt0 = glfwGetTime();
     state->draws_total = 0;
     state->draws_done  = 0;
