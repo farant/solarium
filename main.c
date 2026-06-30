@@ -15154,6 +15154,21 @@ typedef struct {
 /* --- Pictures provider --- enumerate the library/ image files and every
    image referenced by a scene object; preview the real (cached, sRGB) texture;
    Place spawns a fresh image "card" onto the cursor for hanging on a wall. */
+/* ASCII case-insensitive compare (no strcasecmp in C89), for sorting item names. */
+static int browser_ci_cmp(const char *a, const char *b) {
+    while (*a && *b) {
+        int ca = (unsigned char)*a, cb = (unsigned char)*b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return ca - cb;
+        a++; b++;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+static int browser_item_name_cmp(const void *pa, const void *pb) {
+    return browser_ci_cmp(((const BrowserItem *)pa)->name, ((const BrowserItem *)pb)->name);
+}
+
 static int pictures_enumerate(AppState *st, BrowserItem *out, int cap) {
     FsListing l;
     int       n = 0, i, j;
@@ -15188,6 +15203,7 @@ static int pictures_enumerate(AppState *st, BrowserItem *out, int cap) {
         out[n].name[BROWSER_NAME_CAP - 1] = '\0';
         n++;
     }
+    if (n > 1) qsort(out, (size_t)n, sizeof out[0], browser_item_name_cmp);  /* case-insensitive A-Z */
     return n;
 }
 static int pictures_commands(AppState *st, const char *ref, const char **out, int cap) {
