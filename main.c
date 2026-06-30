@@ -6556,6 +6556,10 @@ static float ground_under(AppState *st, vec3 p, sol_u32 *out_plot) {
         float w, d, h, gy;
         vec3  local;
         if (!o->mesh_ref || strcmp(o->mesh_ref, "terrain") != 0) continue;
+        if (!scene_object_active(s, o->handle)) continue;   /* a hidden-workspace island
+                                       must not claim your feet — the FILTER LAW: render
+                                       hides it, so the ground sampler must too (else you
+                                       walk on an invisible overlapping island's terrain) */
         local = scene_world_to_local(s, o->handle, p);
         w = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "w");
         d = mesh_ref_param("terrain", o->mesh_params, o->mesh_param_count, "d");
