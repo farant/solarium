@@ -28,6 +28,7 @@
 #include "text.h"                /* text_shape seam + ui_text (P3 item 3b) */
 #include "wtext.h"               /* world-space SDF text — note cards (P3 item 8) */
 #include "platform_fs.h"         /* fs_read_file — the reader's pages (P3 item 9) */
+#include "diskpath.h"            /* pure path math for the Files browser provider */
 #include "platform_clipboard.h"  /* clipboard_read_image — Cmd+V paste (clipboard-paste-images) */
 #include "platform_window.h"     /* platform_window_fullscreen — native macOS fullscreen Space */
 #include "nid.h"                 /* nid_generate — library/<nid>.png filenames */
@@ -15382,9 +15383,132 @@ static RhiTexture places_preview(AppState *st, const char *ref, float *out_aspec
     return rhi_render_target_texture(g_browser_map_rt);
 }
 
+/* --- Files provider --- live drill-down of the real filesystem. The Entities
+   column lists browser_disk_cwd (a "../" entry first, then folders, then files);
+   Open re-lists a directory in place (run returns 1 = stay); Mount as root reuses
+   create_root_from_path; Carry spawns a folder/file tablet into the grasp exactly
+   as pictures_run does, then the existing carry+descend flow takes over. cwd is
+   session-persistent (remember-last), seeded to ~ on first use. */
+
+/* spawn a folder/file card onto the cursor (the pictures_run pattern). */
+static void disk_carry(AppState *st, const char *ref, sol_bool is_dir) {
+    Mesh        empty;
+    vec3        p   = carry_place_point(st);
+    quat        q   = quat_identity();
+    vec3        one = vec3_make(1.0f, 1.0f, 1.0f);
+    const char *base;
+    sol_u32     anchor, h;
+    if (!ref || !ref[0]) return;
+    memset(&empty, 0, sizeof empty);
+    base   = diskpath_basename(ref);
+    anchor = inventory_anchor(st);                 /* may scene_add -> realloc; handle only */
+    h = scene_add(&st->scene, anchor, empty, p, q, one);
+    scene_kind_set(&st->scene, h, is_dir ? KIND_FOLDER : KIND_FILE);
+    scene_mesh_ref_set(&st->scene, h, "card");
+    if (is_dir) {                                  /* folders: the heavier card profile (matches room_mirror_scan) */
+        float p[3];
+        p[0] = 0.42f; p[1] = 0.55f; p[2] = 0.08f;
+        scene_mesh_params_set(&st->scene, h, p, 3);
+    }
+    scene_content_set(&st->scene, h, ref);
+    scene_meta_set(&st->scene, h, "name", (base && base[0]) ? base : ref);
+    scene_resolve_meshes(&st->scene);              /* builds the card mesh */
+    apply_kind_materials(&st->scene);              /* folder/file kind color */
+    inventory_take(st, h);                         /* carry setup */
+}
+
+static int disk_enumerate(AppState *st, BrowserItem *out, int cap) {
+    FsListing l;
+    int       n = 0, pass, i, total;
+    if (cap < 1) return 0;
+    if (st->browser_disk_cwd[0] == '\0') {                       /* seed to ~ on first use */
+        strncpy(st->browser_disk_cwd, fs_home_dir(), sizeof st->browser_disk_cwd - 1);
+        st->browser_disk_cwd[sizeof st->browser_disk_cwd - 1] = '\0';
+    }
+    if (!diskpath_is_root(st->browser_disk_cwd)) {               /* parent entry, unless at / */
+        strcpy(out[n].name, "../");
+        diskpath_parent(st->browser_disk_cwd, out[n].ref, BROWSER_REF_CAP);
+        n++;
+    }
+    if (!fs_scan_dir(st->browser_disk_cwd, &l)) return n;        /* unreadable: just ".." */
+    for (pass = 0; pass < 2 && n < cap; pass++) {                /* pass 0 = folders, 1 = files */
+        for (i = 0; i < l.count && n < cap; i++) {
+            sol_bool d = l.entries[i].is_dir;
+            int      ln;
+            if (pass == 0 && !d) continue;
+            if (pass == 1 &&  d) continue;
+            strncpy(out[n].name, l.entries[i].name, BROWSER_NAME_CAP - 2);
+            out[n].name[BROWSER_NAME_CAP - 2] = '\0';
+            if (d) {                                             /* folders shown with a trailing '/' */
+                ln = (int)strlen(out[n].name);
+                out[n].name[ln] = '/';
+                out[n].name[ln + 1] = '\0';
+            }
+            diskpath_join(st->browser_disk_cwd, l.entries[i].name, out[n].ref, BROWSER_REF_CAP);
+            n++;
+        }
+    }
+    total = l.count + (diskpath_is_root(st->browser_disk_cwd) ? 0 : 1);
+    if (total > cap)
+        printf("Files: '%s' has %d entries, showing %d (truncated)\n",
+               st->browser_disk_cwd, total, cap);
+    fs_listing_free(&l);
+    return n;
+}
+
+static int disk_commands(AppState *st, const char *ref, const char **out, int cap) {
+    int n = 0;
+    (void)st;
+    if (cap < 1 || !ref || !ref[0]) return 0;
+    if (fs_is_dir(ref)) {
+        out[n++] = "Open";
+        if (n < cap) out[n++] = "Mount as root";
+        if (n < cap) out[n++] = "Carry";
+    } else {
+        out[n++] = "Carry";
+    }
+    return n;
+}
+
+static int disk_run(AppState *st, const char *ref, int cmd) {
+    sol_bool is_dir;
+    if (!ref || !ref[0]) return 0;
+    /* re-stat: if the path vanished since enumerate it reads as a file (Carry) — graceful, no crash. */
+    is_dir = fs_is_dir(ref);
+    if (is_dir) {
+        if (cmd == 0) {                          /* Open: descend; keep the HUD open */
+            strncpy(st->browser_disk_cwd, ref, sizeof st->browser_disk_cwd - 1);
+            st->browser_disk_cwd[sizeof st->browser_disk_cwd - 1] = '\0';
+            st->browser_items_type   = -1;        /* force re-enumerate (same provider) */
+            st->browser.sel[1]       = 0;         /* back to the top ("../") */
+            st->browser.filter[1][0] = '\0';
+            st->browser.flen[1]      = 0;
+            return 1;                             /* stay open */
+        }
+        if (cmd == 1) { create_root_from_path(st, ref); return 0; }  /* Mount as root */
+        disk_carry(st, ref, SOL_TRUE);            /* cmd 2: Carry folder */
+        return 0;
+    }
+    disk_carry(st, ref, SOL_FALSE);               /* file: Carry */
+    return 0;
+}
+
+static RhiTexture disk_preview(AppState *st, const char *ref, float *out_aspect) {
+    RhiTexture none;
+    int        w, h;
+    none.id = 0;
+    (void)st;
+    if (!ref || !ref[0]) return none;
+    if (fs_is_dir(ref)) return none;              /* no folder preview in v1 */
+    if (!reader_is_image_path(ref)) return none;
+    if (out_aspect && image_dims(ref, &w, &h) && h > 0) *out_aspect = (float)w / (float)h;
+    return load_texture(ref);                     /* the actual image, cached sRGB */
+}
+
 static const TypeProvider g_providers[] = {
     { "Pictures", pictures_enumerate, pictures_commands, pictures_run, pictures_preview },
-    { "Places",   places_enumerate,   places_commands,   places_run,   places_preview }
+    { "Places",   places_enumerate,   places_commands,   places_run,   places_preview },
+    { "Files",    disk_enumerate,     disk_commands,     disk_run,     disk_preview }
 };
 #define G_PROVIDER_COUNT ((int)(sizeof g_providers / sizeof g_providers[0]))
 typedef char browser_provider_cap_check[G_PROVIDER_COUNT <= 8 ? 1 : -1];  /* typenames[8]/type_order[8] */
