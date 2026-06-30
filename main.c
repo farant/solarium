@@ -2842,7 +2842,7 @@ typedef struct AppState {
     /* board view: frame a whiteboard head-on, cursor unlocked, to arrange cards.
        Transient UI state (never persisted). bv_t starts at 1.0 (settled). */
     sol_u32  board_view;          /* board being viewed; 0 = not in board view  */
-    sol_bool board_view_was;      /* edge-detect for the cursor toggle           */
+    sol_bool focus_was;           /* edge-detect for the cursor toggle (board OR map view) */
     sol_u32  map_view;            /* map being viewed; 0 = not in map view; reuses
                                      the bv_* glide scratch (modes are exclusive) */
     double   last_press_t, last_press_x, last_press_y;  /* board-view double-click detect */
@@ -10955,8 +10955,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
     fp = (st->camera.mode != CAMERA_ORBIT);
     /* board/map view (and the outbound glide) freezes walking and look — the
-       camera is pinned to the framed pose. Board view frees the cursor to work
-       the surface; map view is view-only and keeps it locked. */
+       camera is pinned to the framed pose. Both free the cursor — board view to
+       work the surface, map view for comfort (its clicks stay inert). */
     bv_active = (sol_bool)(st->board_view != 0 || st->map_view != 0 || st->bv_t < 1.0f);
     st->hover_corner = -1;   /* recomputed below in the normal (non-modal) path */
 
@@ -10972,17 +10972,21 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     }
     st->inv_was_open = st->inv_open;
 
-    /* board view frees the cursor for pointing at cards (mirrors inventory);
-       first-person look re-locks on exit. */
-    if (st->board_view && !st->board_view_was) {
-        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        st->mouse_skip = 2;
-    } else if (!st->board_view && st->board_view_was &&
-               !st->inv_open && !st->editor.active) {
-        glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        st->mouse_skip = 2;
+    /* board/map view frees the cursor for pointing (mirrors inventory);
+       first-person look re-locks on exit. Keyed on EITHER focus mode so a
+       board<->map swap doesn't flicker the cursor. */
+    {
+        sol_bool focus_now = (sol_bool)(st->board_view != 0 || st->map_view != 0);
+        if (focus_now && !st->focus_was) {
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            st->mouse_skip = 2;
+        } else if (!focus_now && st->focus_was &&
+                   !st->inv_open && !st->editor.active) {
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            st->mouse_skip = 2;
+        }
+        st->focus_was = focus_now;
     }
-    st->board_view_was = (sol_bool)(st->board_view != 0);
 
     /* the synth book frees the cursor for pointing at page widgets (mirrors the
        inventory toggle); first-person look re-locks on close. */
@@ -11225,6 +11229,9 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             if (st->reader_state != READER_IDLE) {
                 reader_close(st);                       /* click-away, like blur:
                                                            this press only closes */
+            } else if (st->map_view != 0) {
+                /* map view is view-only: a click does nothing (no pick, so no
+                   selection or drag is armed) until pin management defines it */
             } else if (fp) {
                 float pnx = 0.0f, pny = 0.0f;           /* crosshair by default */
                 sol_bool is_dbl = SOL_FALSE;
