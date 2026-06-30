@@ -2843,6 +2843,8 @@ typedef struct AppState {
        Transient UI state (never persisted). bv_t starts at 1.0 (settled). */
     sol_u32  board_view;          /* board being viewed; 0 = not in board view  */
     sol_bool board_view_was;      /* edge-detect for the cursor toggle           */
+    sol_u32  map_view;            /* map being viewed; 0 = not in map view; reuses
+                                     the bv_* glide scratch (modes are exclusive) */
     double   last_press_t, last_press_x, last_press_y;  /* board-view double-click detect */
     vec3     bv_from_pos,  bv_to_pos;
     float    bv_from_yaw,  bv_to_yaw;
@@ -9581,7 +9583,7 @@ static int board_view_pose(AppState *st, sol_u32 board, CameraPose *out) {
 static int board_view_enter(AppState *st) {
     SceneObject *o = scene_get(&st->scene, st->selected_handle);
     CameraPose pose;
-    if (st->board_view != 0) return 0;
+    if (st->board_view != 0 || st->map_view != 0) return 0;
     if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "board") != 0) return 0;
     if (st->carried != 0 || st->place_active || st->editor.active ||
         st->palette.open || st->inv_open || st->edit_handle != 0 ||
@@ -9618,12 +9620,76 @@ static void board_view_exit(AppState *st) {
                                            set (or anchor) across a board exit */
 }
 
+/* The camera pose that frames a world MAP from its ACTUAL orientation: an
+   upright wall/whiteboard map head-on, a flat (table/floor) map top-down. The
+   map quad is bottom-origin in its local XY plane with normal +Z (see
+   make_map_quad), so centre/face/up come straight off the world rotation.
+   Returns 0 (leaving *out untouched) unless the handle is a map. */
+static int map_view_pose(AppState *st, sol_u32 map, CameraPose *out) {
+    SceneObject *o = scene_get(&st->scene, map);
+    quat  q;
+    vec3  p0, center, normal, up;
+    float w, h, aspect;
+    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "map") != 0) return 0;
+    w      = mesh_ref_param("map", o->mesh_params, o->mesh_param_count, "w");
+    h      = mesh_ref_param("map", o->mesh_params, o->mesh_param_count, "h");
+    q      = scene_world_rotation(&st->scene, map);
+    p0     = object_world_pos(&st->scene, map);
+    center = vec3_add(p0, quat_rotate(q, vec3_make(0.0f, h * 0.5f, 0.0f)));
+    normal = quat_rotate(q, vec3_make(0.0f, 0.0f, 1.0f));
+    up     = quat_rotate(q, vec3_make(0.0f, 1.0f, 0.0f));
+    aspect = (st->fb_height > 0) ? (float)st->fb_width / (float)st->fb_height : 1.7778f;
+    *out   = camera_frame_pose_up(center, normal, up, w * 0.5f, h * 0.5f,
+                                  st->camera.fov, aspect, BOARD_VIEW_MARGIN);
+    return 1;
+}
+
+/* Enter map view: frame the selected map (any orientation) and begin the glide.
+   Returns 0 (and does nothing) if the selection isn't a map, a focus view is
+   already active, or another mode owns the keyboard/cursor. Mirrors
+   board_view_enter; reuses the bv_* glide scratch. */
+static int map_view_enter(AppState *st) {
+    SceneObject *o = scene_get(&st->scene, st->selected_handle);
+    CameraPose pose;
+    if (st->map_view != 0 || st->board_view != 0) return 0;
+    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "map") != 0) return 0;
+    if (st->carried != 0 || st->place_active || st->editor.active ||
+        st->palette.open || st->inv_open || st->edit_handle != 0 ||
+        st->reader_state != READER_IDLE) return 0;
+    if (!map_view_pose(st, st->selected_handle, &pose)) return 0;
+    st->bv_return_pos   = st->camera.pos;
+    st->bv_return_yaw   = st->camera.yaw;
+    st->bv_return_pitch = st->camera.pitch;
+    st->bv_from_pos = st->camera.pos;   st->bv_to_pos = pose.pos;
+    st->bv_from_yaw = st->camera.yaw;   st->bv_to_yaw = pose.yaw;
+    st->bv_from_pitch = st->camera.pitch; st->bv_to_pitch = pose.pitch;
+    st->bv_t   = 0.0f;
+    st->bv_dir = 1.0f;
+    st->map_view = st->selected_handle;
+    st->selected_handle = 0;   /* entering map view clears the map's highlight */
+    return 1;
+}
+
+/* Leave map view: glide the camera back to the stored return pose. Safe to call
+   when already out. View-only, so no cursor/selection cleanup (unlike a board). */
+static void map_view_exit(AppState *st) {
+    if (st->map_view == 0) return;
+    st->bv_from_pos = st->camera.pos;   st->bv_to_pos = st->bv_return_pos;
+    st->bv_from_yaw = st->camera.yaw;   st->bv_to_yaw = st->bv_return_yaw;
+    st->bv_from_pitch = st->camera.pitch; st->bv_to_pitch = st->bv_return_pitch;
+    st->bv_t   = 0.0f;
+    st->bv_dir = -1.0f;
+    st->map_view = 0;
+}
+
 /* Advance the board-view camera glide (runs AFTER camera_update so it overrides
    it). Also bails out of board view if the viewed board was deleted. */
 static void board_view_update(AppState *st, float dt) {
     float e, dyaw;
     if (st->board_view != 0 && scene_get(&st->scene, st->board_view) == 0)
         board_view_exit(st);                 /* board vanished: glide back out */
+    if (st->map_view != 0 && scene_get(&st->scene, st->map_view) == 0)
+        map_view_exit(st);                   /* map vanished: glide back out */
     if (st->bv_t >= 1.0f) return;            /* settled: nothing to animate */
     st->bv_t += dt / BOARD_VIEW_GLIDE_S;
     if (st->bv_t > 1.0f) st->bv_t = 1.0f;
@@ -10888,9 +10954,10 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
     double   mx, my;
 
     fp = (st->camera.mode != CAMERA_ORBIT);
-    /* board view (and its outbound glide) freezes walking and look — the camera
-       is pinned to the framed pose while you work the surface with the cursor. */
-    bv_active = (sol_bool)(st->board_view != 0 || st->bv_t < 1.0f);
+    /* board/map view (and the outbound glide) freezes walking and look — the
+       camera is pinned to the framed pose. Board view frees the cursor to work
+       the surface; map view is view-only and keeps it locked. */
+    bv_active = (sol_bool)(st->board_view != 0 || st->map_view != 0 || st->bv_t < 1.0f);
     st->hover_corner = -1;   /* recomputed below in the normal (non-modal) path */
 
     /* inventory: release the cursor for clicking on open, restore on close
@@ -11072,7 +11139,7 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
 
     /* Tab toggles first-person <-> orbit (edge); cursor mode follows */
     tab_now = glfwGetKey(w, GLFW_KEY_TAB) == GLFW_PRESS;
-    if (tab_now && !st->tab_was_down && !st->board_view) {
+    if (tab_now && !st->tab_was_down && !st->board_view && !st->map_view) {
         if (st->camera.mode == CAMERA_ORBIT) {
             camera_enter_fp(&st->camera);
             glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -18142,7 +18209,8 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
 
     /* ':' (Shift+;) opens the palette when nothing else owns the keyboard. */
     if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && (mods & GLFW_MOD_SHIFT)
-        && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0) {
+        && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0
+        && st->map_view == 0) {
         palette_open_now(&st->palette);
         return;
     }
@@ -18150,6 +18218,7 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     /* ';' (plain) opens the entity browser when nothing else owns the keyboard. */
     if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && !(mods & GLFW_MOD_SHIFT)
         && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0
+        && st->map_view == 0
         && !st->palette.open && !st->inv_open && !st->editor.active) {
         browser_open_now(st);
         return;
@@ -18158,7 +18227,8 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
     /* 'i' opens the inventory when nothing else owns the keyboard. */
     if (action == GLFW_PRESS && key == GLFW_KEY_I && st->carried == 0 &&
         st->edit_handle == 0 && st->reader_state == READER_IDLE &&
-        !st->place_active && !st->palette.open && !st->editor.active && st->board_view == 0) {
+        !st->place_active && !st->palette.open && !st->editor.active && st->board_view == 0
+        && st->map_view == 0) {
         cmd_inventory_open(st);
         return;
     }
@@ -18280,7 +18350,9 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
 
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         if (st && st->reader_state != READER_IDLE)
-            reader_close(st);                   /* put the book back first (even in board view) */
+            reader_close(st);                   /* put the book back first (even in a focus view) */
+        else if (st && st->map_view != 0)
+            map_view_exit(st);                  /* leave map view */
         else if (st && (st->board_view != 0 || st->bv_t < 1.0f))
             board_view_exit(st);                /* leave board view (or absorb Esc mid-glide-out) */
         else
@@ -18296,6 +18368,9 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         else if (object_is_board(&st->scene, st->selected_handle)) {
             if (st->board_view == 0) board_view_enter(st);
             /* already in board view: Enter on the board itself does nothing */
+        }
+        else if (o && o->mesh_ref && strcmp(o->mesh_ref, "map") == 0) {
+            if (st->map_view == 0) map_view_enter(st);   /* frame the map head-on/top-down */
         }
         else if (o)
             reader_open(st, st->selected_handle);   /* a file/alias card opens to
