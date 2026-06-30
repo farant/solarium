@@ -2886,6 +2886,7 @@ typedef struct AppState {
     RhiTexture  browser_preview_tex;
     char        browser_preview_ref[BROWSER_REF_CAP];
     float       browser_preview_aspect;
+    char        browser_disk_cwd[1024];      /* Files provider cwd; session-persistent, not serialized */
     /* the reader (item 9): VIEW state, never scene state — the open book
        rig lives here, not in the scene graph; nothing about reading
        persists. The source object hides while its book is aloft. */
@@ -15147,7 +15148,7 @@ typedef struct {
     const char *name;                                          /* "Pictures" */
     int        (*enumerate)(AppState *st, BrowserItem *out, int cap);
     int        (*commands)(AppState *st, const char *ref, const char **out, int cap);
-    void       (*run)(AppState *st, const char *ref, int cmd);
+    int        (*run)(AppState *st, const char *ref, int cmd);  /* return 1 = stay open + refresh, 0 = close */
     RhiTexture (*preview)(AppState *st, const char *ref, float *out_aspect);  /* tex (id 0=none); *out_aspect=w/h */
 } TypeProvider;
 
@@ -15217,14 +15218,14 @@ static int pictures_commands(AppState *st, const char *ref, const char **out, in
    with carry_prev_parent = the bag so hanging it on a wall returns the card to
    the bag (the reusable-stamp rule). We delegate to inventory_take so the
    carried-state setup stays in one place and can't drift. */
-static void pictures_run(AppState *st, const char *ref, int cmd) {
+static int pictures_run(AppState *st, const char *ref, int cmd) {
     Mesh    empty;
     vec3    p   = carry_place_point(st);
     quat    q   = quat_identity();
     vec3    one = vec3_make(1.0f, 1.0f, 1.0f);
     sol_u32 anchor, h;
-    if (cmd != 0) return;                    /* only "Place" */
-    if (!ref || !ref[0]) return;             /* nothing to carry */
+    if (cmd != 0) return 0;                  /* only "Place" */
+    if (!ref || !ref[0]) return 0;           /* nothing to carry */
     memset(&empty, 0, sizeof empty);
     anchor = inventory_anchor(st);           /* may scene_add -> realloc; handle only */
     h = scene_add(&st->scene, anchor, empty, p, q, one);
@@ -15233,6 +15234,7 @@ static void pictures_run(AppState *st, const char *ref, int cmd) {
     scene_content_set(&st->scene, h, ref);
     scene_resolve_meshes(&st->scene);              /* builds the card mesh + sRGB albedo */
     inventory_take(st, h);                         /* image-card carry setup */
+    return 0;
 }
 static RhiTexture pictures_preview(AppState *st, const char *ref, float *out_aspect) {
     int w, h;
@@ -15308,13 +15310,13 @@ static int places_commands(AppState *st, const char *ref, const char **out, int 
     return 1;
 }
 /* Place (cmd 0): spawn a map board at the catalog entry's stored view, then save. */
-static void places_run(AppState *st, const char *ref, int cmd) {
+static int places_run(AppState *st, const char *ref, int cmd) {
     sol_u32     h;
     const char *slat, *slon, *szoom, *style;
-    if (cmd != 0) return;                    /* only "Place" */
-    if (!ref || !ref[0]) return;
+    if (cmd != 0) return 0;                   /* only "Place" */
+    if (!ref || !ref[0]) return 0;
     h = (sol_u32)atoi(ref);
-    if (!scene_get(&st->scene, h)) return;
+    if (!scene_get(&st->scene, h)) return 0;
     slat  = scene_meta_get(&st->scene, h, "lat");
     slon  = scene_meta_get(&st->scene, h, "lon");
     szoom = scene_meta_get(&st->scene, h, "zoom");
@@ -15322,6 +15324,7 @@ static void places_run(AppState *st, const char *ref, int cmd) {
     spawn_map_board(st, slat ? atof(slat) : 0.0, slon ? atof(slon) : 0.0,
                     szoom ? atoi(szoom) : 0, style ? style : "relief");
     scene_save(&st->scene, "scene.stml");
+    return 0;
 }
 
 static RhiRenderTarget g_browser_map_hdr;  /* persistent 2:1 HDR scratch for the map preview */
@@ -15443,8 +15446,10 @@ static void browser_handle_key(AppState *st, BrowserKey pk) {
         const char *ref = (st->browser_ent_n > 0)
             ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
         int cmd = (st->browser_cmd_n > 0) ? st->browser_cmd_order[st->browser.sel[2]] : -1;
-        if (ti >= 0 && ref && cmd >= 0) g_providers[ti].run(st, ref, cmd);
-        st->browser_open = SOL_FALSE;
+        int stay = 0;
+        if (ti >= 0 && ref && cmd >= 0) stay = g_providers[ti].run(st, ref, cmd);
+        if (stay) { st->browser.focus = 1; browser_refresh(st); }   /* re-list, stay on Entities */
+        else      { st->browser_open = SOL_FALSE; }
         return;
     }
     browser_refresh(st);
