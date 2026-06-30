@@ -74,4 +74,15 @@ CameraPose camera_frame_pose(vec3 center, vec3 normal,
                              float half_w, float half_h,
                              float fov, float aspect, float margin);
 
+/* Like camera_frame_pose, but robust to ANY surface orientation. For a roughly
+   upright surface (normal ~horizontal) it returns exactly what camera_frame_pose
+   would. When the surface faces nearly straight up or down (normal ~ world-up, a
+   flat map), the yaw/pitch + WORLD_UP camera cannot look exactly vertical, so
+   pitch is clamped just shy of vertical and yaw is taken from `up_axis` (the
+   surface's up edge, which is horizontal in that case) so its top edge lands
+   toward the top of the screen. `up_axis` need not be unit length. */
+CameraPose camera_frame_pose_up(vec3 center, vec3 normal, vec3 up_axis,
+                                float half_w, float half_h,
+                                float fov, float aspect, float margin);
+
 #endif /* CAMERA_H */

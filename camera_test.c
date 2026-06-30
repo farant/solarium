@@ -303,6 +303,66 @@ int main(void) {
         }
     }
 
+    /* camera_frame_pose_up: for an upright (+Z-facing) surface it must match
+       camera_frame_pose exactly; for a flat (face-up/face-down) surface it
+       frames top-down WITHOUT the WORLD_UP look_at degenerating — pitch stays
+       strictly inside +/-90 deg and yaw follows the surface's up edge so its
+       top lands toward screen-top. */
+    {
+        CameraPose pu, pf;
+        float fov = sol_radians(45.0f), aspect = 16.0f / 9.0f, margin = 1.1f;
+
+        /* upright +Z surface, up=+Y: identical to camera_frame_pose */
+        pf = camera_frame_pose   (vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 0.0f, 1.0f),
+                                  0.5f, 1.0f, fov, aspect, margin);
+        pu = camera_frame_pose_up(vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 0.0f, 1.0f),
+                                  vec3_make(0.0f, 1.0f, 0.0f), 0.5f, 1.0f, fov, aspect, margin);
+        printf("frame_up upright -> pos=(%.3f,%.3f,%.3f) yaw=%.3f pitch=%.3f\n",
+               pu.pos.x, pu.pos.y, pu.pos.z, pu.yaw, pu.pitch);
+        if (!approx(pu.pos.x, pf.pos.x) || !approx(pu.pos.y, pf.pos.y) ||
+            !approx(pu.pos.z, pf.pos.z) ||
+            !approx(pu.yaw, pf.yaw) || !approx(pu.pitch, pf.pitch)) {
+            printf("FAIL: frame_up should match frame_pose for an upright surface\n");
+            return 1;
+        }
+
+        /* flat FACE-UP surface (normal=+Y), up edge toward +X: eye sits ABOVE,
+           pitch ~ -89 (looks down), yaw follows up edge (atan2(0,1)=0). */
+        pu = camera_frame_pose_up(vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 1.0f, 0.0f),
+                                  vec3_make(1.0f, 0.0f, 0.0f), 0.5f, 1.0f, fov, aspect, margin);
+        printf("frame_up flat-up -> pos=(%.3f,%.3f,%.3f) yaw=%.3f pitch=%.3f\n",
+               pu.pos.x, pu.pos.y, pu.pos.z, pu.yaw, pu.pitch);
+        if (!(pu.pos.y > 0.0f)) { printf("FAIL: face-up map eye should sit ABOVE\n"); return 1; }
+        if (!(fabsf(pu.pitch) < sol_radians(90.0f))) {
+            printf("FAIL: flat map pitch must stay inside +/-90 (no degeneracy)\n"); return 1;
+        }
+        if (!approx(pu.pitch, sol_radians(-89.0f))) {
+            printf("FAIL: face-up map should look ~straight down\n"); return 1;
+        }
+        if (!approx(pu.yaw, atan2f(0.0f, 1.0f))) {
+            printf("FAIL: flat map yaw should follow the up edge\n"); return 1;
+        }
+
+        /* flat FACE-DOWN surface (normal=-Y): eye BELOW, pitch ~ +89 (looks up) */
+        pu = camera_frame_pose_up(vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, -1.0f, 0.0f),
+                                  vec3_make(1.0f, 0.0f, 0.0f), 0.5f, 1.0f, fov, aspect, margin);
+        printf("frame_up flat-down -> pos.y=%.3f pitch=%.3f\n", pu.pos.y, pu.pitch);
+        if (!(pu.pos.y < 0.0f)) { printf("FAIL: face-down map eye should sit BELOW\n"); return 1; }
+        if (!approx(pu.pitch, sol_radians(89.0f))) {
+            printf("FAIL: face-down map should look ~straight up\n"); return 1;
+        }
+
+        /* flat FACE-UP with a NON-trivial up edge (up=+Z): yaw must follow it,
+           not default to 0 — guards a regression that hardcodes the flat yaw. */
+        pu = camera_frame_pose_up(vec3_make(0.0f, 0.0f, 0.0f), vec3_make(0.0f, 1.0f, 0.0f),
+                                  vec3_make(0.0f, 0.0f, 1.0f), 0.5f, 1.0f, fov, aspect, margin);
+        printf("frame_up flat-up rotated -> yaw=%.3f (expect %.3f)\n",
+               pu.yaw, atan2f(1.0f, 0.0f));
+        if (!approx(pu.yaw, atan2f(1.0f, 0.0f))) {
+            printf("FAIL: flat map yaw must follow a non-axis-aligned up edge\n"); return 1;
+        }
+    }
+
     printf("camera_test: OK\n");
     return 0;
 }

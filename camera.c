@@ -182,6 +182,28 @@ CameraPose camera_frame_pose(vec3 center, vec3 normal,
     return p;
 }
 
+CameraPose camera_frame_pose_up(vec3 center, vec3 normal, vec3 up_axis,
+                                float half_w, float half_h,
+                                float fov, float aspect, float margin) {
+    CameraPose p;
+    float tanv   = tanf(fov * 0.5f);
+    float dist_h = half_h / tanv;
+    float dist_w = half_w / (tanv * aspect);
+    float dist   = (dist_h > dist_w ? dist_h : dist_w) * margin;
+    vec3  n      = vec3_normalize(normal);
+    vec3  dir    = vec3_scale(n, -1.0f);          /* camera looks back at center */
+    p.pos = vec3_add(center, vec3_scale(n, dist));
+    if (fabsf(dir.y) < 0.999f) {                  /* normal ~horizontal: upright surface */
+        p.pitch = asinf(dir.y);
+        p.yaw   = atan2f(dir.z, dir.x);
+    } else {                                       /* normal ~vertical: flat surface, top-down */
+        float s = (dir.y < 0.0f) ? -1.0f : 1.0f;   /* down for face-up, up for face-down */
+        p.pitch = s * sol_radians(89.0f);          /* clamp shy of straight down/up */
+        p.yaw   = atan2f(up_axis.z, up_axis.x);    /* surface's up edge -> screen-top */
+    }
+    return p;
+}
+
 mat4 camera_view(const Camera *c) {
     vec3 target = vec3_add(c->pos, camera_forward(c));
     return mat4_look_at(c->pos, target, WORLD_UP);
