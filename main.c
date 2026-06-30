@@ -15513,6 +15513,16 @@ static const TypeProvider g_providers[] = {
 #define G_PROVIDER_COUNT ((int)(sizeof g_providers / sizeof g_providers[0]))
 typedef char browser_provider_cap_check[G_PROVIDER_COUNT <= 8 ? 1 : -1];  /* typenames[8]/type_order[8] */
 
+#define FILES_ACTIONS 2   /* virtual rows atop the Files Entities column: Mount as Root, Carry */
+static const char *FILES_ACTION_LABELS[FILES_ACTIONS] = { "Mount as Root", "Carry" };
+
+/* The Files provider uses the ranger interaction (drill with l, ascend with h,
+   a preview pane). Detected by name so no TypeProvider struct change is needed. */
+static sol_bool provider_is_files(int ti) {
+    return (ti >= 0 && ti < G_PROVIDER_COUNT &&
+            strcmp(g_providers[ti].name, "Files") == 0) ? SOL_TRUE : SOL_FALSE;
+}
+
 /* Recompute the ranked per-column orders/counts; enumerate the selected type's
    items (cached until the type changes); then clamp selections into range. */
 static void browser_refresh(AppState *st) {
@@ -15541,13 +15551,18 @@ static void browser_refresh(AppState *st) {
     else st->browser_cmd_count = 0;
     st->browser_cmd_n = browser_rank(st->browser.filter[2], st->browser_cmds, st->browser_cmd_count,
                                      st->browser_cmd_order, 16);
-    counts[0] = st->browser_type_n; counts[1] = st->browser_ent_n; counts[2] = st->browser_cmd_n;
+    counts[0] = st->browser_type_n;
+    counts[1] = st->browser_ent_n + (provider_is_files(ti) ? FILES_ACTIONS : 0);
+    counts[2] = st->browser_cmd_n;
     browser_clamp(&st->browser, counts);
 }
 
 /* Per-column visible row counts — read straight from the cached ranked counts. */
 static void browser_columns_counts(AppState *st, int counts[3]) {
-    counts[0] = st->browser_type_n; counts[1] = st->browser_ent_n; counts[2] = st->browser_cmd_n;
+    int ti = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
+    counts[0] = st->browser_type_n;
+    counts[1] = st->browser_ent_n + (provider_is_files(ti) ? FILES_ACTIONS : 0);
+    counts[2] = st->browser_cmd_n;
 }
 
 static void browser_open_now(AppState *st) {
@@ -15562,11 +15577,59 @@ static void browser_open_now(AppState *st) {
 static void browser_handle_key(AppState *st, BrowserKey pk) {
     int           counts[3];
     BrowserAction a;
+    int           ti = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
+
+    if (provider_is_files(ti) && st->browser.focus == 1 && !st->browser.filtering &&
+        (pk == BROWSER_KEY_RIGHT || pk == BROWSER_KEY_ENTER || pk == BROWSER_KEY_LEFT)) {
+        if (pk == BROWSER_KEY_LEFT) {                         /* up a directory */
+            if (!diskpath_is_root(st->browser_disk_cwd)) {
+                char parent[1024];
+                diskpath_parent(st->browser_disk_cwd, parent, (int)sizeof parent);
+                strncpy(st->browser_disk_cwd, parent, sizeof st->browser_disk_cwd - 1);
+                st->browser_disk_cwd[sizeof st->browser_disk_cwd - 1] = '\0';
+                st->browser_items_type   = -1;
+                st->browser.sel[1]       = 0;
+                st->browser.filter[1][0] = '\0';
+                st->browser.flen[1]      = 0;
+                browser_refresh(st);
+            }
+            return;
+        }
+        if (st->browser.sel[1] == 0) {                        /* Mount as Root (current folder) */
+            create_root_from_path(st, st->browser_disk_cwd);
+            st->browser_open = SOL_FALSE;
+            return;
+        }
+        if (st->browser.sel[1] == 1) {                        /* Carry (current folder) */
+            disk_carry(st, st->browser_disk_cwd, SOL_TRUE);
+            st->browser_open = SOL_FALSE;
+            return;
+        }
+        {                                                     /* a content row */
+            int idx = st->browser.sel[1] - FILES_ACTIONS;
+            if (idx >= 0 && idx < st->browser_ent_n) {
+                const char *ref = st->browser_items[st->browser_ent_order[idx]].ref;
+                if (fs_is_dir(ref)) {                          /* ../ or folder: drill in */
+                    strncpy(st->browser_disk_cwd, ref, sizeof st->browser_disk_cwd - 1);
+                    st->browser_disk_cwd[sizeof st->browser_disk_cwd - 1] = '\0';
+                    st->browser_items_type   = -1;
+                    st->browser.sel[1]       = 0;
+                    st->browser.filter[1][0] = '\0';
+                    st->browser.flen[1]      = 0;
+                    browser_refresh(st);
+                } else {                                       /* file: Carry */
+                    disk_carry(st, ref, SOL_FALSE);
+                    st->browser_open = SOL_FALSE;
+                }
+            }
+            return;
+        }
+    }
+
     browser_columns_counts(st, counts);
     a = browser_key(&st->browser, pk, counts);
     if (a == BROWSER_CLOSE) { st->browser_open = SOL_FALSE; return; }
     if (a == BROWSER_ACTIVATE) {
-        int ti  = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
         const char *ref = (st->browser_ent_n > 0)
             ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
         int cmd = (st->browser_cmd_n > 0) ? st->browser_cmd_order[st->browser.sel[2]] : -1;
@@ -15584,9 +15647,19 @@ static void browser_handle_key(AppState *st, BrowserKey pk) {
 static void browser_ensure_preview(AppState *st) {
     int ti;
     const char *ref;
+    int idx;
     ti  = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
-    ref = (st->browser_ent_n  > 0)
-          ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
+    if (provider_is_files(ti)) {
+        if (st->browser.sel[1] < FILES_ACTIONS) ref = (const char *)0;     /* action row: no image */
+        else {
+            idx = st->browser.sel[1] - FILES_ACTIONS;
+            ref = (st->browser_ent_n > 0 && idx < st->browser_ent_n)
+                  ? st->browser_items[st->browser_ent_order[idx]].ref : (const char *)0;
+        }
+    } else {
+        ref = (st->browser_ent_n  > 0)
+              ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
+    }
     if (ti < 0 || !ref) { st->browser_preview_tex.id = 0; st->browser_preview_ref[0] = '\0'; return; }
     if (strcmp(ref, st->browser_preview_ref) == 0) return;       /* unchanged */
     st->browser_preview_aspect = 1.0f;
@@ -15602,6 +15675,8 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
     float       pad, row_h, ts, hdr_h;
     int         counts[3];
     int         col;
+    int         ti;
+    sol_bool    is_files;
 
     if (font == NULL) return;
 
@@ -15624,6 +15699,9 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
     hdr_h = 24.0f * us;   /* filter strip height */
 
     ui_quad(0.0f, 0.0f, sw, sh, 0.03f, 0.03f, 0.05f, 0.55f);   /* dim backdrop */
+
+    ti = (st->browser_type_n > 0) ? st->browser_type_order[st->browser.sel[0]] : -1;
+    is_files = provider_is_files(ti);
 
     for (col = 0; col < BROWSER_COLS; col++) {
         float    cx = panel_x + (col_w + gap) * (float)col;
@@ -15689,13 +15767,25 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
                 float       ty = ry + font_ascent(font) * ts;
                 const char *label;
                 if (col == 0)      label = g_providers[st->browser_type_order[r]].name;
-                else if (col == 1) label = st->browser_items[st->browser_ent_order[r]].name;
-                else               label = st->browser_cmds[st->browser_cmd_order[r]];
+                else if (col == 1) {
+                    if (is_files)
+                        label = (r < FILES_ACTIONS)
+                              ? FILES_ACTION_LABELS[r]
+                              : st->browser_items[st->browser_ent_order[r - FILES_ACTIONS]].name;
+                    else
+                        label = st->browser_items[st->browser_ent_order[r]].name;
+                } else             label = st->browser_cmds[st->browser_cmd_order[r]];
                 if (r == st->browser.sel[col]) {             /* selection / breadcrumb */
                     if (focused)
                         ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.20f, 0.24f, 0.30f, 0.9f);
                     else
                         ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.13f, 0.14f, 0.17f, 0.8f);
+                }
+                if (is_files && col == 1 && r == FILES_ACTIONS) {
+                    /* thin divider between action rows and first content row,
+                       drawn AFTER the highlight so it survives selecting ../ */
+                    ui_quad(cx + pad * 0.5f, ry, col_w - pad, 1.0f * us,
+                            0.45f, 0.47f, 0.52f, 0.6f);
                 }
                 ui_text(font, label, cx + pad, ty, ts, 0.92f, 0.92f, 0.92f, 1.0f);
             }
@@ -17877,7 +17967,14 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
             else if (key == GLFW_KEY_UP)        pk = BROWSER_KEY_UP;
             else if (key == GLFW_KEY_DOWN)      pk = BROWSER_KEY_DOWN;
             else if (!st->browser.filtering) {  /* nav-only keys */
-                if      (key == GLFW_KEY_LEFT  || key == GLFW_KEY_H) pk = BROWSER_KEY_LEFT;
+                int ti = (st->browser_type_n > 0)
+                       ? st->browser_type_order[st->browser.sel[0]] : -1;
+                if (key == GLFW_KEY_H && (mods & GLFW_MOD_SHIFT) &&
+                    provider_is_files(ti) && st->browser.focus == 1) {
+                    st->browser.focus = 0;          /* Files: jump back to the Types column */
+                    browser_refresh(st);
+                }
+                else if (key == GLFW_KEY_LEFT  || key == GLFW_KEY_H) pk = BROWSER_KEY_LEFT;
                 else if (key == GLFW_KEY_RIGHT || key == GLFW_KEY_L) pk = BROWSER_KEY_RIGHT;
                 else if (key == GLFW_KEY_K)     pk = BROWSER_KEY_UP;
                 else if (key == GLFW_KEY_J)     pk = BROWSER_KEY_DOWN;
