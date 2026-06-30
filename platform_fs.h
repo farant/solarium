@@ -29,6 +29,16 @@ void     fs_listing_free(FsListing *l);
 /* Does the path exist (file or directory)? Stale-alias detection. */
 sol_bool fs_exists(const char *path);
 
+/* The user's home directory ($HOME), or "/" if unset or empty. Borrowed (do
+   not free; valid while the environment is unmodified) — the Files browser's
+   default starting directory. */
+const char *fs_home_dir(void);
+
+/* Is `path` a directory specifically (not just existing)? Follows symlinks,
+   matching fs_scan_dir. SOL_FALSE on a file, a broken path, or any stat
+   failure. Lets a bare path ref be classified. */
+sol_bool fs_is_dir(const char *path);
+
 /* Create a directory (mode 0755). Returns SOL_TRUE if it now exists (created
    or already present), SOL_FALSE on error. */
 sol_bool fs_mkdir(const char *path);

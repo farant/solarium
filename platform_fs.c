@@ -69,6 +69,18 @@ sol_bool fs_exists(const char *path) {
     return stat(path, &st) == 0 ? SOL_TRUE : SOL_FALSE;
 }
 
+const char *fs_home_dir(void) {
+    const char *h = getenv("HOME");
+    return (h && h[0]) ? h : "/";
+}
+
+sol_bool fs_is_dir(const char *path) {
+    struct stat st;
+    if (!path || !path[0]) return SOL_FALSE;
+    if (stat(path, &st) != 0) return SOL_FALSE;
+    return S_ISDIR(st.st_mode) ? SOL_TRUE : SOL_FALSE;
+}
+
 sol_bool fs_mkdir(const char *path) {
     if (mkdir(path, 0755) == 0) return SOL_TRUE;
     return (errno == EEXIST) ? SOL_TRUE : SOL_FALSE;
