@@ -6591,10 +6591,22 @@ static float ground_under(AppState *st, vec3 p, sol_u32 *out_plot) {
     return best;
 }
 
-/* the wander component's outlet: ground_under behind a void* — creatures'
-   feet ride the same ground law the camera walks by */
+/* the wander component's outlet: ground_under behind a void*, but a creature
+   inside an active room stands on the INTERIOR FLOOR, not the terrain/campus
+   pad sunk beneath it (the pad sits CAMPUS_PAD_SINK below the floor, so a fox
+   riding the pad looks embedded). descend_room_at is workspace-filtered AND
+   height-gated (only a room whose floor is near the point), so this never
+   teleports a creature up to a floating room it isn't already in. The player is
+   unaffected — its indoor floor comes from collision, not this outlet. */
 static float wander_ground(void *ctx, vec3 p, sol_u32 *plot) {
-    return ground_under((AppState *)ctx, p, plot);
+    AppState *st   = (AppState *)ctx;
+    float     g    = ground_under(st, p, plot);
+    sol_u32   room = descend_room_at(&st->scene, p);
+    if (room != 0) {
+        float fy = editor_room_rect(&st->scene, room).floor_y;
+        if (fy > g) { g = fy; if (plot) *plot = 0; }   /* the interior floor claims the feet */
+    }
+    return g;
 }
 
 /* The ground at a mint point ahead of you: islands and architecture
