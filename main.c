@@ -15538,7 +15538,7 @@ static void browser_refresh(AppState *st) {
     }
     for (i = 0; i < st->browser_item_count; i++) itemnames[i] = st->browser_items[i].name;
     st->browser_ent_n = browser_rank(st->browser.filter[1], itemnames, st->browser_item_count,
-                                     st->browser_ent_order, 256);
+                                     st->browser_ent_order, BROWSER_MAX_ITEMS);
     ref = (st->browser_ent_n > 0 && st->browser.sel[1] < st->browser_ent_n)
           ? st->browser_items[st->browser_ent_order[st->browser.sel[1]]].ref : (const char *)0;
     if (ti >= 0 && ref) st->browser_cmd_count = g_providers[ti].commands(st, ref, st->browser_cmds, 16);
