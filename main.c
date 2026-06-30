@@ -12477,6 +12477,21 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 scene_save(&st->scene, "scene.stml");
                 printf("deleted picture #%u\n", (unsigned)doomed);
             } else if (o && o->mesh_ref != NULL &&
+                       strcmp(o->mesh_ref, "pond") == 0) {
+                /* a placed pond: a single mesh-only object, no children, not
+                   collidable. Its disc mesh is a SHARED asset (keyed r/depth/
+                   seed), so release it through the store, NOT mesh_destroy. The
+                   water + reflection passes iterate live scene objects, so
+                   removal alone makes them skip it the next frame. */
+                char    akey[160];
+                sol_u32 doomed = st->selected_handle;
+                if (mesh_asset_key(o, akey))
+                    asset_release(&g_mesh_assets, akey);
+                st->selected_handle = 0;
+                scene_remove(&st->scene, doomed);
+                scene_save(&st->scene, "scene.stml");
+                printf("deleted pond #%u\n", (unsigned)doomed);
+            } else if (o && o->mesh_ref != NULL &&
                        strcmp(o->mesh_ref, "window") == 0) {
                 /* a placed window: delete any child panes (window_glass) first,
                    then the window, then re-cut the wall so the hole closes.
