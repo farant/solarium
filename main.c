@@ -2845,6 +2845,8 @@ typedef struct AppState {
     sol_bool focus_was;           /* edge-detect for the cursor toggle (board OR map view) */
     sol_u32  map_view;            /* map being viewed; 0 = not in map view; reuses
                                      the bv_* glide scratch (modes are exclusive) */
+    sol_u32  map_view_return_board; /* board to re-enter on map-view exit; 0 = entered
+                                       from first-person (return to standing) */
     double   last_press_t, last_press_x, last_press_y;  /* board-view double-click detect */
     vec3     bv_from_pos,  bv_to_pos;
     float    bv_from_yaw,  bv_to_yaw;
@@ -9645,21 +9647,32 @@ static int map_view_pose(AppState *st, sol_u32 map, CameraPose *out) {
 }
 
 /* Enter map view: frame the selected map (any orientation) and begin the glide.
-   Returns 0 (and does nothing) if the selection isn't a map, a focus view is
-   already active, or another mode owns the keyboard/cursor. Mirrors
-   board_view_enter; reuses the bv_* glide scratch. */
+   Returns 0 (and does nothing) if the selection isn't a map, map view is already
+   active, or another mode owns the keyboard/cursor. Entering FROM board view is
+   allowed (the book-in-board-view pattern): it swaps board->map, remembering the
+   board so Esc returns there. Reuses the bv_* glide scratch. */
 static int map_view_enter(AppState *st) {
     SceneObject *o = scene_get(&st->scene, st->selected_handle);
     CameraPose pose;
-    if (st->map_view != 0 || st->board_view != 0) return 0;
+    sol_u32    from_board = st->board_view;   /* 0 unless entering from board view */
+    if (st->map_view != 0) return 0;
     if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "map") != 0) return 0;
     if (st->carried != 0 || st->place_active || st->editor.active ||
         st->palette.open || st->inv_open || st->edit_handle != 0 ||
         st->reader_state != READER_IDLE) return 0;
     if (!map_view_pose(st, st->selected_handle, &pose)) return 0;
-    st->bv_return_pos   = st->camera.pos;
-    st->bv_return_yaw   = st->camera.yaw;
-    st->bv_return_pitch = st->camera.pitch;
+    if (from_board != 0) {                    /* nested entry from board view: swap.
+           Leave bv_return_* holding the first-person pose board_view_enter stored,
+           so the eventual board exit still returns you to where you stood; the
+           board frame is re-derived on exit. */
+        st->map_view_return_board = from_board;
+        st->board_view = 0;                   /* swap board->map (cursor stays free) */
+    } else {                                  /* first-person: return to where you stood */
+        st->map_view_return_board = 0;
+        st->bv_return_pos   = st->camera.pos;
+        st->bv_return_yaw   = st->camera.yaw;
+        st->bv_return_pitch = st->camera.pitch;
+    }
     st->bv_from_pos = st->camera.pos;   st->bv_to_pos = pose.pos;
     st->bv_from_yaw = st->camera.yaw;   st->bv_to_yaw = pose.yaw;
     st->bv_from_pitch = st->camera.pitch; st->bv_to_pitch = pose.pitch;
@@ -9670,16 +9683,32 @@ static int map_view_enter(AppState *st) {
     return 1;
 }
 
-/* Leave map view: glide the camera back to the stored return pose. Safe to call
-   when already out. View-only, so no cursor/selection cleanup (unlike a board). */
+/* Leave map view: glide the camera back. If map view was entered from board view
+   AND that board still exists, re-enter it — gliding to its (re-derived) frame so
+   a further Esc still returns to the stored first-person pose, mirroring closing a
+   book. Otherwise glide to bv_return_* (where you stood). Safe to call when
+   already out; view-only, so no cursor/selection cleanup. */
 static void map_view_exit(AppState *st) {
+    CameraPose bp;
     if (st->map_view == 0) return;
-    st->bv_from_pos = st->camera.pos;   st->bv_to_pos = st->bv_return_pos;
-    st->bv_from_yaw = st->camera.yaw;   st->bv_to_yaw = st->bv_return_yaw;
-    st->bv_from_pitch = st->camera.pitch; st->bv_to_pitch = st->bv_return_pitch;
+    st->map_view = 0;
+    st->bv_from_pos   = st->camera.pos;
+    st->bv_from_yaw   = st->camera.yaw;
+    st->bv_from_pitch = st->camera.pitch;
+    if (st->map_view_return_board != 0 &&
+        board_view_pose(st, st->map_view_return_board, &bp)) {
+        st->bv_to_pos   = bp.pos;            /* re-enter board view at its frame */
+        st->bv_to_yaw   = bp.yaw;
+        st->bv_to_pitch = bp.pitch;
+        st->board_view  = st->map_view_return_board;
+    } else {
+        st->bv_to_pos   = st->bv_return_pos; /* return to where you stood */
+        st->bv_to_yaw   = st->bv_return_yaw;
+        st->bv_to_pitch = st->bv_return_pitch;
+    }
+    st->map_view_return_board = 0;
     st->bv_t   = 0.0f;
     st->bv_dir = -1.0f;
-    st->map_view = 0;
 }
 
 /* Advance the board-view camera glide (runs AFTER camera_update so it overrides
@@ -11971,8 +12000,8 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
             Command *cmd = &g_commands[ci];
             sol_bool now;
             if (cmd->key == 0) continue;
-            if (st->editor.active || st->board_view != 0)
-                { cmd->was_down = SOL_FALSE; continue; }       /* editor / board view: hotkeys off */
+            if (st->editor.active || st->board_view != 0 || st->map_view != 0)
+                { cmd->was_down = SOL_FALSE; continue; }       /* editor / board / map view: hotkeys off */
             now = glfwGetKey(w, cmd->key) == GLFW_PRESS;
             if (now && !cmd->was_down && (cmd->can_run == NULL || cmd->can_run(st)))
                 cmd->run(st);
@@ -17696,8 +17725,9 @@ static void render(AppState *state) {
 
     /* first-person crosshair at the pick point (screen centre, via the
        viewport-relative units) — orbit mode picks at the cursor instead, and
-       board view hides it (you point with the free cursor, not the crosshair) */
-    if (state->camera.mode != CAMERA_ORBIT && state->board_view == 0) {
+       board/map view hide it (you have the free cursor, not the crosshair) */
+    if (state->camera.mode != CAMERA_ORBIT && state->board_view == 0 &&
+        state->map_view == 0) {
         float cx = ui_vw(50.0f), cy = ui_vh(50.0f);
         ui_line(cx - 9.0f * us, cy, cx + 9.0f * us, cy, 1.5f * us, 1.0f, 1.0f, 1.0f, 0.7f);
         ui_line(cx, cy - 9.0f * us, cx, cy + 9.0f * us, 1.5f * us, 1.0f, 1.0f, 1.0f, 0.7f);
