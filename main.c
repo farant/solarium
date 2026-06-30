@@ -15529,21 +15529,39 @@ static void browser_draw_overlay(AppState *st, int fb_w, int fb_h) {
             by += box_h + pad;                           /* command rows start below the preview */
         }
 
-        for (r = 0; r < rows; r++) {
-            float       ry = by + row_h * (float)r;
-            float       ty = ry + font_ascent(font) * ts;
-            const char *label;
-            if (ry + row_h > cy + panel_h) break;            /* clip to panel */
-            if (col == 0)      label = g_providers[st->browser_type_order[r]].name;
-            else if (col == 1) label = st->browser_items[st->browser_ent_order[r]].name;
-            else               label = st->browser_cmds[st->browser_cmd_order[r]];
-            if (r == st->browser.sel[col]) {                 /* selection / breadcrumb */
-                if (focused)
-                    ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.20f, 0.24f, 0.30f, 0.9f);
-                else
-                    ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.13f, 0.14f, 0.17f, 0.8f);
+        {   /* scroll window: keep the selection visible (centered) when rows overflow */
+            float avail = (cy + panel_h - pad) - by;
+            int   vis   = (int)(avail / row_h);
+            int   top   = 0;
+            if (vis < 1) vis = 1;
+            if (rows > vis) {
+                top = st->browser.sel[col] - vis / 2;
+                if (top > rows - vis) top = rows - vis;
+                if (top < 0) top = 0;
             }
-            ui_text(font, label, cx + pad, ty, ts, 0.92f, 0.92f, 0.92f, 1.0f);
+            for (r = top; r < rows && r < top + vis; r++) {
+                float       ry = by + row_h * (float)(r - top);
+                float       ty = ry + font_ascent(font) * ts;
+                const char *label;
+                if (col == 0)      label = g_providers[st->browser_type_order[r]].name;
+                else if (col == 1) label = st->browser_items[st->browser_ent_order[r]].name;
+                else               label = st->browser_cmds[st->browser_cmd_order[r]];
+                if (r == st->browser.sel[col]) {             /* selection / breadcrumb */
+                    if (focused)
+                        ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.20f, 0.24f, 0.30f, 0.9f);
+                    else
+                        ui_quad(cx + pad * 0.5f, ry, col_w - pad, row_h, 0.13f, 0.14f, 0.17f, 0.8f);
+                }
+                ui_text(font, label, cx + pad, ty, ts, 0.92f, 0.92f, 0.92f, 1.0f);
+            }
+            if (rows > vis) {                                /* scrollbar: track + thumb, right edge */
+                float track_h = row_h * (float)vis;
+                float th_x    = cx + col_w - 4.0f * us;
+                float th_h    = track_h * (float)vis / (float)rows;
+                float th_y    = by + track_h * (float)top / (float)rows;
+                ui_quad(th_x, by,   3.0f * us, track_h, 0.20f, 0.21f, 0.25f, 0.7f);
+                ui_quad(th_x, th_y, 3.0f * us, th_h,    0.55f, 0.57f, 0.62f, 0.9f);
+            }
         }
     }
 
