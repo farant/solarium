@@ -62,9 +62,9 @@ void browser_char(Browser *b, char c) {
 }
 
 int browser_rank(const char *filter, const char *const *names, int n, int *out, int cap) {
-    int score[256];
+    int score[BROWSER_MAX_ITEMS];
     int i, j, cnt = 0;
-    for (i = 0; i < n && cnt < cap && cnt < 256; i++) {
+    for (i = 0; i < n && cnt < cap && cnt < BROWSER_MAX_ITEMS; i++) {
         int sc;
         if (fuzzy_match(filter, names[i], &sc, (int *)0, 0)) { out[cnt] = i; score[cnt] = sc; cnt++; }
     }

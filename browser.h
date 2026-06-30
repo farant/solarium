@@ -9,6 +9,7 @@
 
 #define BROWSER_COLS       3      /* 0 = Types, 1 = Entities, 2 = Commands */
 #define BROWSER_FILTER_CAP 64
+#define BROWSER_MAX_ITEMS  2048   /* max entities a column enumerates/ranks (e.g. a big image library) */
 
 typedef enum {
     BROWSER_KEY_NONE = 0,

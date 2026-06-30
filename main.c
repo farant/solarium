@@ -2876,12 +2876,12 @@ typedef struct AppState {
     /* per-open browser cache: the selected type's enumerated items, the active
        command set, the ranked-visible orders/counts per column, and the lazily
        built preview texture (re-fetched only when the focused ref changes). */
-    BrowserItem browser_items[256];
+    BrowserItem browser_items[BROWSER_MAX_ITEMS];
     int         browser_item_count;
     int         browser_items_type;          /* provider index whose items are cached; -1 = none */
     const char *browser_cmds[16];
     int         browser_cmd_count;
-    int         browser_type_order[8], browser_ent_order[256], browser_cmd_order[16];
+    int         browser_type_order[8], browser_ent_order[BROWSER_MAX_ITEMS], browser_cmd_order[16];
     int         browser_type_n, browser_ent_n, browser_cmd_n;   /* ranked visible counts */
     RhiTexture  browser_preview_tex;
     char        browser_preview_ref[BROWSER_REF_CAP];
@@ -15390,7 +15390,7 @@ typedef char browser_provider_cap_check[G_PROVIDER_COUNT <= 8 ? 1 : -1];  /* typ
    items (cached until the type changes); then clamp selections into range. */
 static void browser_refresh(AppState *st) {
     const char *typenames[8];
-    const char *itemnames[256];
+    const char *itemnames[BROWSER_MAX_ITEMS];
     int counts[3];
     int ti, i;
     const char *ref;
@@ -15400,7 +15400,7 @@ static void browser_refresh(AppState *st) {
     ti = (st->browser_type_n > 0 && st->browser.sel[0] < st->browser_type_n)
          ? st->browser_type_order[st->browser.sel[0]] : -1;
     if (ti >= 0 && ti != st->browser_items_type) {
-        st->browser_item_count = g_providers[ti].enumerate(st, st->browser_items, 256);
+        st->browser_item_count = g_providers[ti].enumerate(st, st->browser_items, BROWSER_MAX_ITEMS);
         st->browser_items_type = ti;
     } else if (ti < 0) {
         st->browser_item_count = 0; st->browser_items_type = -1;
