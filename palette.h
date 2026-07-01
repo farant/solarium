@@ -10,6 +10,7 @@
 #include "font.h"
 
 #define PALETTE_QUERY_CAP 128
+#define PALETTE_PICK_CAP  64
 
 typedef struct {
     sol_bool open;
@@ -20,6 +21,11 @@ typedef struct {
     sol_bool prompt;    /* prompt mode: collect a typed line, fire prompt_cb on Enter */
     const char *prompt_label;                         /* shown before the typed text */
     void      (*prompt_cb)(struct AppState *, const char *);
+    sol_bool pick;      /* pick mode: fuzzy-choose one of a copied name/ref list */
+    char     pick_names[PALETTE_PICK_CAP][48];        /* shown + fuzzy-filtered */
+    char     pick_refs[PALETTE_PICK_CAP][24];         /* returned to the callback */
+    int      pick_n;
+    void     (*pick_cb)(struct AppState *, const char *);
 } Palette;
 
 typedef enum {
@@ -38,6 +44,13 @@ void     palette_open_now(Palette *p);
    outlives the prompt session (the palette stores it, it does not copy it). */
 void     palette_prompt(Palette *p, const char *label,
                         void (*cb)(struct AppState *, const char *));
+/* Open the palette as a PICKER: fuzzy-choose one of `n` rows (names shown +
+   filtered, refs returned), firing cb(st, ref) on Enter (Esc cancels). Copies up
+   to PALETTE_PICK_CAP rows in immediately — the caller's arrays need not outlive
+   the call. A sibling of palette_prompt for focus-mode command sub-choices. */
+void     palette_pick(Palette *p, const char *label,
+                      const char *const *names, const char *const *refs, int n,
+                      void (*cb)(struct AppState *, const char *ref));
 void     palette_input_char(Palette *p, unsigned int cp);
 /* Returns SOL_TRUE if the palette consumed the key (always true while open). */
 sol_bool palette_input_key(Palette *p, PaletteKey k, struct AppState *st,

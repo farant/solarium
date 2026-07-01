@@ -18,6 +18,7 @@ void palette_open_now(Palette *p) {
     p->sel      = 0;
     p->eat_char = SOL_TRUE;   /* the ':' that opened us arrives next as a char */
     p->prompt   = SOL_FALSE;
+    p->pick     = SOL_FALSE;
 }
 
 void palette_prompt(Palette *p, const char *label,
@@ -28,8 +29,35 @@ void palette_prompt(Palette *p, const char *label,
     p->sel          = 0;
     p->eat_char     = SOL_FALSE;   /* no ':' to swallow — a command opened us */
     p->prompt       = SOL_TRUE;
+    p->pick         = SOL_FALSE;
     p->prompt_label = label;
     p->prompt_cb    = cb;
+}
+
+void palette_pick(Palette *p, const char *label,
+                  const char *const *names, const char *const *refs, int n,
+                  void (*cb)(struct AppState *, const char *)) {
+    int i;
+    p->open         = SOL_TRUE;
+    p->query[0]     = '\0';
+    p->len          = 0;
+    p->sel          = 0;
+    p->eat_char     = SOL_FALSE;   /* a command opened us — no ':' to swallow */
+    p->prompt       = SOL_FALSE;
+    p->pick         = SOL_TRUE;
+    p->prompt_label = label;
+    p->pick_cb      = cb;
+    if (n < 0) n = 0;
+    if (n > PALETTE_PICK_CAP) n = PALETTE_PICK_CAP;
+    p->pick_n = n;
+    for (i = 0; i < n; i++) {
+        strncpy(p->pick_names[i], names[i] ? names[i] : "",
+                sizeof p->pick_names[i] - 1);
+        p->pick_names[i][sizeof p->pick_names[i] - 1] = '\0';
+        strncpy(p->pick_refs[i], refs[i] ? refs[i] : "",
+                sizeof p->pick_refs[i] - 1);
+        p->pick_refs[i][sizeof p->pick_refs[i] - 1] = '\0';
+    }
 }
 
 void palette_input_char(Palette *p, unsigned int cp) {
@@ -73,6 +101,31 @@ static int palette_rank(const Palette *p, const Command *cmds, int ncmds,
     return n;
 }
 
+/* Build the filtered, score-sorted list of PICK-item indices (best first). A
+   mirror of palette_rank over p->pick_names (an empty query matches all). */
+static int palette_pick_rank(const Palette *p, int *out, int cap) {
+    int idx[PALETTE_PICK_CAP];
+    int score[PALETTE_PICK_CAP];
+    int n = 0, i, j;
+    for (i = 0; i < p->pick_n; i++) {
+        int sc;
+        if (fuzzy_match(p->query, p->pick_names[i], &sc, NULL, 0)) {
+            idx[n] = i; score[n] = sc; n++;
+        }
+    }
+    for (i = 1; i < n; i++) {                        /* stable insertion sort */
+        int ti = idx[i], ts = score[i];
+        j = i - 1;
+        while (j >= 0 && score[j] < ts) {
+            idx[j + 1] = idx[j]; score[j + 1] = score[j]; j--;
+        }
+        idx[j + 1] = ti; score[j + 1] = ts;
+    }
+    if (cap > n) cap = n;
+    for (i = 0; i < cap; i++) out[i] = idx[i];
+    return n;
+}
+
 sol_bool palette_input_key(Palette *p, PaletteKey k, struct AppState *st,
                            const Command *cmds, int ncmds) {
     int order[PALETTE_MAX_COMMANDS];
@@ -81,8 +134,30 @@ sol_bool palette_input_key(Palette *p, PaletteKey k, struct AppState *st,
     if (!p->open) return SOL_FALSE;
 
     if (k == PALETTE_KEY_CANCEL) {
-        p->open = SOL_FALSE; p->prompt = SOL_FALSE;
-        p->prompt_cb = NULL; p->prompt_label = NULL;
+        p->open = SOL_FALSE; p->prompt = SOL_FALSE; p->pick = SOL_FALSE;
+        p->prompt_cb = NULL; p->prompt_label = NULL; p->pick_cb = NULL;
+        return SOL_TRUE;
+    }
+
+    if (p->pick) {                                   /* picker mode */
+        int porder[PALETTE_PICK_CAP];
+        int pn = palette_pick_rank(p, porder, PALETTE_PICK_CAP);
+        if (k == PALETTE_KEY_DOWN) { if (p->sel + 1 < pn) p->sel++; }
+        else if (k == PALETTE_KEY_UP) { if (p->sel > 0) p->sel--; }
+        else if (k == PALETTE_KEY_BACKSPACE) {
+            if (p->len > 0) { p->len--; p->query[p->len] = '\0'; p->sel = 0; }
+        } else if (k == PALETTE_KEY_ENTER) {
+            void (*cb)(struct AppState *, const char *) = p->pick_cb;
+            char ref[24];
+            ref[0] = '\0';
+            if (pn > 0 && p->sel < pn) {
+                strncpy(ref, p->pick_refs[porder[p->sel]], sizeof ref - 1);
+                ref[sizeof ref - 1] = '\0';
+            }
+            p->open = SOL_FALSE; p->pick = SOL_FALSE;
+            p->pick_cb = NULL; p->prompt_label = NULL;
+            if (cb && ref[0]) cb(st, ref);
+        }
         return SOL_TRUE;
     }
 
@@ -133,6 +208,9 @@ void palette_draw(const Palette *p, struct AppState *st, Font *font,
 
     if (p->prompt) {
         n = 0; shown = 0;
+    } else if (p->pick) {
+        n     = palette_pick_rank(p, order, PALETTE_MAX_COMMANDS);
+        shown = (n < PALETTE_MAX_ROWS) ? n : PALETTE_MAX_ROWS;
     } else {
         n     = palette_rank(p, cmds, ncmds, order, PALETTE_MAX_COMMANDS);
         shown = (n < PALETTE_MAX_ROWS) ? n : PALETTE_MAX_ROWS;
@@ -150,7 +228,7 @@ void palette_draw(const Palette *p, struct AppState *st, Font *font,
         char  line[PALETTE_QUERY_CAP + 40];
         float qy = box_y + pad + font_ascent(font) * ts;
         int   ll = 0, q;
-        if (p->prompt) {
+        if (p->prompt || p->pick) {
             const char *lbl = p->prompt_label ? p->prompt_label : "input";
             while (*lbl && ll < (int)sizeof line - 4) line[ll++] = *lbl++;
             line[ll++] = ':';
@@ -169,27 +247,30 @@ void palette_draw(const Palette *p, struct AppState *st, Font *font,
     if (p->sel >= PALETTE_MAX_ROWS) top = p->sel - PALETTE_MAX_ROWS + 1;
 
     for (i = 0; i < shown; i++) {
-        int          ri = top + i;
-        const Command *cmd;
-        float        ry, ty;
-        sol_bool     enabled;
+        int   ri = top + i;
+        float ry, ty;
         if (ri >= n) break;
-        cmd     = &cmds[order[ri]];
-        enabled = (cmd->can_run == NULL) || cmd->can_run(st);
-        ry      = box_y + pad + row_h * (float)(i + 1);
-        ty      = ry + font_ascent(font) * ts;
+        ry = box_y + pad + row_h * (float)(i + 1);
+        ty = ry + font_ascent(font) * ts;
         if (ri == p->sel)
             ui_quad(box_x + pad * 0.5f, ry, box_w - pad, row_h,
                     0.20f, 0.24f, 0.30f, 0.9f);
-        if (enabled)
-            ui_text(font, cmd->name, box_x + pad, ty, ts, 0.92f, 0.92f, 0.92f, 1.0f);
-        else
-            ui_text(font, cmd->name, box_x + pad, ty, ts, 0.50f, 0.50f, 0.50f, 1.0f);
-        if (cmd->hint != NULL) {
-            float hw, hh;
-            text_measure(font, cmd->hint, ts, &hw, &hh);
-            ui_text(font, cmd->hint, box_x + box_w - pad - hw, ty, ts,
-                    0.70f, 0.62f, 0.40f, 1.0f);
+        if (p->pick) {
+            ui_text(font, p->pick_names[order[ri]], box_x + pad, ty, ts,
+                    0.92f, 0.92f, 0.92f, 1.0f);
+        } else {
+            const Command *cmd     = &cmds[order[ri]];
+            sol_bool       enabled = (cmd->can_run == NULL) || cmd->can_run(st);
+            if (enabled)
+                ui_text(font, cmd->name, box_x + pad, ty, ts, 0.92f, 0.92f, 0.92f, 1.0f);
+            else
+                ui_text(font, cmd->name, box_x + pad, ty, ts, 0.50f, 0.50f, 0.50f, 1.0f);
+            if (cmd->hint != NULL) {
+                float hw, hh;
+                text_measure(font, cmd->hint, ts, &hw, &hh);
+                ui_text(font, cmd->hint, box_x + box_w - pad - hw, ty, ts,
+                        0.70f, 0.62f, 0.40f, 1.0f);
+            }
         }
     }
 }

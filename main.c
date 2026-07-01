@@ -2981,6 +2981,10 @@ typedef struct AppState {
     float       marquee_px_scale;    /* fb_width/window_width: cursor(pts)->ui(px) for the draw */
     sol_bool    group_drag;          /* dragging the whole set together (M3) */
     vec3        group_prepos[MULTISEL_CAP]; /* per-member pre-drag board-local pos (M3) */
+    /* focus palette: which command table the palette is bound to while open —
+       the global registry, or a per-focus-mode table (map view). Set at open. */
+    const Command *active_cmds;
+    int            active_cmd_count;
 } AppState;
 
 #define READER_IDLE      0
@@ -15749,6 +15753,97 @@ static RhiTexture places_preview(AppState *st, const char *ref, float *out_aspec
     return rhi_render_target_texture(g_browser_map_rt);
 }
 
+/* --- map-view focus palette --- the ':' command set while a map is framed:
+   add a pin from the Places catalog, or rename the selected pin. */
+
+/* picker callback: create a pin on the current map at the chosen Place's view.
+   Snapshot lat/lon/name to locals BEFORE scene_add (which reallocs + invalidates
+   the meta pointers). Harmless if the place is out of the map's window (the pin
+   is hidden until it comes into view). */
+static void add_place_pin_cb(AppState *st, const char *ref) {
+    sol_u32     h, ph;
+    const char *slat, *slon, *pname;
+    double      lat, lon, u0, v0, u1, v1;
+    float       mw, mh;
+    char        b[32], nm[48];
+    Mesh        empty;
+    if (st->map_view == 0 || !ref || !ref[0]) return;
+    h = (sol_u32)atoi(ref);
+    if (!scene_get(&st->scene, h)) return;
+    slat  = scene_meta_get(&st->scene, h, "lat");
+    slon  = scene_meta_get(&st->scene, h, "lon");
+    pname = scene_meta_get(&st->scene, h, "name");
+    lat = slat ? atof(slat) : 0.0;
+    lon = slon ? atof(slon) : 0.0;
+    strncpy(nm, pname ? pname : "", sizeof nm - 1);
+    nm[sizeof nm - 1] = '\0';
+    memset(&empty, 0, sizeof empty);
+    ph = scene_add(&st->scene, st->map_view, empty, vec3_make(0.0f, 0.0f, 0.0f),
+                   quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+    scene_mesh_ref_set(&st->scene, ph, "pin");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    sprintf(b, "%.6f", lat); scene_meta_set(&st->scene, ph, "lat", b);
+    sprintf(b, "%.6f", lon); scene_meta_set(&st->scene, ph, "lon", b);
+#pragma clang diagnostic pop
+    scene_meta_set(&st->scene, ph, "name", nm);
+    if (map_window_of(&st->scene, st->map_view, &u0, &v0, &u1, &v1, &mw, &mh))
+        resolve_pin(&st->scene, ph, u0, v0, u1, v1, mw, mh);
+    st->selected_handle = ph;
+    scene_save(&st->scene, "scene.stml");
+}
+
+/* "Add place..." — enumerate the Places catalog into name/ref rows (name + the
+   decimal handle, like places_enumerate) and open the picker. Static row storage
+   keeps it off the stack; palette_pick copies the rows in immediately. */
+static void cmd_add_place(AppState *st) {
+    static char        names[PALETTE_PICK_CAP][48];
+    static char        refs[PALETTE_PICK_CAP][24];
+    const char        *namep[PALETTE_PICK_CAP];
+    const char        *refp[PALETTE_PICK_CAP];
+    sol_u32            anchor = places_anchor(st);
+    int                n = 0;
+    sol_u32            i;
+    for (i = 0; i < st->scene.count && n < PALETTE_PICK_CAP; i++) {
+        SceneObject *o = &st->scene.objects[i];
+        const char  *nm;
+        if (o->parent != anchor) continue;
+        nm = scene_meta_get(&st->scene, o->handle, "name");
+        strncpy(names[n], nm ? nm : "?", sizeof names[n] - 1);
+        names[n][sizeof names[n] - 1] = '\0';
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        sprintf(refs[n], "%u", (unsigned)o->handle);
+#pragma clang diagnostic pop
+        namep[n] = names[n];
+        refp[n]  = refs[n];
+        n++;
+    }
+    palette_pick(&st->palette, "place", namep, refp, n, add_place_pin_cb);
+}
+
+/* "Rename pin" — available iff the selection is a pin; sets its name meta (the
+   label pass reads meta each frame, so no rebuild is needed). */
+static sol_bool can_rename_pin(AppState *st) {
+    SceneObject *o = scene_get(&st->scene, st->selected_handle);
+    return (sol_bool)(o && o->mesh_ref && strcmp(o->mesh_ref, "pin") == 0);
+}
+static void rename_pin_cb(AppState *st, const char *line) {
+    SceneObject *o = scene_get(&st->scene, st->selected_handle);
+    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "pin") != 0) return;
+    scene_meta_set(&st->scene, st->selected_handle, "name", line ? line : "");
+    scene_save(&st->scene, "scene.stml");
+}
+static void cmd_rename_pin(AppState *st) {
+    palette_prompt(&st->palette, "pin name", rename_pin_cb);
+}
+
+static const Command g_mapview_cmds[] = {
+    { "Add place",  NULL, 0, cmd_add_place,  NULL,           SOL_FALSE },
+    { "Rename pin", NULL, 0, cmd_rename_pin, can_rename_pin, SOL_FALSE }
+};
+#define G_MAPVIEW_COUNT ((int)(sizeof g_mapview_cmds / sizeof g_mapview_cmds[0]))
+
 /* --- Files provider --- live drill-down of the real filesystem. The Entities
    column lists browser_disk_cwd (a "../" entry first, then folders, then files);
    Open re-lists a directory in place (run returns 1 = stay); Mount as root reuses
@@ -18091,7 +18186,8 @@ static void render(AppState *state) {
     }
     inventory_draw_overlay(state);
     palette_draw(&state->palette, state, state->mono_font,
-                 g_commands, G_COMMAND_COUNT, state->fb_width, state->fb_height);
+                 state->active_cmds, state->active_cmd_count,
+                 state->fb_width, state->fb_height);
     if (state->browser_open) browser_draw_overlay(state, state->fb_width, state->fb_height);
     editor_draw_overlay(state);
     ui_end();
@@ -18420,7 +18516,8 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
                      key == GLFW_KEY_KP_ENTER)  pk = PALETTE_KEY_ENTER;
             else if (key == GLFW_KEY_BACKSPACE) pk = PALETTE_KEY_BACKSPACE;
             if (pk != PALETTE_KEY_NONE)
-                palette_input_key(&st->palette, pk, st, g_commands, G_COMMAND_COUNT);
+                palette_input_key(&st->palette, pk, st,
+                                  st->active_cmds, st->active_cmd_count);
         }
         return;
     }
@@ -18497,10 +18594,18 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
         return;
     }
 
-    /* ':' (Shift+;) opens the palette when nothing else owns the keyboard. */
+    /* ':' (Shift+;) opens the palette when nothing else owns the keyboard. In map
+       view it routes to the map-view command table (pins); elsewhere, the global
+       registry. Board view stays suppressed (its ':' is a later feature). */
     if (action == GLFW_PRESS && key == GLFW_KEY_SEMICOLON && (mods & GLFW_MOD_SHIFT)
-        && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0
-        && st->map_view == 0) {
+        && st->edit_handle == 0 && st->reader_state == READER_IDLE && st->board_view == 0) {
+        if (st->map_view != 0) {
+            st->active_cmds      = g_mapview_cmds;
+            st->active_cmd_count = G_MAPVIEW_COUNT;
+        } else {
+            st->active_cmds      = g_commands;
+            st->active_cmd_count = G_COMMAND_COUNT;
+        }
         palette_open_now(&st->palette);
         return;
     }
@@ -18675,6 +18780,8 @@ int main(void) {
     double last;
     state.bv_t = 1.0f;   /* board-view glide starts settled (no tween at boot) */
     state.hover_corner = -1;   /* no resize-corner hovered yet */
+    state.active_cmds      = g_commands;    /* palette binds the global registry by default */
+    state.active_cmd_count = G_COMMAND_COUNT;
 
     asset_store_init(&g_mesh_assets,    mesh_asset_destroy,   NULL);
     asset_store_init(&g_tex_assets,     tex_asset_destroy,    NULL);
