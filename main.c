@@ -3200,7 +3200,8 @@ static Ray pick_ray(AppState *st, GLFWwindow *w) {
     double mx, my;
     glfwGetWindowSize(w, &ww, &wh);
     aspect = (wh > 0) ? (float)ww / (float)wh : 1.0f;
-    if ((st->camera.mode == CAMERA_ORBIT || st->board_view != 0) && ww > 0 && wh > 0) {
+    if ((st->camera.mode == CAMERA_ORBIT || st->board_view != 0 ||
+         st->map_view != 0) && ww > 0 && wh > 0) {
         glfwGetCursorPos(w, &mx, &my);
         nx = 2.0f * (float)mx / (float)ww - 1.0f;
         ny = 1.0f - 2.0f * (float)my / (float)wh;
@@ -4265,6 +4266,24 @@ static sol_bool board_ray_local(AppState *st, sol_u32 board, Ray r, vec3 *out) {
                           vec3_make(0.0f, 0.0f, bt * 0.5f));
     if (!ray_vs_plane(r, face, n, &t)) return SOL_FALSE;
     *out = scene_world_to_local(&st->scene, board,
+                                vec3_add(r.origin, vec3_scale(r.dir, t)));
+    return SOL_TRUE;
+}
+
+/* Project ray `r` onto a map object's front-face plane (local z=0, the map quad's
+   plane); writes the map-local point (UNCLAMPED). Returns SOL_FALSE if the ray
+   misses. The board_ray_local pattern, minus the board-thickness offset. */
+static sol_bool map_ray_local(AppState *st, sol_u32 map, Ray r, vec3 *out) {
+    SceneObject *o = scene_get(&st->scene, map);
+    vec3  n, face;
+    float t;
+    if (!o) return SOL_FALSE;
+    n    = quat_rotate(scene_world_rotation(&st->scene, map),
+                       vec3_make(0.0f, 0.0f, 1.0f));
+    face = mat4_mul_point(scene_world_matrix(&st->scene, o),
+                          vec3_make(0.0f, 0.0f, 0.0f));
+    if (!ray_vs_plane(r, face, n, &t)) return SOL_FALSE;
+    *out = scene_world_to_local(&st->scene, map,
                                 vec3_add(r.origin, vec3_scale(r.dir, t)));
     return SOL_TRUE;
 }
@@ -11272,8 +11291,57 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 reader_close(st);                       /* click-away, like blur:
                                                            this press only closes */
             } else if (st->map_view != 0) {
-                /* map view is view-only: a click does nothing (no pick, so no
-                   selection or drag is armed) until pin management defines it */
+                /* map view: pins are picked/placed at the free cursor (the camera
+                   is frozen first-person, so do_pick's ORBIT re-pivot never fires).
+                   Single-click a pin selects it; single-click empty deselects;
+                   double-click empty drops a new pin at that lat/lon — the double-
+                   click-empty-board -> new-note pattern, through the crop window. */
+                float        pnx = 0.0f, pny = 0.0f;
+                int          mww, mwh;
+                sol_bool     is_dbl;
+                SceneObject *hs;
+                glfwGetWindowSize(w, &mww, &mwh);
+                if (mww > 0 && mwh > 0) {
+                    pnx = 2.0f * (float)mx / (float)mww - 1.0f;
+                    pny = 1.0f - 2.0f * (float)my / (float)mwh;
+                }
+                do_pick(st, w, pnx, pny);               /* select at the cursor */
+                hs = scene_get(&st->scene, st->selected_handle);
+                if (!(hs && hs->mesh_ref && strcmp(hs->mesh_ref, "pin") == 0 &&
+                      hs->parent == st->map_view))
+                    st->selected_handle = 0;            /* only a pin on THIS map stays selected */
+                is_dbl = (sol_bool)(click_seq_bump(st, mx, my) == 2);
+                if (is_dbl && st->selected_handle == 0) {   /* double-click empty map: drop a pin */
+                    double u0, v0, u1, v1;
+                    float  mw, mh;
+                    vec3   loc;
+                    if (map_window_of(&st->scene, st->map_view, &u0, &v0, &u1, &v1, &mw, &mh) &&
+                        map_ray_local(st, st->map_view, pick_ray(st, w), &loc) &&
+                        loc.x >= -mw * 0.5f && loc.x <= mw * 0.5f &&
+                        loc.y >= 0.0f && loc.y <= mh) {
+                        double  pu, pv, plon, plat;
+                        sol_u32 ph;
+                        char    b[32];
+                        Mesh    empty;
+                        pu = u0 + ((double)loc.x + (double)mw * 0.5) / (double)mw * (u1 - u0);
+                        pv = v0 + (double)loc.y / (double)mh * (v1 - v0);
+                        mapmath_uv_to_lonlat(pu, pv, &plon, &plat);
+                        memset(&empty, 0, sizeof empty);
+                        ph = scene_add(&st->scene, st->map_view, empty,
+                                       vec3_make(0.0f, 0.0f, 0.0f), quat_identity(),
+                                       vec3_make(1.0f, 1.0f, 1.0f));
+                        scene_mesh_ref_set(&st->scene, ph, "pin");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                        sprintf(b, "%.6f", plat); scene_meta_set(&st->scene, ph, "lat", b);
+                        sprintf(b, "%.6f", plon); scene_meta_set(&st->scene, ph, "lon", b);
+#pragma clang diagnostic pop
+                        scene_meta_set(&st->scene, ph, "name", "");
+                        resolve_pin(&st->scene, ph, u0, v0, u1, v1, mw, mh);
+                        st->selected_handle = ph;
+                        scene_save(&st->scene, "scene.stml");
+                    }
+                }
             } else if (fp) {
                 float pnx = 0.0f, pny = 0.0f;           /* crosshair by default */
                 sol_bool is_dbl = SOL_FALSE;
@@ -12588,6 +12656,17 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 scene_remove(&st->scene, doomed);
                 scene_save(&st->scene, "scene.stml");
                 printf("deleted map #%u\n", (unsigned)doomed);
+            } else if (o && o->mesh_ref != NULL &&
+                       strcmp(o->mesh_ref, "pin") == 0) {
+                /* a map pin: an owned per-object marker mesh (excluded from
+                   mesh_asset_key like the map's quad) — free the GPU buffer with
+                   mesh_destroy, NOT asset_release. lat/lon/name meta die with it. */
+                sol_u32 doomed = st->selected_handle;
+                mesh_destroy(&o->mesh);
+                st->selected_handle = 0;
+                scene_remove(&st->scene, doomed);
+                scene_save(&st->scene, "scene.stml");
+                printf("deleted pin #%u\n", (unsigned)doomed);
             } else if (o && o->mesh_ref != NULL &&
                        strcmp(o->mesh_ref, "picture") == 0) {
                 /* a placed image (on a wall or pinned to a whiteboard): remove
