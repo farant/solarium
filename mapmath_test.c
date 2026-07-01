@@ -73,6 +73,48 @@ static void test_window_guards(void) {
     CHECK(near(v0, 0.0) && near(v1, 1.0), "tiny aspect -> full v span");
 }
 
+static void test_pin_local(void) {
+    double u0, v0, u1, v1;
+    double clon, clat, lx, ly;
+    const double w = 1.6, h = 0.8;   /* the MAP_BOARD_W/H board (2:1) */
+    int    in;
+    mapmath_window(0.0, 0.0, 4, 2.0, &u0, &v0, &u1, &v1);   /* z4 window, centered at (0,0) */
+
+    /* (a) a pin at the window CENTRE lon/lat -> quad centre (lx=0, ly=h/2), in */
+    mapmath_uv_to_lonlat((u0 + u1) * 0.5, (v0 + v1) * 0.5, &clon, &clat);
+    in = map_pin_local(u0, v0, u1, v1, w, h, clon, clat, &lx, &ly);
+    CHECK(in == 1, "centre pin is in-bounds");
+    CHECK(near(lx, 0.0), "centre pin lx = 0");
+    CHECK(near(ly, h * 0.5), "centre pin ly = h/2");
+
+    /* (b) the window's corner uv maps to the quad corners */
+    {
+        double lon, lat;
+        mapmath_uv_to_lonlat(u0, v0, &lon, &lat);
+        in = map_pin_local(u0, v0, u1, v1, w, h, lon, lat, &lx, &ly);
+        CHECK(in == 1 && near(lx, -w * 0.5) && near(ly, 0.0), "SW corner -> (-w/2, 0)");
+        mapmath_uv_to_lonlat(u1, v1, &lon, &lat);
+        in = map_pin_local(u0, v0, u1, v1, w, h, lon, lat, &lx, &ly);
+        CHECK(in == 1 && near(lx, w * 0.5) && near(ly, h), "NE corner -> (w/2, h)");
+    }
+
+    /* (c) a pin well outside the window reports out-of-bounds and leaves lx/ly */
+    lx = -123.0; ly = -123.0;
+    in = map_pin_local(u0, v0, u1, v1, w, h, 170.0, 80.0, &lx, &ly);
+    CHECK(in == 0, "far pin is out-of-bounds");
+    CHECK(near(lx, -123.0) && near(ly, -123.0), "out-of-bounds leaves lx/ly untouched");
+
+    /* (d) round-trip: a local point -> uv -> lonlat -> map_pin_local = same local */
+    {
+        double lx0 = 0.3, ly0 = 0.5, pu, pv, lon, lat, lx2, ly2;
+        pu = u0 + (lx0 + w * 0.5) / w * (u1 - u0);
+        pv = v0 + ly0 / h * (v1 - v0);
+        mapmath_uv_to_lonlat(pu, pv, &lon, &lat);
+        in = map_pin_local(u0, v0, u1, v1, w, h, lon, lat, &lx2, &ly2);
+        CHECK(in == 1 && near(lx2, lx0) && near(ly2, ly0), "round-trip local point");
+    }
+}
+
 int main(void) {
     test_lonlat_corners();
     test_roundtrip();
@@ -82,6 +124,7 @@ int main(void) {
     test_window_z0_full();
     test_window_edge_shift();
     test_window_guards();
+    test_pin_local();
     if (fails == 0) printf("mapmath_test: all passed\n");
     return fails ? 1 : 0;
 }

@@ -21,4 +21,12 @@ void mapmath_uv_to_lonlat(double u, double v, double *lon, double *lat);
 void mapmath_window(double lon, double lat, int z, double aspect,
                     double *u0, double *v0, double *u1, double *v1);
 
+/* Project a pin at (plon,plat) onto a map whose crop window is (u0,v0)-(u1,v1)
+   and whose quad is w wide, h tall (local x in [-w/2,w/2], y in [0,h], bottom-
+   origin — matching make_map_quad). Writes the map-local (lx,ly) and returns 1
+   if the pin is inside the window, else returns 0 and leaves *lx,*ly untouched. */
+int map_pin_local(double u0, double v0, double u1, double v1,
+                  double w, double h, double plon, double plat,
+                  double *lx, double *ly);
+
 #endif /* MAPMATH_H */

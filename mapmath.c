@@ -37,3 +37,17 @@ void mapmath_window(double lon, double lat, int z, double aspect,
     *u0 = cu - hu; *u1 = cu + hu;
     *v0 = cv - hv; *v1 = cv + hv;
 }
+
+int map_pin_local(double u0, double v0, double u1, double v1,
+                  double w, double h, double plon, double plat,
+                  double *lx, double *ly) {
+    double pu, pv;
+    int    in;
+    mapmath_lonlat_to_uv(plon, plat, &pu, &pv);
+    in = (pu >= u0 && pu <= u1 && pv >= v0 && pv <= v1);
+    if (in) {
+        *lx = -w * 0.5 + w * (pu - u0) / (u1 - u0);
+        *ly = h * (pv - v0) / (v1 - v0);
+    }
+    return in ? 1 : 0;
+}
