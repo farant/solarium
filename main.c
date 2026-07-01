@@ -5512,6 +5512,16 @@ static void on_scroll(GLFWwindow *w, double xoff, double yoff) {
    Movement/look are level-triggered (held keys); the mode toggle is edge-
    triggered so it fires once per press. */
 static void scene_resolve_meshes(Scene *s);    /* defined with init_scene below */
+/* Map-pin helpers (defined below, with the map-resolve pass): the crop window of
+   a map, and per-pin geometry resolve. Forward-declared so the map-view press
+   handler in read_input (above their definition) can place/resolve pins. */
+static int  map_window_of(Scene *s, sol_u32 map, double *u0, double *v0,
+                          double *u1, double *v1, float *mw, float *mh);
+static void resolve_pin(Scene *s, sol_u32 pin, double u0, double v0,
+                        double u1, double v1, float mw, float mh);
+/* Places anchor (defined below with spawn_places_panel): forward-declared so
+   spawn_map_board (above) can call it to seed auto-populate pins. */
+static sol_u32 places_anchor(AppState *st);
 static void hdr_reload(AppState *st, const char *path);  /* the abbey key
                                           switches the sky (defined with
                                           the watcher below) */
@@ -6461,6 +6471,9 @@ static sol_bool mesh_asset_key(const SceneObject *o, char *buf) {
     if (o->mesh_ref && strcmp(o->mesh_ref, "map") == 0) return SOL_FALSE;  /* unique
         per-object UVs (lon/lat crop): owned, never shared -> freed via mesh_destroy
         like an arrow, not the asset store */
+    if (o->mesh_ref && strcmp(o->mesh_ref, "pin") == 0) return SOL_FALSE;  /* owned
+        per-pin marker, built at its projected map-local pos: freed via mesh_destroy,
+        never the shared store (mirrors the map's owned quad) */
     n = mesh_ref_schema(o->mesh_ref, &names, &defaults);
     if (n < 0) return SOL_FALSE;
     (void)defaults;
@@ -13274,6 +13287,89 @@ static const char *basemap_path(const char *style) {
     return "basemap_relief.jpg";  /* default: Natural Earth relief */
 }
 
+/* A pin's marker: a small co-planar disc facing +Z (map-local), radius scaled to
+   the map so it reads at any board size. OWNED per pin (excluded from
+   mesh_asset_key), so it dies via mesh_destroy. The engine never backface-culls,
+   so winding is irrelevant. */
+#define PIN_SEGMENTS  16
+#define PIN_Z_OFFSET  0.010f    /* proud of the map face, toward the viewer */
+static Mesh pin_marker_mesh(float mw) {
+    MeshBuilder mb;
+    Mesh        m;
+    float       r = 0.03f * mw;
+    sol_u32     center, prev = 0;
+    int         i;
+    mb_init(&mb);
+    center = mb_push_vertex(&mb, 0.0f, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.5f, 0.5f);
+    for (i = 0; i <= PIN_SEGMENTS; i++) {
+        float   a = 6.2831853f * (float)i / (float)PIN_SEGMENTS;
+        sol_u32 v = mb_push_vertex(&mb, r * cosf(a), r * sinf(a), 0.0f,
+                                   0.0f, 0.0f, 1.0f,
+                                   0.5f + 0.5f * cosf(a), 0.5f + 0.5f * sinf(a));
+        if (i > 0) mb_push_triangle(&mb, center, prev, v);
+        prev = v;
+    }
+    m = mesh_from_builder(&mb);
+    mb_free(&mb);
+    return m;
+}
+
+/* The crop window of a map object, from its meta + w/h params (no mesh needed —
+   this is pure meta math, so it works even before the quad is built). Returns 1
+   for a map object, 0 otherwise. Mirrors the map-resolve loop's window math. */
+static int map_window_of(Scene *s, sol_u32 map, double *u0, double *v0,
+                         double *u1, double *v1, float *mw, float *mh) {
+    SceneObject *o = scene_get(s, map);
+    const char  *slat, *slon, *szoom;
+    double       lon, lat;
+    int          z;
+    float        w, h;
+    if (!o || !o->mesh_ref || strcmp(o->mesh_ref, "map") != 0) return 0;
+    w = mesh_ref_param("map", o->mesh_params, o->mesh_param_count, "w");
+    h = mesh_ref_param("map", o->mesh_params, o->mesh_param_count, "h");
+    if (w <= 0.0f) w = MAP_BOARD_W;
+    if (h <= 0.0f) h = MAP_BOARD_H;
+    slat  = scene_meta_get(s, map, "lat");
+    slon  = scene_meta_get(s, map, "lon");
+    szoom = scene_meta_get(s, map, "zoom");
+    lat = slat  ? atof(slat)  : 0.0;
+    lon = slon  ? atof(slon)  : 0.0;
+    z   = szoom ? atoi(szoom) : 0;
+    if (z < 0) z = 0;
+    if (z > MAP_ZMAX) z = MAP_ZMAX;
+    mapmath_window(lon, lat, z, (double)(w / h), u0, v0, u1, v1);
+    if (mw) *mw = w;
+    if (mh) *mh = h;
+    return 1;
+}
+
+/* Resolve one pin's geometry against its map's window: project lon/lat -> local
+   (x,y); if in-window, build the marker (once) and seat it proud of the face; if
+   out-of-window, clear its mesh so it drops from render AND picking. Canonical
+   data is meta; geometry is derived here — the map's own idiom. */
+static void resolve_pin(Scene *s, sol_u32 pin, double u0, double v0,
+                        double u1, double v1, float mw, float mh) {
+    SceneObject *o = scene_get(s, pin);
+    const char  *slat, *slon;
+    double       lon, lat, lx, ly;
+    if (!o) return;
+    slat = scene_meta_get(s, pin, "lat");
+    slon = scene_meta_get(s, pin, "lon");
+    lat  = slat ? atof(slat) : 0.0;
+    lon  = slon ? atof(slon) : 0.0;
+    if (map_pin_local(u0, v0, u1, v1, (double)mw, (double)mh, lon, lat, &lx, &ly)) {
+        if (o->mesh.index_count == 0)
+            o->mesh = pin_marker_mesh(mw);            /* build once (owned) */
+        o->pos = vec3_make((float)lx, (float)ly, PIN_Z_OFFSET);
+        o->material = material_default();
+        o->material.base_color = vec3_make(0.85f, 0.15f, 0.12f);   /* warm marker */
+        o->material.emissive   = vec3_make(0.30f, 0.04f, 0.03f);   /* reads on any basemap */
+        o->material.roughness  = 0.6f;
+    } else {
+        mesh_destroy(&o->mesh);                       /* out-of-window: hide + unpick */
+    }
+}
+
 /* The mesh-ref resolver, GPU half (P3 item 1): realize geometry for every
    object whose ref names a generator and whose mesh is still empty. Runs
    AFTER rhi_init (it uploads) and after scene_load or scene-building — the
@@ -13294,6 +13390,7 @@ static void scene_resolve_meshes(Scene *s) {
         if (strcmp(o->mesh_ref, "arrow") == 0) continue;   /* scene-derived:
                                                               arrows_rebuild owns it */
         if (strcmp(o->mesh_ref, "map") == 0) continue;     /* built from meta below */
+        if (strcmp(o->mesh_ref, "pin") == 0) continue;     /* resolved with its map below */
         keyed = mesh_asset_key(o, key);
         if (keyed && asset_acquire(&g_mesh_assets, key, &o->mesh, sizeof o->mesh))
             continue;                          /* the shape already lives: borrow it */
@@ -13391,6 +13488,16 @@ static void scene_resolve_meshes(Scene *s) {
         o->material.albedo_tex = load_texture(basemap_path(style));
         if (!o->material.albedo_tex.id)
             o->material.base_color = vec3_make(0.32f, 0.34f, 0.38f); /* "no basemap" */
+        {   /* this map's window is known now: (re)project every pin child. No
+               scene_add here, so no realloc — iterating by pointer is safe. */
+            sol_u32 pj;
+            for (pj = 0; pj < s->count; pj++) {
+                SceneObject *pc = &s->objects[pj];
+                if (pc->parent != o->handle) continue;
+                if (!pc->mesh_ref || strcmp(pc->mesh_ref, "pin") != 0) continue;
+                resolve_pin(s, pc->handle, u0, v0, u1, v1, mw, mh);
+            }
+        }
     }
 }
 
@@ -13454,6 +13561,49 @@ static sol_u32 spawn_map_board(AppState *st, double lat, double lon, int z,
         mint_tag_ws(st, h);          /* floor: tag active ws. A mounted map inherits
                                         the workspace via its room parent (like
                                         spawn_image_picture). */
+    {   /* auto-populate: a pin for every saved Place inside this map's window.
+           SNAPSHOT semantics — each pin is an independent, deletable copy. Runs
+           BEFORE the resolve below, so the map loop projects the new pins as it
+           builds the quad. places_anchor() may scene_add (seed) -> realloc, so
+           capture n0 first and snapshot each Place's data before adding a pin. */
+        double  u0, v0, u1, v1, lx, ly;
+        float   mw, mh;
+        sol_u32 anchor = places_anchor(st);      /* find-or-create + seed */
+        sol_u32 n0     = st->scene.count;         /* Places exist by now; pins append past here */
+        sol_u32 pi;
+        if (map_window_of(&st->scene, h, &u0, &v0, &u1, &v1, &mw, &mh)) {
+            for (pi = 0; pi < n0; pi++) {
+                SceneObject *pl = &st->scene.objects[pi];
+                const char  *plat, *plon, *pname;
+                double       lon, lat;
+                char         nm[48];
+                if (pl->parent != anchor) continue;
+                plat  = scene_meta_get(&st->scene, pl->handle, "lat");
+                plon  = scene_meta_get(&st->scene, pl->handle, "lon");
+                pname = scene_meta_get(&st->scene, pl->handle, "name");
+                lat = plat ? atof(plat) : 0.0;
+                lon = plon ? atof(plon) : 0.0;
+                strncpy(nm, pname ? pname : "", sizeof nm - 1);
+                nm[sizeof nm - 1] = '\0';
+                if (map_pin_local(u0, v0, u1, v1, (double)mw, (double)mh,
+                                  lon, lat, &lx, &ly)) {
+                    Mesh    empty2;
+                    sol_u32 ph;
+                    char    b[32];
+                    memset(&empty2, 0, sizeof empty2);
+                    ph = scene_add(&st->scene, h, empty2, vec3_make(0.0f, 0.0f, 0.0f),
+                                   quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+                    scene_mesh_ref_set(&st->scene, ph, "pin");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                    sprintf(b, "%.6f", lat); scene_meta_set(&st->scene, ph, "lat", b);
+                    sprintf(b, "%.6f", lon); scene_meta_set(&st->scene, ph, "lon", b);
+#pragma clang diagnostic pop
+                    scene_meta_set(&st->scene, ph, "name", nm);
+                }
+            }
+        }
+    }
     scene_resolve_meshes(&st->scene);
     return h;
 }
@@ -17016,6 +17166,30 @@ static void render(AppState *state) {
                     }
                 }
             }
+        }
+
+        /* pin labels (map pins): each in-bounds pin's name floats just off its
+           marker toward the viewer, on the map's own +Z plane. Modeled on the
+           card-label pass above; text comes from "name" meta and centres over
+           the marker. Same vis[] frustum cull the cards use. */
+        for (i = 0; i < state->scene.count; i++) {
+            SceneObject *o = &state->scene.objects[i];
+            const char  *nm;
+            float        px2m, nw, top_y;
+            mat4         face;
+            if (!o->mesh_ref || strcmp(o->mesh_ref, "pin") != 0) continue;
+            if (o->mesh.index_count == 0) continue;         /* out-of-window: hidden */
+            if (vis && !vis[o->handle]) continue;           /* frustum cull (as cards) */
+            nm = scene_meta_get(&state->scene, o->handle, "name");
+            if (!nm || !nm[0]) continue;                    /* unnamed: no label */
+            px2m  = 0.030f / lh;                            /* ~3cm line */
+            text_measure_cached(uf, nm, 1.0f, &nw, (float *)0);
+            top_y = 0.06f + lh * px2m;                      /* clear the marker, hang above it */
+            face  = mat4_mul(scene_world_matrix(&state->scene, o),
+                             mat4_translate(vec3_make(0.0f, 0.0f, 0.002f)));
+            wtext_block(uf, vp, face, nm,
+                        -nw * px2m * 0.5f, top_y, px2m, 0.0f,
+                        0.98f, 0.96f, 0.90f);
         }
 
         /* doorway labels (fs-tree): each room's name — the path it represents —
