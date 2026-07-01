@@ -3612,6 +3612,8 @@ static sol_u32 selection_root(Scene *s, sol_u32 handle) {
     if (o->mesh_ref && strcmp(o->mesh_ref, "arrow") == 0)
         return handle;            /* an edge is its own thing: select it, not
                                      the board group it hangs on (item 8) */
+    if (o->mesh_ref && strcmp(o->mesh_ref, "pin") == 0)
+        return handle;            /* a map pin selects individually, not its map */
     return group_root(s, handle);
 }
 
@@ -13391,22 +13393,34 @@ static const char *basemap_path(const char *style) {
    so winding is irrelevant. */
 #define PIN_SEGMENTS  16
 #define PIN_Z_OFFSET  0.010f    /* proud of the map face, toward the viewer */
+#define PIN_HEAD_R    0.020f    /* head radius, x map width */
+#define PIN_HEAD_CY   0.055f    /* head centre above the tip, x map width */
+/* A classic map marker: a circle HEAD centred at (0, cy) with a downward TRIANGLE
+   whose tip is the local origin (0,0). resolve_pin seats local (0,0) on the
+   projected lat/lon, so the tip rests exactly on the point and the head rises
+   above it. Co-planar +Z, OWNED per pin (excluded from mesh_asset_key). */
 static Mesh pin_marker_mesh(float mw) {
     MeshBuilder mb;
     Mesh        m;
-    float       r = 0.03f * mw;
-    sol_u32     center, prev = 0;
+    float       r  = PIN_HEAD_R  * mw;
+    float       cy = PIN_HEAD_CY * mw;
+    float       bx = r * 0.6f;              /* triangle half-width at the head base */
+    sol_u32     center, prev = 0, tip, bl, br;
     int         i;
     mb_init(&mb);
-    center = mb_push_vertex(&mb, 0.0f, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.5f, 0.5f);
+    center = mb_push_vertex(&mb, 0.0f, cy, 0.0f,  0.0f, 0.0f, 1.0f,  0.5f, 0.5f);
     for (i = 0; i <= PIN_SEGMENTS; i++) {
         float   a = 6.2831853f * (float)i / (float)PIN_SEGMENTS;
-        sol_u32 v = mb_push_vertex(&mb, r * cosf(a), r * sinf(a), 0.0f,
+        sol_u32 v = mb_push_vertex(&mb, r * cosf(a), cy + r * sinf(a), 0.0f,
                                    0.0f, 0.0f, 1.0f,
                                    0.5f + 0.5f * cosf(a), 0.5f + 0.5f * sinf(a));
         if (i > 0) mb_push_triangle(&mb, center, prev, v);
         prev = v;
     }
+    tip = mb_push_vertex(&mb, 0.0f, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.5f, 0.0f);
+    bl  = mb_push_vertex(&mb, -bx,  cy,   0.0f,  0.0f, 0.0f, 1.0f,  0.2f, 0.5f);
+    br  = mb_push_vertex(&mb,  bx,  cy,   0.0f,  0.0f, 0.0f, 1.0f,  0.8f, 0.5f);
+    mb_push_triangle(&mb, tip, br, bl);
     m = mesh_from_builder(&mb);
     mb_free(&mb);
     return m;
@@ -17373,7 +17387,14 @@ static void render(AppState *state) {
             if (!nm || !nm[0]) continue;                    /* unnamed: no label */
             px2m  = 0.030f / lh;                            /* ~3cm line */
             text_measure_cached(uf, nm, 1.0f, &nw, (float *)0);
-            top_y = 0.06f + lh * px2m;                      /* clear the marker, hang above it */
+            {   /* clear the marker head: its top is (PIN_HEAD_CY+PIN_HEAD_R)*mw
+                   above the tip, scaled by the parent map's width. */
+                SceneObject *pm = scene_get(&state->scene, o->parent);
+                float mw2 = pm ? mesh_ref_param("map", pm->mesh_params,
+                                                pm->mesh_param_count, "w") : MAP_BOARD_W;
+                if (mw2 <= 0.0f) mw2 = MAP_BOARD_W;
+                top_y = (PIN_HEAD_CY + PIN_HEAD_R) * mw2 + 0.02f + lh * px2m;
+            }
             face  = mat4_mul(scene_world_matrix(&state->scene, o),
                              mat4_translate(vec3_make(0.0f, 0.0f, 0.002f)));
             wtext_block(uf, vp, face, nm,
