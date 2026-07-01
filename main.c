@@ -15785,18 +15785,74 @@ static RhiTexture places_preview(AppState *st, const char *ref, float *out_aspec
 /* --- map-view focus palette --- the ':' command set while a map is framed:
    add a pin from the Places catalog, or rename the selected pin. */
 
-/* picker callback: create a pin on the current map at the chosen Place's view.
-   Snapshot lat/lon/name to locals BEFORE scene_add (which reallocs + invalidates
-   the meta pointers). Harmless if the place is out of the map's window (the pin
-   is hidden until it comes into view). */
-static void add_place_pin_cb(AppState *st, const char *ref) {
-    sol_u32     h, ph;
-    const char *slat, *slon, *pname;
-    double      lat, lon, u0, v0, u1, v1;
-    float       mw, mh;
-    char        b[32], nm[48];
+/* Create a pin on `map` at (lat,lon) with `name`, resolve + select + save.
+   Shared by the Places picker and the New-place form. Snapshot any caller meta
+   pointers BEFORE calling — scene_add reallocs. */
+static void add_pin_to_map(AppState *st, sol_u32 map, double lat, double lon,
+                           const char *name) {
+    double  u0, v0, u1, v1;
+    float   mw, mh;
+    sol_u32 ph;
+    char    b[32];
+    Mesh    empty;
+    if (map == 0) return;
+    memset(&empty, 0, sizeof empty);
+    ph = scene_add(&st->scene, map, empty, vec3_make(0.0f, 0.0f, 0.0f),
+                   quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+    scene_mesh_ref_set(&st->scene, ph, "pin");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    sprintf(b, "%.6f", lat); scene_meta_set(&st->scene, ph, "lat", b);
+    sprintf(b, "%.6f", lon); scene_meta_set(&st->scene, ph, "lon", b);
+#pragma clang diagnostic pop
+    scene_meta_set(&st->scene, ph, "name", name ? name : "");
+    if (map_window_of(&st->scene, map, &u0, &v0, &u1, &v1, &mw, &mh))
+        resolve_pin(&st->scene, ph, u0, v0, u1, v1, mw, mh);
+    st->selected_handle = ph;
+    scene_save(&st->scene, "scene.stml");
+}
+
+/* "+ New place" form submit: vals = {lat, lon, label}. Save a new reusable Place
+   in the catalog (child of the places anchor) AND drop a pin on the current map.
+   `vals` point into the palette; copy nothing that outlives this call. */
+static void new_place_form_cb(AppState *st, const char *const *vals, int n) {
+    double      lat, lon;
+    sol_u32     anchor, pl;
+    char        b[32];
     Mesh        empty;
+    const char *label;
+    if (st->map_view == 0 || n < 3) return;
+    lat   = atof(vals[0]);
+    lon   = atof(vals[1]);
+    label = vals[2] ? vals[2] : "";
+    anchor = places_anchor(st);
+    memset(&empty, 0, sizeof empty);
+    pl = scene_add(&st->scene, anchor, empty, vec3_make(0.0f, 0.0f, 0.0f),
+                   quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
+    scene_meta_set(&st->scene, pl, "name", label);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    sprintf(b, "%.6f", lat); scene_meta_set(&st->scene, pl, "lat", b);
+    sprintf(b, "%.6f", lon); scene_meta_set(&st->scene, pl, "lon", b);
+#pragma clang diagnostic pop
+    scene_meta_set(&st->scene, pl, "zoom", "5");
+    scene_meta_set(&st->scene, pl, "basemap", "relief");
+    add_pin_to_map(st, st->map_view, lat, lon, label);
+}
+
+/* Add-place picker callback: the "+ New place" sentinel opens the form; any other
+   ref is an existing Place handle -> a pin at its stored view. */
+static void add_place_pin_cb(AppState *st, const char *ref) {
+    sol_u32     h;
+    const char *slat, *slon, *pname;
+    double      lat, lon;
+    char        nm[48];
     if (st->map_view == 0 || !ref || !ref[0]) return;
+    if (strcmp(ref, "+new") == 0) {
+        static const char *labels[3] = { "lat", "lon", "label" };
+        palette_form(&st->palette, labels, 3, new_place_form_cb);
+        return;
+    }
     h = (sol_u32)atoi(ref);
     if (!scene_get(&st->scene, h)) return;
     slat  = scene_meta_get(&st->scene, h, "lat");
@@ -15806,20 +15862,7 @@ static void add_place_pin_cb(AppState *st, const char *ref) {
     lon = slon ? atof(slon) : 0.0;
     strncpy(nm, pname ? pname : "", sizeof nm - 1);
     nm[sizeof nm - 1] = '\0';
-    memset(&empty, 0, sizeof empty);
-    ph = scene_add(&st->scene, st->map_view, empty, vec3_make(0.0f, 0.0f, 0.0f),
-                   quat_identity(), vec3_make(1.0f, 1.0f, 1.0f));
-    scene_mesh_ref_set(&st->scene, ph, "pin");
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    sprintf(b, "%.6f", lat); scene_meta_set(&st->scene, ph, "lat", b);
-    sprintf(b, "%.6f", lon); scene_meta_set(&st->scene, ph, "lon", b);
-#pragma clang diagnostic pop
-    scene_meta_set(&st->scene, ph, "name", nm);
-    if (map_window_of(&st->scene, st->map_view, &u0, &v0, &u1, &v1, &mw, &mh))
-        resolve_pin(&st->scene, ph, u0, v0, u1, v1, mw, mh);
-    st->selected_handle = ph;
-    scene_save(&st->scene, "scene.stml");
+    add_pin_to_map(st, st->map_view, lat, lon, nm);
 }
 
 /* "Add place..." — enumerate the Places catalog into name/ref rows (name + the
@@ -15833,6 +15876,11 @@ static void cmd_add_place(AppState *st) {
     sol_u32            anchor = places_anchor(st);
     int                n = 0;
     sol_u32            i;
+    strncpy(names[0], "+ New place", sizeof names[0] - 1);
+    names[0][sizeof names[0] - 1] = '\0';
+    strncpy(refs[0], "+new", sizeof refs[0] - 1);
+    refs[0][sizeof refs[0] - 1] = '\0';
+    namep[0] = names[0]; refp[0] = refs[0]; n = 1;   /* sentinel row atop the list */
     for (i = 0; i < st->scene.count && n < PALETTE_PICK_CAP; i++) {
         SceneObject *o = &st->scene.objects[i];
         const char  *nm;
@@ -18551,6 +18599,7 @@ static void on_key(GLFWwindow *window, int key, int scancode, int action, int mo
             else if (key == GLFW_KEY_ENTER ||
                      key == GLFW_KEY_KP_ENTER)  pk = PALETTE_KEY_ENTER;
             else if (key == GLFW_KEY_BACKSPACE) pk = PALETTE_KEY_BACKSPACE;
+            else if (key == GLFW_KEY_TAB)       pk = PALETTE_KEY_TAB;
             if (pk != PALETTE_KEY_NONE)
                 palette_input_key(&st->palette, pk, st,
                                   st->active_cmds, st->active_cmd_count);

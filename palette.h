@@ -11,6 +11,8 @@
 
 #define PALETTE_QUERY_CAP 128
 #define PALETTE_PICK_CAP  64
+#define PALETTE_FORM_FIELDS 4
+#define PALETTE_FIELD_CAP   64
 
 typedef struct {
     sol_bool open;
@@ -26,6 +28,12 @@ typedef struct {
     char     pick_refs[PALETTE_PICK_CAP][24];         /* returned to the callback */
     int      pick_n;
     void     (*pick_cb)(struct AppState *, const char *);
+    sol_bool form;      /* form mode: N labeled fields, submit all on Enter */
+    char     form_labels[PALETTE_FORM_FIELDS][32];
+    char     form_vals[PALETTE_FORM_FIELDS][PALETTE_FIELD_CAP];
+    int      form_n;
+    int      form_field;   /* the field being edited */
+    void     (*form_cb)(struct AppState *, const char *const *vals, int n);
 } Palette;
 
 typedef enum {
@@ -34,7 +42,8 @@ typedef enum {
     PALETTE_KEY_DOWN,
     PALETTE_KEY_ENTER,
     PALETTE_KEY_BACKSPACE,
-    PALETTE_KEY_CANCEL
+    PALETTE_KEY_CANCEL,
+    PALETTE_KEY_TAB
 } PaletteKey;
 
 void     palette_open_now(Palette *p);
@@ -51,6 +60,11 @@ void     palette_prompt(Palette *p, const char *label,
 void     palette_pick(Palette *p, const char *label,
                       const char *const *names, const char *const *refs, int n,
                       void (*cb)(struct AppState *, const char *ref));
+/* Open the palette as a multi-field FORM: `nfields` labeled text fields (Tab/
+   arrows move between them, Enter submits all values to cb, Esc cancels). Labels
+   are copied in; the `vals` pointers passed to cb are valid only during the call. */
+void     palette_form(Palette *p, const char *const *labels, int nfields,
+                      void (*cb)(struct AppState *, const char *const *vals, int n));
 void     palette_input_char(Palette *p, unsigned int cp);
 /* Returns SOL_TRUE if the palette consumed the key (always true while open). */
 sol_bool palette_input_key(Palette *p, PaletteKey k, struct AppState *st,

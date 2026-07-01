@@ -19,6 +19,7 @@ void palette_open_now(Palette *p) {
     p->eat_char = SOL_TRUE;   /* the ':' that opened us arrives next as a char */
     p->prompt   = SOL_FALSE;
     p->pick     = SOL_FALSE;
+    p->form     = SOL_FALSE;
 }
 
 void palette_prompt(Palette *p, const char *label,
@@ -30,6 +31,7 @@ void palette_prompt(Palette *p, const char *label,
     p->eat_char     = SOL_FALSE;   /* no ':' to swallow — a command opened us */
     p->prompt       = SOL_TRUE;
     p->pick         = SOL_FALSE;
+    p->form         = SOL_FALSE;
     p->prompt_label = label;
     p->prompt_cb    = cb;
 }
@@ -45,6 +47,7 @@ void palette_pick(Palette *p, const char *label,
     p->eat_char     = SOL_FALSE;   /* a command opened us — no ':' to swallow */
     p->prompt       = SOL_FALSE;
     p->pick         = SOL_TRUE;
+    p->form         = SOL_FALSE;
     p->prompt_label = label;
     p->pick_cb      = cb;
     if (n < 0) n = 0;
@@ -60,10 +63,40 @@ void palette_pick(Palette *p, const char *label,
     }
 }
 
+void palette_form(Palette *p, const char *const *labels, int nfields,
+                  void (*cb)(struct AppState *, const char *const *vals, int n)) {
+    int i;
+    p->open       = SOL_TRUE;
+    p->query[0]   = '\0';
+    p->len        = 0;
+    p->sel        = 0;
+    p->eat_char   = SOL_FALSE;   /* a command opened us — no ':' to swallow */
+    p->prompt     = SOL_FALSE;
+    p->pick       = SOL_FALSE;
+    p->form       = SOL_TRUE;
+    p->form_cb    = cb;
+    p->form_field = 0;
+    if (nfields < 0) nfields = 0;
+    if (nfields > PALETTE_FORM_FIELDS) nfields = PALETTE_FORM_FIELDS;
+    p->form_n = nfields;
+    for (i = 0; i < nfields; i++) {
+        strncpy(p->form_labels[i], labels[i] ? labels[i] : "",
+                sizeof p->form_labels[i] - 1);
+        p->form_labels[i][sizeof p->form_labels[i] - 1] = '\0';
+        p->form_vals[i][0] = '\0';
+    }
+}
+
 void palette_input_char(Palette *p, unsigned int cp) {
     if (!p->open) return;
     if (p->eat_char) { p->eat_char = SOL_FALSE; return; }
     if (cp < 0x20 || cp > 0x7e) return;             /* v1: printable ASCII only */
+    if (p->form) {                                  /* type into the current field */
+        char *f  = p->form_vals[p->form_field];
+        int   fl = (int)strlen(f);
+        if (fl + 1 < PALETTE_FIELD_CAP) { f[fl] = (char)cp; f[fl + 1] = '\0'; }
+        return;
+    }
     if (p->len + 1 >= PALETTE_QUERY_CAP) return;
     p->query[p->len++] = (char)cp;
     p->query[p->len]   = '\0';
@@ -135,7 +168,30 @@ sol_bool palette_input_key(Palette *p, PaletteKey k, struct AppState *st,
 
     if (k == PALETTE_KEY_CANCEL) {
         p->open = SOL_FALSE; p->prompt = SOL_FALSE; p->pick = SOL_FALSE;
+        p->form = SOL_FALSE;
         p->prompt_cb = NULL; p->prompt_label = NULL; p->pick_cb = NULL;
+        p->form_cb = NULL;
+        return SOL_TRUE;
+    }
+
+    if (p->form) {                                   /* multi-field form mode */
+        if (k == PALETTE_KEY_TAB || k == PALETTE_KEY_DOWN) {
+            if (p->form_n > 0) p->form_field = (p->form_field + 1) % p->form_n;
+        } else if (k == PALETTE_KEY_UP) {
+            if (p->form_n > 0)
+                p->form_field = (p->form_field + p->form_n - 1) % p->form_n;
+        } else if (k == PALETTE_KEY_BACKSPACE) {
+            char *f  = p->form_vals[p->form_field];
+            int   fl = (int)strlen(f);
+            if (fl > 0) f[fl - 1] = '\0';
+        } else if (k == PALETTE_KEY_ENTER) {
+            void (*cb)(struct AppState *, const char *const *, int) = p->form_cb;
+            const char *vals[PALETTE_FORM_FIELDS];
+            int   nf = p->form_n, fi;
+            for (fi = 0; fi < nf; fi++) vals[fi] = p->form_vals[fi];
+            p->open = SOL_FALSE; p->form = SOL_FALSE; p->form_cb = NULL;
+            if (cb) cb(st, vals, nf);
+        }
         return SOL_TRUE;
     }
 
@@ -208,6 +264,8 @@ void palette_draw(const Palette *p, struct AppState *st, Font *font,
 
     if (p->prompt) {
         n = 0; shown = 0;
+    } else if (p->form) {
+        n = p->form_n; shown = p->form_n;
     } else if (p->pick) {
         n     = palette_pick_rank(p, order, PALETTE_MAX_COMMANDS);
         shown = (n < PALETTE_MAX_ROWS) ? n : PALETTE_MAX_ROWS;
@@ -228,18 +286,24 @@ void palette_draw(const Palette *p, struct AppState *st, Font *font,
         char  line[PALETTE_QUERY_CAP + 40];
         float qy = box_y + pad + font_ascent(font) * ts;
         int   ll = 0, q;
-        if (p->prompt || p->pick) {
-            const char *lbl = p->prompt_label ? p->prompt_label : "input";
-            while (*lbl && ll < (int)sizeof line - 4) line[ll++] = *lbl++;
-            line[ll++] = ':';
-            line[ll++] = ' ';
+        if (p->form) {
+            const char *ttl = "new";                /* the fields carry their labels */
+            while (*ttl && ll < (int)sizeof line - 1) line[ll++] = *ttl++;
+            line[ll] = '\0';
         } else {
-            line[ll++] = ':';
+            if (p->prompt || p->pick) {
+                const char *lbl = p->prompt_label ? p->prompt_label : "input";
+                while (*lbl && ll < (int)sizeof line - 4) line[ll++] = *lbl++;
+                line[ll++] = ':';
+                line[ll++] = ' ';
+            } else {
+                line[ll++] = ':';
+            }
+            for (q = 0; q < p->len && ll < (int)sizeof line - 2; q++)
+                line[ll++] = p->query[q];
+            line[ll++] = '_';
+            line[ll]   = '\0';
         }
-        for (q = 0; q < p->len && ll < (int)sizeof line - 2; q++)
-            line[ll++] = p->query[q];
-        line[ll++] = '_';
-        line[ll]   = '\0';
         ui_text(font, line, box_x + pad, qy, ts, 0.95f, 0.92f, 0.80f, 1.0f);
     }
 
@@ -252,10 +316,21 @@ void palette_draw(const Palette *p, struct AppState *st, Font *font,
         if (ri >= n) break;
         ry = box_y + pad + row_h * (float)(i + 1);
         ty = ry + font_ascent(font) * ts;
-        if (ri == p->sel)
+        if (ri == (p->form ? p->form_field : p->sel))
             ui_quad(box_x + pad * 0.5f, ry, box_w - pad, row_h,
                     0.20f, 0.24f, 0.30f, 0.9f);
-        if (p->pick) {
+        if (p->form) {
+            char frow[32 + PALETTE_FIELD_CAP + 4];
+            int  fl = 0;
+            const char *lb = p->form_labels[ri];
+            const char *vv = p->form_vals[ri];
+            while (*lb && fl < (int)sizeof frow - 4) frow[fl++] = *lb++;
+            frow[fl++] = ':'; frow[fl++] = ' ';
+            while (*vv && fl < (int)sizeof frow - 2) frow[fl++] = *vv++;
+            if (ri == p->form_field) frow[fl++] = '_';
+            frow[fl] = '\0';
+            ui_text(font, frow, box_x + pad, ty, ts, 0.92f, 0.92f, 0.92f, 1.0f);
+        } else if (p->pick) {
             ui_text(font, p->pick_names[order[ri]], box_x + pad, ty, ts,
                     0.92f, 0.92f, 0.92f, 1.0f);
         } else {
