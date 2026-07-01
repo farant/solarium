@@ -12657,6 +12657,21 @@ static void read_input(GLFWwindow *w, CameraInput *in, double dt, AppState *st) 
                 if (st->move_board   == doomed) st->move_board   = 0;
                 if (st->carried      == doomed) st->carried      = 0;
                 if (st->drag_handle  == doomed) st->drag_handle  = 0;
+                {   /* sweep this map's pin children first, or Delete orphans them
+                       (stray discs at world origin + ghost entries in scene.stml) */
+                    sol_u32 k;
+                    for (k = 0; k < st->scene.count; ) {
+                        SceneObject *pc = &st->scene.objects[k];
+                        if (pc->parent == doomed && pc->mesh_ref &&
+                            strcmp(pc->mesh_ref, "pin") == 0) {
+                            sol_u32 ph = pc->handle;
+                            mesh_destroy(&pc->mesh);       /* owned marker */
+                            scene_remove(&st->scene, ph);  /* memmove -> do NOT k++ */
+                        } else {
+                            k++;
+                        }
+                    }
+                }
                 scene_remove(&st->scene, doomed);
                 scene_save(&st->scene, "scene.stml");
                 printf("deleted map #%u\n", (unsigned)doomed);
