@@ -37,6 +37,14 @@ void wtext_block(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
                  float x, float top_y, float px_to_m, float wrap_w_m,
                  float r, float g, float b);
 
+/* Like wtext_block, but with an SDF OUTLINE: `ow` is the outline half-width in
+   SDF distance units (0..~0.3; 0 = none), drawn in (or_,og,ob) around the
+   (r,g,b) fill. One draw — reads on any background. */
+void wtext_block_outlined(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
+                          float x, float top_y, float px_to_m, float wrap_w_m,
+                          float r, float g, float b,
+                          float or_, float og, float ob, float ow);
+
 /* The BENT block (item 9: text riding the turning leaf). The bend maps a
    text-plane x to a point on a curve in the model's XZ section — (bx, bz)
    with unit tangent (tx, tz) — bending the plane around axes parallel to

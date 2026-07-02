@@ -82,15 +82,17 @@ static const char *WT_FRAGMENT_SRC =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "struct VOut { float4 pos [[position]]; float2 uv; };\n"
-    "struct FU { float3 uColor; };\n"
+    "struct FU { float3 uColor; float3 uOutlineColor; float uOutline; };\n"
     "fragment float4 fmain(VOut v [[stage_in]], constant FU &u [[buffer(0)]],\n"
     "                      texture2d<float> uTex [[texture(0)]],\n"
     "                      sampler s0 [[sampler(0)]]) {\n"
     "    float d = uTex.sample(s0, v.uv).r;\n"
     "    float w = fwidth(d) * 0.5 + 0.0001;\n"
-    "    float edge = smoothstep(0.5 - w, 0.5 + w, d);\n"
-    "    if (edge < 0.004) discard_fragment();\n"
-    "    return float4(u.uColor, edge);\n"
+    "    float fill = smoothstep(0.5 - w, 0.5 + w, d);\n"
+    "    float oe = 0.5 - u.uOutline;\n"
+    "    float cov = smoothstep(oe - w, oe + w, d);\n"
+    "    if (cov < 0.004) discard_fragment();\n"
+    "    return float4(mix(u.uOutlineColor, u.uColor, fill), cov);\n"
     "}\n";
 
 #else /* GLSL */
@@ -100,13 +102,17 @@ static const char *WT_FRAGMENT_SRC =
     "in vec2 vUV;\n"
     "uniform sampler2D uTex;\n"
     "uniform vec3 uColor;\n"
+    "uniform vec3 uOutlineColor;\n"
+    "uniform float uOutline;\n"
     "out vec4 FragColor;\n"
     "void main() {\n"
     "    float d = texture(uTex, vUV).r;\n"
     "    float w = fwidth(d) * 0.5 + 0.0001;\n"
-    "    float edge = smoothstep(0.5 - w, 0.5 + w, d);\n"
-    "    if (edge < 0.004) discard;\n"
-    "    FragColor = vec4(uColor, edge);\n"
+    "    float fill = smoothstep(0.5 - w, 0.5 + w, d);\n"
+    "    float oe = 0.5 - uOutline;\n"
+    "    float cov = smoothstep(oe - w, oe + w, d);\n"
+    "    if (cov < 0.004) discard;\n"
+    "    FragColor = vec4(mix(uOutlineColor, uColor, fill), cov);\n"
     "}\n";
 
 #endif /* SOL_RHI_METAL — world-text FS */
@@ -207,7 +213,8 @@ static int wt_build(const Font *f, const char *src,
 
 /* Draw an already-built buffer of `vc` vertices for this block. */
 static void wt_draw(RhiBuffer buffer, int vc, mat4 viewproj, mat4 model,
-                    const Font *f, float r, float g, float b) {
+                    const Font *f, float r, float g, float b,
+                    float or_, float og, float ob, float ow) {
     mat4 mvp = mat4_mul(viewproj, model);
     rhi_set_pipeline(g_wt.pipeline);
     rhi_bind_vertex_buffer(buffer);
@@ -215,12 +222,20 @@ static void wt_draw(RhiBuffer buffer, int vc, mat4 viewproj, mat4 model,
     rhi_set_uniform_int("uTex", 0);
     rhi_set_uniform_mat4("uMVP", mvp.m);
     rhi_set_uniform_vec3("uColor", r, g, b);
+    rhi_set_uniform_vec3("uOutlineColor", or_, og, ob);
+    rhi_set_uniform_float("uOutline", ow);
     rhi_draw(0, vc);
 }
 
-void wtext_block(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
-                 float x, float top_y, float px_to_m, float wrap_w_m,
-                 float r, float g, float b) {
+/* The flat (cacheable) text path, with an optional SDF outline. wtext_block
+   passes the fill colour as the outline colour and ow=0, which the shader
+   collapses to the exact no-outline output. wtext_block_outlined passes a real
+   outline. The glyph cache keys on geometry (font/text/size/pos), not colour,
+   so an outlined and a plain block of the same text share cached vertices. */
+static void wt_block_flat(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
+                          float x, float top_y, float px_to_m, float wrap_w_m,
+                          float r, float g, float b,
+                          float or_, float og, float ob, float ow) {
     char        wrapped[WT_WRAP_CAP];
     const char *src = utf8;
     int         len, slot, vc;
@@ -235,7 +250,7 @@ void wtext_block(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
         if (slot >= 0) {                            /* HIT — no shape, no upload */
             g_wt_blocks++;
             wt_draw(g_wt_cache.e[slot].buffer, g_wt_cache.e[slot].vc,
-                    viewproj, model, f, r, g, b);
+                    viewproj, model, f, r, g, b, or_, og, ob, ow);
             return;
         }
         if (wrap_w_m > 0.0f) {                      /* MISS — build once, store */
@@ -251,7 +266,7 @@ void wtext_block(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
                                 (size_t)vc * WT_VERT_FLOATS * sizeof(sol_f32));
         wtcache_set(&g_wt_cache, slot, buf, vc);
         g_wt_blocks++; g_wt_uploads++; g_wt_misses++;
-        wt_draw(buf, vc, viewproj, model, f, r, g, b);
+        wt_draw(buf, vc, viewproj, model, f, r, g, b, or_, og, ob, ow);
         return;
     }
 
@@ -266,7 +281,22 @@ void wtext_block(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
     rhi_update_buffer(g_wt.vbuffer, g_wt_verts,
                       (size_t)vc * WT_VERT_FLOATS * sizeof(sol_f32));
     g_wt_blocks++; g_wt_uploads++;
-    wt_draw(g_wt.vbuffer, vc, viewproj, model, f, r, g, b);
+    wt_draw(g_wt.vbuffer, vc, viewproj, model, f, r, g, b, or_, og, ob, ow);
+}
+
+void wtext_block(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
+                 float x, float top_y, float px_to_m, float wrap_w_m,
+                 float r, float g, float b) {
+    wt_block_flat(f, viewproj, model, utf8, x, top_y, px_to_m, wrap_w_m,
+                  r, g, b, r, g, b, 0.0f);          /* outline off: identical output */
+}
+
+void wtext_block_outlined(const Font *f, mat4 viewproj, mat4 model, const char *utf8,
+                          float x, float top_y, float px_to_m, float wrap_w_m,
+                          float r, float g, float b,
+                          float or_, float og, float ob, float ow) {
+    wt_block_flat(f, viewproj, model, utf8, x, top_y, px_to_m, wrap_w_m,
+                  r, g, b, or_, og, ob, ow);
 }
 
 void wtext_block_bent(const Font *f, mat4 viewproj, mat4 model,
@@ -280,5 +310,5 @@ void wtext_block_bent(const Font *f, mat4 viewproj, mat4 model,
     rhi_update_buffer(g_wt.vbuffer, g_wt_verts,
                       (size_t)vc * WT_VERT_FLOATS * sizeof(sol_f32));
     g_wt_blocks++; g_wt_uploads++;
-    wt_draw(g_wt.vbuffer, vc, viewproj, model, f, r, g, b);
+    wt_draw(g_wt.vbuffer, vc, viewproj, model, f, r, g, b, r, g, b, 0.0f);
 }
