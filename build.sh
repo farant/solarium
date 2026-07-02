@@ -15,6 +15,45 @@ if [ "$MODE" = "c89check" ]; then
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
         -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c tmcache.c scene.c mirror.c material.c mapmath.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c browser.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c diskpath.c multiselect.c widget.c app_synth.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
+    # Shader twin-lint: both backends bind uniforms BY NAME (GL:
+    # glGetUniformLocation; Metal: struct-member reflection + u-named texture
+    # args), so a name that exists in one twin but not the other renders wrong
+    # SILENTLY — no compile error, no runtime error. Enforce set-symmetry: in
+    # every '#ifdef SOL_RHI_METAL / #else / #endif' block, the u-prefixed
+    # identifiers (uModel, uAlbedoTex, ...) of the MSL half must equal those
+    # of the GLSL half. Names mentioned only in a comment count for their
+    # half, so keep twin commentary beside the twin that declares the thing.
+    awk '
+        /^#ifdef SOL_RHI_METAL/ { half = 1; start = FNR; delete msl; delete glsl; next }
+        /^#else/  { if (half == 1) half = 2; next }
+        /^#endif/ {
+            if (half == 2) {
+                bad = ""
+                for (t in msl)  if (!(t in glsl)) bad = bad " " t "(MSL-only)"
+                for (t in glsl) if (!(t in msl)) bad = bad " " t "(GLSL-only)"
+                if (bad != "") {
+                    printf "twin-lint: %s:%d asymmetric uniforms:%s\n", FILENAME, start, bad
+                    fails++
+                }
+            }
+            half = 0; next
+        }
+        half > 0 {
+            line = $0
+            while (match(line, /u[A-Z][A-Za-z0-9_]*/)) {
+                pre = (RSTART > 1) ? substr(line, RSTART - 1, 1) : " "
+                t   = substr(line, RSTART, RLENGTH)
+                if (pre !~ /[A-Za-z0-9_]/) {
+                    if (half == 1) msl[t] = 1; else glsl[t] = 1
+                }
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }
+        END {
+            if (fails) { print "twin-lint: FAIL — " fails " shader twin block(s) drifted"; exit 1 }
+            print "twin-lint: PASS — all shader twins declare matching uniform names"
+        }
+    ' shaders.h ui.c
     exit 0
 fi
 
