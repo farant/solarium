@@ -2,6 +2,7 @@
 #include "mesh.h"
 #include "workspace.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 /* world translation of an object (parent chain applied) */
@@ -41,13 +42,20 @@ typedef struct { sol_u32 handle; vec3 pos; float hw, hd; } RoomInfo;
 static int collect_rooms(Scene *s, RoomInfo *ri, int max) {
     sol_u32 i;
     int     n = 0;
-    for (i = 0; i < s->count && n < max; i++) {
+    for (i = 0; i < s->count; i++) {
         SceneObject *o  = &s->objects[i];
         const char  *rt = scene_meta_get(s, o->handle, "room_type");
         if (!rt) continue;
         if (strcmp(rt, "home")    != 0 && strcmp(rt, "mirror") != 0 &&
             strcmp(rt, "terrain") != 0 && strcmp(rt, "land")   != 0) continue;
         if (!scene_object_active(s, o->handle)) continue;   /* hidden workspace */
+        if (n >= max) {
+            static int warned = 0;
+            if (!warned) { printf("route: room table full (%d) — further "
+                                  "rooms get no doorways or walkways\n", max);
+                           warned = 1; }
+            break;
+        }
         ri[n].handle = o->handle;
         ri[n].pos    = obj_pos(s, o->handle);
         room_half(s, o->handle, &ri[n].hw, &ri[n].hd);
@@ -96,13 +104,20 @@ static void walkway_rooms(SceneObject *o, sol_u32 *a, sol_u32 *b) {
 static int routes_pass1(Scene *s, Route *out, int max) {
     sol_u32 i;
     int     n = 0;
-    for (i = 0; i < s->count && n < max; i++) {
+    for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         sol_u32 ra, rb, lo, hi;
         vec3    pa, pb, plo, phi;
         float   dx, dz;
         Route  *r;
         if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
+        if (n >= max) {
+            static int warned = 0;
+            if (!warned) { printf("route: walkway table full (%d) — further "
+                                  "walkways get no routes\n", max);
+                           warned = 1; }
+            break;
+        }
         walkway_rooms(o, &ra, &rb);
         r = &out[n];
         memset(r, 0, sizeof *r);
