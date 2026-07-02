@@ -13395,6 +13395,7 @@ static const char *basemap_path(const char *style) {
 #define PIN_Z_OFFSET  0.010f    /* proud of the map face, toward the viewer */
 #define PIN_HEAD_R    0.020f    /* head radius, x map width */
 #define PIN_HEAD_CY   0.055f    /* head centre above the tip, x map width */
+#define PIN_LABEL_FRAC 0.045f   /* label line height as a fraction of map width */
 /* A classic map marker: a circle HEAD centred at (0, cy) with a downward TRIANGLE
    whose tip is the local origin (0,0). resolve_pin seats local (0,0) on the
    projected lat/lon, so the tip rests exactly on the point and the head rises
@@ -17426,28 +17427,35 @@ static void render(AppState *state) {
         for (i = 0; i < state->scene.count; i++) {
             SceneObject *o = &state->scene.objects[i];
             const char  *nm;
-            float        px2m, nw, top_y;
-            mat4         face;
+            float        px2m, nw, top_y, mw2, ho, bx;
+            mat4         face, face2;
+            SceneObject *pm;
+            int          d;
+            static const float hx[4] = { -1.0f, 1.0f,  0.0f, 0.0f };
+            static const float hy[4] = {  0.0f, 0.0f, -1.0f, 1.0f };
             if (!o->mesh_ref || strcmp(o->mesh_ref, "pin") != 0) continue;
             if (o->mesh.index_count == 0) continue;         /* out-of-window: hidden */
             if (vis && !vis[o->handle]) continue;           /* frustum cull (as cards) */
             nm = scene_meta_get(&state->scene, o->handle, "name");
             if (!nm || !nm[0]) continue;                    /* unnamed: no label */
-            px2m  = 0.030f / lh;                            /* ~3cm line */
+            pm  = scene_get(&state->scene, o->parent);      /* the map: sizes the label */
+            mw2 = pm ? mesh_ref_param("map", pm->mesh_params,
+                                      pm->mesh_param_count, "w") : MAP_BOARD_W;
+            if (mw2 <= 0.0f) mw2 = MAP_BOARD_W;
+            px2m  = PIN_LABEL_FRAC * mw2 / lh;              /* line height = frac of map width */
             text_measure_cached(uf, nm, 1.0f, &nw, (float *)0);
-            {   /* clear the marker head: its top is (PIN_HEAD_CY+PIN_HEAD_R)*mw
-                   above the tip, scaled by the parent map's width. */
-                SceneObject *pm = scene_get(&state->scene, o->parent);
-                float mw2 = pm ? mesh_ref_param("map", pm->mesh_params,
-                                                pm->mesh_param_count, "w") : MAP_BOARD_W;
-                if (mw2 <= 0.0f) mw2 = MAP_BOARD_W;
-                top_y = (PIN_HEAD_CY + PIN_HEAD_R) * mw2 + 0.02f + lh * px2m;
-            }
+            top_y = (PIN_HEAD_CY + PIN_HEAD_R + 0.02f) * mw2 + lh * px2m;  /* clear the head */
+            bx    = -nw * px2m * 0.5f;                      /* centre the label */
+            ho    = 0.09f * lh * px2m;                      /* dark-halo offset ~ line height */
             face  = mat4_mul(scene_world_matrix(&state->scene, o),
-                             mat4_translate(vec3_make(0.0f, 0.0f, 0.002f)));
-            wtext_block(uf, vp, face, nm,
-                        -nw * px2m * 0.5f, top_y, px2m, 0.0f,
-                        0.98f, 0.96f, 0.90f);
+                             mat4_translate(vec3_make(0.0f, 0.0f, 0.002f)));   /* halo plane */
+            face2 = mat4_mul(scene_world_matrix(&state->scene, o),
+                             mat4_translate(vec3_make(0.0f, 0.0f, 0.004f)));   /* text, nearer */
+            for (d = 0; d < 4; d++)                         /* dark halo: reads on any basemap */
+                wtext_block(uf, vp, face, nm, bx + hx[d] * ho, top_y + hy[d] * ho,
+                            px2m, 0.0f, 0.04f, 0.04f, 0.05f);
+            wtext_block(uf, vp, face2, nm, bx, top_y, px2m, 0.0f,
+                        0.99f, 0.98f, 0.94f);               /* light text, in front */
         }
 
         /* doorway labels (fs-tree): each room's name — the path it represents —
