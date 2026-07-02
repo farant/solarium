@@ -359,6 +359,9 @@ typedef struct AppState {
     int      bvh_count, bvh_cap;
     unsigned char *vis;          /* per-pass visibility, handle-indexed (piece 4) */
     sol_u32        vis_cap;
+    unsigned char *active_map;   /* per-frame scene_object_active(), handle-indexed */
+    sol_u32        active_cap;   /* map allocation, >= active_n */
+    sol_u32        active_n;     /* handles < active_n are mapped; others fall back */
     /* doorway-label routes (per-frame CPU spec, Part A): route_all is too costly
        to run every frame, so solve at most ~4x/sec and reuse the result. Labels
        are cosmetic; a room only moves in the editor, where a <=0.25s lag is
@@ -902,6 +905,38 @@ static sol_bool pick_skip_land(const Scene *s, const SceneObject *o, void *ctx) 
                                    strcmp(o->mesh_ref, "terrain") == 0);
 }
 
+/* Once-per-frame map of scene_object_active() (the workspace/stow/page
+   filter). The live check walks up to three parent chains of meta lookups
+   per call, and the render passes ask it per object per sweep — 4-5
+   whole-scene passes of chain-walks every frame. bvh_refresh AUTHORS the
+   map (it is already the "current this exact frame" point every mutation
+   event refreshes before picking); every later reader in the frame indexes
+   the byte map instead (one author, many readers — the vis[] pattern).
+   Handles minted after the fill, and an OOM'd map, fall back to the live
+   walk in obj_active — the map must only ever be an optimization. */
+static void active_fill(AppState *st) {
+    Scene  *s    = &st->scene;
+    sol_u32 need = s->next_handle;
+    sol_u32 i;
+    if (need > st->active_cap) {
+        unsigned char *na = (unsigned char *)realloc(st->active_map, (size_t)need);
+        if (na == NULL) { st->active_n = 0; return; }   /* OOM: readers fall back */
+        st->active_map = na;
+        st->active_cap = need;
+    }
+    memset(st->active_map, 0, (size_t)need);
+    for (i = 0; i < s->count; i++)
+        if (scene_object_active(s, s->objects[i].handle))
+            st->active_map[s->objects[i].handle] = 1;
+    st->active_n = need;
+}
+
+/* the map where it covers the handle, the live walk where it doesn't */
+static sol_bool obj_active(AppState *st, sol_u32 h) {
+    if (h < st->active_n) return (sol_bool)st->active_map[h];
+    return scene_object_active(&st->scene, h);
+}
+
 /* Refresh the spatial index from the scene: collect (handle, world AABB)
    for everything with geometry; the SAME set in the same order refits
    (cheap, motion only), a changed set rebuilds (add/remove/load). Called
@@ -912,6 +947,7 @@ static void bvh_refresh(AppState *st) {
     int      n = 0;
     sol_u32  i;
     sol_bool same;
+    active_fill(st);    /* one walk authors the frame's active[] map here */
     if ((int)s->count > st->bvh_cap) {
         int      ncap = (int)s->count;
         sol_u32 *ni = (sol_u32 *)realloc(st->bvh_ids,   (size_t)ncap * sizeof *ni);
@@ -925,7 +961,7 @@ static void bvh_refresh(AppState *st) {
     for (i = 0; i < s->count; i++) {
         SceneObject *o = &s->objects[i];
         if (o->mesh.index_count == 0) continue;
-        if (!scene_object_active(s, o->handle)) continue;   /* hidden workspace */
+        if (!obj_active(st, o->handle)) continue;   /* hidden workspace */
         if (n >= st->bvh_count || st->bvh_ids[n] != o->handle) same = SOL_FALSE;
         st->bvh_ids[n]   = o->handle;
         st->bvh_boxes[n] = aabb_transform(scene_world_matrix(s, o),
@@ -12890,7 +12926,7 @@ static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) 
         const SceneObject *o = &state->scene.objects[i];
         mat4 model;
         if (o->mesh.index_count == 0) continue;   /* empties cast nothing */
-        if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+        if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
         if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
             continue;                             /* water casts nothing */
         if (lvis && !lvis[o->handle]) continue;   /* outside this cascade's box */
@@ -12913,7 +12949,7 @@ static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) 
             int                clip;
             float              speed;
             if (!sg) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+            if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
             sm = skinned_get(sg);
             if (!sm) continue;
             skin_anim_of(o, &clip, &speed);
@@ -12943,7 +12979,7 @@ static void emit_shadow_casters(AppState *state, mat4 lvp, unsigned char *lvis) 
             SceneObject   *o  = scene_get(&state->scene, pt->source);
             mat4 model;
             if (!o || um->index_count == 0) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+            if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
             if (lvis && !lvis[o->handle]) continue;
             model = scene_world_matrix(&state->scene, o);
             rhi_set_uniform_mat4("uModel", model.m);
@@ -14134,7 +14170,7 @@ static void editor_draw_overlay(AppState *st) {
             const char *rt = scene_meta_get(&st->scene, h, "room_type");
             if (!rt || strcmp(rt, "church") == 0) continue;  /* a church rides its hill */
         }
-        if (!scene_object_active(&st->scene, h)) continue;   /* only the active world */
+        if (!obj_active(st, h)) continue;   /* only the active world */
         r = editor_room_rect(&st->scene, h);
         cw[0] = vec3_make(r.cx - r.hw, r.floor_y, r.cz - r.hd);
         cw[1] = vec3_make(r.cx + r.hw, r.floor_y, r.cz - r.hd);
@@ -14318,7 +14354,7 @@ static void render(AppState *state) {
         mat4  model;
         float hl;
         if (o->mesh.index_count == 0) continue;   /* empty: transform-only, don't draw */
-        if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+        if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
         if (o->mesh_ref && strcmp(o->mesh_ref, "pond") == 0)
             continue;                             /* ponds: the WATER PASS draws them */
         if (o->mesh_ref && strcmp(o->mesh_ref, "church_glass") == 0)
@@ -14451,7 +14487,7 @@ static void render(AppState *state) {
             Mesh  fq;
             mat4  fm;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "room") != 0) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;
+            if (!obj_active(state, o->handle)) continue;
             if (vis && !vis[o->handle]) continue;
             fw = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "w");
             fd = mesh_ref_param("room", o->mesh_params, o->mesh_param_count, "d");
@@ -14472,7 +14508,7 @@ static void render(AppState *state) {
             RoomFrame   *rf;
             mat4         rm;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "room") != 0) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;
+            if (!obj_active(state, o->handle)) continue;
             if (vis && !vis[o->handle]) continue;
             rf = room_frame_get(o->handle);
             if (!rf) continue;
@@ -14517,7 +14553,7 @@ static void render(AppState *state) {
             mat4         tmw;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "walkway") != 0) continue;
             if (o->mesh.index_count == 0) continue;            /* invalid/empty walkway */
-            if (!scene_object_active(&state->scene, o->handle)) continue;
+            if (!obj_active(state, o->handle)) continue;
             if (vis && !vis[o->handle]) continue;
             wt = walk_trim_get(o->handle);
             if (!wt || wt->trim.index_count == 0) continue;
@@ -14541,7 +14577,7 @@ static void render(AppState *state) {
             int           clip;
             float         speed;
             if (!sg) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+            if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
             sm = skinned_get(sg);
             if (!sm) continue;
             skin_anim_of(o, &clip, &speed);
@@ -14730,7 +14766,7 @@ static void render(AppState *state) {
             Material       mat;
             mat4 model;
             if (!o || um->index_count == 0) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+            if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
             if (vis && !vis[o->handle]) continue;
             mat   = (pt->kind == ORN_BALUSTER) ? o->material : pt->material;
             model = scene_world_matrix(&state->scene, o);
@@ -15186,7 +15222,7 @@ static void render(AppState *state) {
                 float lpx, nw, x0, h;
                 mat4  m;
                 if (!mr || strcmp(mr, "bookshelf") != 0) continue;
-                if (!scene_object_active(&state->scene, o->handle)) continue;
+                if (!obj_active(state, o->handle)) continue;
                 lbl = scene_meta_get(&state->scene, o->handle, "label");
                 if (!lbl || !lbl[0]) continue;
                 h   = mesh_ref_param("bookshelf", o->mesh_params, o->mesh_param_count, "h");
@@ -15214,7 +15250,7 @@ static void render(AppState *state) {
                 float lpx, nw, x0, fh;
                 mat4  m;
                 if (!mr || strcmp(mr, "folderbook") != 0) continue;
-                if (!scene_object_active(&state->scene, o->handle)) continue;
+                if (!obj_active(state, o->handle)) continue;
                 lnk = scene_meta_get(&state->scene, o->handle, "link");
                 if (!lnk || !lnk[0]) continue;
                 fh  = mesh_ref_param("folderbook", o->mesh_params, o->mesh_param_count, "h");
@@ -15242,7 +15278,7 @@ static void render(AppState *state) {
                 float lpx, nw, x0, bh;
                 mat4  m;
                 if (!mr || strcmp(mr, "board") != 0) continue;
-                if (!scene_object_active(&state->scene, o->handle)) continue;
+                if (!obj_active(state, o->handle)) continue;
                 ap = scene_meta_get(&state->scene, o->handle, "active_page");
                 if (!ap) ap = "/";
                 if (state->board_view != o->handle && strcmp(ap, "/") == 0)
@@ -15327,7 +15363,7 @@ static void render(AppState *state) {
             if (!o->mesh_ref ||
                 (strcmp(o->mesh_ref, "church_glass") != 0 &&
                  strcmp(o->mesh_ref, "window_glass") != 0)) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+            if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
             if (vis && !vis[o->handle]) continue;
             gm = scene_world_matrix(&state->scene, o);
             dx = gm.m[12] - eye.x; dy = gm.m[13] - eye.y; dz = gm.m[14] - eye.z;
@@ -15382,7 +15418,7 @@ static void render(AppState *state) {
             mat4 model;
             if (o->mesh.index_count == 0) continue;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "church_decals") != 0) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+            if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
             if (vis && !vis[o->handle]) continue;
             model = scene_world_matrix(&state->scene, o);
             rhi_set_uniform_mat4("uModel", model.m);
@@ -15414,7 +15450,7 @@ static void render(AppState *state) {
             float w, h, pw, oh;
             mat4  model;
             if (o->kind != KIND_PORTAL) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;  /* workspace filter */
+            if (!obj_active(state, o->handle)) continue;  /* workspace filter */
             if (vis && !vis[o->handle]) continue;                          /* frustum cull */
             w  = mesh_ref_param("gate", o->mesh_params, o->mesh_param_count, "w");
             h  = mesh_ref_param("gate", o->mesh_params, o->mesh_param_count, "h");
@@ -15445,7 +15481,7 @@ static void render(AppState *state) {
             mat4  model;
             float r, depth, alpha;
             if (!o->mesh_ref || strcmp(o->mesh_ref, "pond") != 0) continue;
-            if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+            if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
             if (o->mesh.index_count == 0) continue;
             if (vis && !vis[o->handle]) continue;
             r     = mesh_ref_param("pond", o->mesh_params, o->mesh_param_count, "r");
@@ -15665,7 +15701,7 @@ static void render(AppState *state) {
                     mat4  m;
                     float r, dx, dz;
                     if (!o->mesh_ref || strcmp(o->mesh_ref, "pond") != 0) continue;
-                    if (!scene_object_active(&state->scene, o->handle)) continue;   /* hidden workspace */
+                    if (!obj_active(state, o->handle)) continue;   /* hidden workspace */
                     m = scene_world_matrix(&state->scene, o);
                     if (state->camera.pos.y >= m.m[13]) continue;   /* above the surface */
                     r  = mesh_ref_param("pond", o->mesh_params, o->mesh_param_count, "r");
