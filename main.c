@@ -13395,7 +13395,7 @@ static const char *basemap_path(const char *style) {
 #define PIN_Z_OFFSET  0.010f    /* proud of the map face, toward the viewer */
 #define PIN_HEAD_R    0.020f    /* head radius, x map width */
 #define PIN_HEAD_CY   0.055f    /* head centre above the tip, x map width */
-#define PIN_LABEL_FRAC 0.045f   /* label line height as a fraction of map width */
+#define PIN_LABEL_FRAC 0.0225f  /* label line height as a fraction of map width */
 /* A classic map marker: a circle HEAD centred at (0, cy) with a downward TRIANGLE
    whose tip is the local origin (0,0). resolve_pin seats local (0,0) on the
    projected lat/lon, so the tip rests exactly on the point and the head rises
