@@ -17427,12 +17427,9 @@ static void render(AppState *state) {
         for (i = 0; i < state->scene.count; i++) {
             SceneObject *o = &state->scene.objects[i];
             const char  *nm;
-            float        px2m, nw, top_y, mw2, ho, bx;
-            mat4         face, face2;
+            float        px2m, nw, top_y, mw2, bx;
+            mat4         face;
             SceneObject *pm;
-            int          d;
-            static const float hx[4] = { -1.0f, 1.0f,  0.0f, 0.0f };
-            static const float hy[4] = {  0.0f, 0.0f, -1.0f, 1.0f };
             if (!o->mesh_ref || strcmp(o->mesh_ref, "pin") != 0) continue;
             if (o->mesh.index_count == 0) continue;         /* out-of-window: hidden */
             if (vis && !vis[o->handle]) continue;           /* frustum cull (as cards) */
@@ -17446,16 +17443,11 @@ static void render(AppState *state) {
             text_measure_cached(uf, nm, 1.0f, &nw, (float *)0);
             top_y = (PIN_HEAD_CY + PIN_HEAD_R + 0.02f) * mw2 + lh * px2m;  /* clear the head */
             bx    = -nw * px2m * 0.5f;                      /* centre the label */
-            ho    = 0.09f * lh * px2m;                      /* dark-halo offset ~ line height */
             face  = mat4_mul(scene_world_matrix(&state->scene, o),
-                             mat4_translate(vec3_make(0.0f, 0.0f, 0.002f)));   /* halo plane */
-            face2 = mat4_mul(scene_world_matrix(&state->scene, o),
-                             mat4_translate(vec3_make(0.0f, 0.0f, 0.004f)));   /* text, nearer */
-            for (d = 0; d < 4; d++)                         /* dark halo: reads on any basemap */
-                wtext_block(uf, vp, face, nm, bx + hx[d] * ho, top_y + hy[d] * ho,
-                            px2m, 0.0f, 0.04f, 0.04f, 0.05f);
-            wtext_block(uf, vp, face2, nm, bx, top_y, px2m, 0.0f,
-                        0.99f, 0.98f, 0.94f);               /* light text, in front */
+                             mat4_translate(vec3_make(0.0f, 0.0f, 0.002f)));
+            wtext_block_outlined(uf, vp, face, nm, bx, top_y, px2m, 0.0f,
+                                 0.99f, 0.98f, 0.94f,       /* light fill */
+                                 0.04f, 0.04f, 0.05f, 0.20f);  /* dark SDF outline */
         }
 
         /* doorway labels (fs-tree): each room's name — the path it represents —
