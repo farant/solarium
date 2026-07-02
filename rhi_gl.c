@@ -16,14 +16,15 @@
 /* ---- internal resource storage (handle id -> GL object) ----
    Buffers and textures are on the palace's accretion path (every object is
    geometry; every image card / page view is a texture), so their ceilings are
-   generous; the real limit is VRAM, far above these. Shaders/pipelines/targets
-   are code-bounded (~a dozen). Overflow is caught by slot_alloc, not silently
-   written past the array. */
-#define MAX_BUFFERS       1024
+   generous; the real limit is VRAM, far above these. Shaders/pipelines are
+   code-bounded (~a dozen). Overflow is caught by slot_alloc, not silently
+   written past the array. Ceilings mirror rhi_metal.m — the twins must agree
+   or a feature that fits on one backend exhausts the other. */
+#define MAX_BUFFERS       4096   /* meshes: vbuf+ibuf per unique shape; scales with scene size */
 #define MAX_SHADERS         64
 #define MAX_PIPELINES       64
-#define MAX_TEXTURES      1024
-#define MAX_RENDER_TARGETS  16
+#define MAX_TEXTURES      4096   /* scene textures + loaded images + texgen maps */
+#define MAX_RENDER_TARGETS  48   /* engine ~14 + inventory thumbnail pool + scratch */
 #define SLOT_NONE  ((sol_u32)-1)   /* slot_alloc failure: table full (see callers) */
 
 typedef struct {
