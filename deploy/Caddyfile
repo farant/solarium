@@ -1,0 +1,5 @@
+# Caddy fronts solsrv: automatic HTTPS (Let's Encrypt), reverse proxy to
+# loopback. Replace the domain. Lives at /etc/caddy/Caddyfile on the VPS.
+solarium.example.com {
+	reverse_proxy 127.0.0.1:8080
+}

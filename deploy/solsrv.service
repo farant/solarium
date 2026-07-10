@@ -1,0 +1,22 @@
+# systemd unit for solsrv. Lives at /etc/systemd/system/solsrv.service.
+# -s: cookies are Secure because Caddy serves HTTPS.
+[Unit]
+Description=Solarium server (solsrv)
+After=network.target
+
+[Service]
+User=solarium
+WorkingDirectory=/home/solarium
+ExecStart=/home/solarium/solsrv -p 127.0.0.1:8080 -d /home/solarium/data/solsrv.db -s
+Restart=on-failure
+RestartSec=2
+
+# containment: solsrv needs nothing but its data dir
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/solarium/data
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
