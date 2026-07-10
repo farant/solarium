@@ -26,10 +26,31 @@ static volatile sig_atomic_t g_stop = 0;
 static void on_stop(int sig) { (void)sig; g_stop = 1; }
 
 static void copy_capped(char *dst, size_t cap, const char *src) {
-    size_t n = strlen(src);
+    size_t n;
+    if (!src) { dst[0] = 0; return; }
+    n = strlen(src);
     if (n >= cap) n = cap - 1;
     memcpy(dst, src, n);
     dst[n] = 0;
+}
+
+/* The throttle key for this request: normally the TCP peer, but when the
+   peer is loopback (i.e. Caddy is fronting us) trust the LAST hop of
+   X-Forwarded-For — the entry Caddy itself appended. Never trust XFF from
+   a non-loopback peer. */
+static void throttle_key(struct mg_connection *c, char *out, size_t cap) {
+    const struct mg_request_info *ri = mg_get_request_info(c);
+    const char *xff;
+    const char *p;
+    copy_capped(out, cap, ri->remote_addr);
+    if (strcmp(ri->remote_addr, "127.0.0.1") != 0
+        && strcmp(ri->remote_addr, "::1") != 0) return;
+    xff = mg_get_header(c, "X-Forwarded-For");
+    if (!xff || !xff[0]) return;
+    p = strrchr(xff, ',');           /* last hop = appended by our proxy */
+    p = p ? p + 1 : xff;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p) copy_capped(out, cap, p);
 }
 
 /* ---- response helpers --------------------------------------------------- */
@@ -108,15 +129,17 @@ static int h_login_get(struct mg_connection *c, SrvApp *app) {
 }
 
 static int h_login_post(struct mg_connection *c, SrvApp *app) {
-    const struct mg_request_info *ri = mg_get_request_info(c);
     char body[4096], probe[1], user[64], pass[256];
     char token[SRV_TOKEN_CHARS + 1];
     char cookie[256];
+    char tkey[64];
     Sb b;
     int n = 0, r = 0;
     long uid;
 
-    if (!srv_auth_throttle_ok(&app->db, ri->remote_addr)) {
+    throttle_key(c, tkey, sizeof tkey);
+
+    if (!srv_auth_throttle_ok(&app->db, tkey)) {
         sb_init(&b);
         web_page_login(&b, "Too many attempts. Try again later.");
         send_page(c, 429, "Too Many Requests", &b, NULL);
@@ -136,14 +159,14 @@ static int h_login_post(struct mg_connection *c, SrvApp *app) {
 
     uid = srv_auth_login(&app->db, user, pass, token);
     if (uid == 0) {
-        srv_auth_throttle_fail(&app->db, ri->remote_addr);
+        srv_auth_throttle_fail(&app->db, tkey);
         sb_init(&b);
         web_page_login(&b, "Bad username or password.");
         send_page(c, 403, "Forbidden", &b, NULL);
         sb_free(&b);
         return 403;
     }
-    srv_auth_throttle_clear(&app->db, ri->remote_addr);
+    srv_auth_throttle_clear(&app->db, tkey);
 
     sprintf(cookie, "Set-Cookie: sid=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000%s\r\n",
             token, app->secure_cookies ? "; Secure" : "");

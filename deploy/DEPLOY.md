@@ -71,6 +71,12 @@ second process safe.)
 Visit `https://your-domain/` → sign in → the seeded board list. Done =
 spec sub-project 1 exit criterion.
 
+**Reverse-proxy note:** Caddy appends the real client IP to `X-Forwarded-For`
+by default. solsrv trusts that header only when the TCP peer is loopback
+(127.0.0.1 / ::1), so login throttling stays per-client IP even behind the
+proxy. If you ever bind solsrv on a non-loopback interface (don't), XFF is
+ignored and the TCP peer address is used as the throttle key.
+
 ## 4. Backups (once)
 
 As `solarium`, `crontab -e`:

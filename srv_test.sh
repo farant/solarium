@@ -65,4 +65,8 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -d "user=fran&pass=$PW" $BASE/logi
 [ "$code" = "429" ] || fail "throttle should 429 after 10 fails, got $code"
 echo "PASS throttle"
 
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 10.9.9.9' -d "user=fran&pass=wrongwrong" $BASE/login)
+[ "$code" = "403" ] || fail "XFF re-keys throttle: expected 403 fresh bucket, got $code"
+echo "PASS throttle XFF keying"
+
 echo "ALL PASS"
