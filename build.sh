@@ -46,6 +46,21 @@ if [ "$MODE" = "srvdbtest" ]; then
     exit 0
 fi
 
+# Build + run the server events layer test under the sanitizers. Tests
+# transactional append + board projections + cursor-based query. Same flags
+# and link model as srvdbtest.
+if [ "$MODE" = "srveventstest" ]; then
+    vendor_objs
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra -isystem vendor \
+        srv_events.c srv_db.c json.c srv_events_test.c vendor/sqlite3.o \
+        -lpthread -lm \
+        -o srv_events_test
+    echo "built ./srv_events_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
 # Verify our code stays C89 / Dependable-C compatible. We don't BUILD in c89
 # mode (the normal build is c11) — we just check that the code COULD. GLFW/GL
 # headers go through -isystem so their own non-C89-isms don't trip -pedantic.
@@ -56,7 +71,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS -isystem vendor main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c tmcache.c scene.c mirror.c material.c mapmath.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c browser.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c diskpath.c multiselect.c widget.c app_synth.c srv_db.c srv_main.c sha256.c b64.c
+        -fsyntax-only $GLFW_CFLAGS -isystem vendor main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c tmcache.c scene.c mirror.c material.c mapmath.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c browser.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c diskpath.c multiselect.c widget.c app_synth.c srv_db.c srv_events.c srv_main.c sha256.c b64.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     # Shader twin-lint: both backends bind uniforms BY NAME (GL:
     # glGetUniformLocation; Metal: struct-member reflection + u-named texture
