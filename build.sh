@@ -41,7 +41,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS -isystem vendor main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c tmcache.c scene.c mirror.c material.c mapmath.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c browser.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c diskpath.c multiselect.c widget.c app_synth.c srv_main.c
+        -fsyntax-only $GLFW_CFLAGS -isystem vendor main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c tmcache.c scene.c mirror.c material.c mapmath.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c browser.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c diskpath.c multiselect.c widget.c app_synth.c srv_main.c sha256.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     # Shader twin-lint: both backends bind uniforms BY NAME (GL:
     # glGetUniformLocation; Metal: struct-member reflection + u-named texture
@@ -105,6 +105,17 @@ if [ "$MODE" = "nidtest" ]; then
         nid.c nid_test.c \
         -o nid_test
     echo "built ./nid_test (ASan + UBSan) — run it; sanitizers report on stderr"
+    exit 0
+fi
+
+# Build + run the standalone SHA-256/HMAC/PBKDF2 test under the sanitizers.
+if [ "$MODE" = "sha256test" ]; then
+    clang -std=c11 -g -O1 -fno-omit-frame-pointer \
+        -fsanitize=address,undefined \
+        -Wall -Wextra \
+        sha256.c sha256_test.c \
+        -o sha256_test
+    echo "built ./sha256_test (ASan + UBSan) — run it; sanitizers report on stderr"
     exit 0
 fi
 
