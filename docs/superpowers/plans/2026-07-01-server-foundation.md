@@ -1425,19 +1425,22 @@ void srv_events_free  (SrvEventOut *evs, int count);
 #include "srv_events.h"
 #include "json.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 static char *xstrdup(const char *s) {
-    char *d = (char *)malloc(strlen(s) + 1);
+    char *d;
+    if (!s) return NULL;
+    d = (char *)malloc(strlen(s) + 1);
     if (d) strcpy(d, s);
     return d;
 }
 
 static void copy_capped(char *dst, size_t cap, const char *src) {
-    size_t n = strlen(src);
+    size_t n;
+    if (!src) { dst[0] = 0; return; }
+    n = strlen(src);
     if (n >= cap) n = cap - 1;
     memcpy(dst, src, n);
     dst[n] = 0;
@@ -1504,7 +1507,7 @@ static int project_board(SrvDb *db, const char *nid, const char *op,
 
 int srv_events_append(SrvDb *db, const SrvEventIn *in, long *out_id) {
     sqlite3_stmt *st = NULL;
-    long ts;
+    long ts, new_id = 0;
     int ok = 0;
 
     ts = in->ts ? in->ts : (long)time(NULL);
@@ -1523,6 +1526,11 @@ int srv_events_append(SrvDb *db, const SrvEventIn *in, long *out_id) {
         sqlite3_bind_text(st, 6, in->op, -1, SQLITE_STATIC);
         sqlite3_bind_text(st, 7, in->payload ? in->payload : "{}", -1, SQLITE_STATIC);
         ok = sqlite3_step(st) == SQLITE_DONE;
+        /* capture the event id NOW, before projection statements run — a
+           future rowid projection table would otherwise clobber
+           last_insert_rowid (boards is WITHOUT ROWID, which doesn't, but
+           don't lean on that) */
+        if (ok) new_id = (long)sqlite3_last_insert_rowid(db->w);
         sqlite3_finalize(st);
     }
 
@@ -1531,10 +1539,8 @@ int srv_events_append(SrvDb *db, const SrvEventIn *in, long *out_id) {
                            in->payload ? in->payload : "{}", ts, in->actor_id) == 0;
     }
 
-    if (ok) {
-        *out_id = (long)sqlite3_last_insert_rowid(db->w);
-        ok = srv_db_exec(db, "COMMIT;") == 0;
-    }
+    if (ok) ok = srv_db_exec(db, "COMMIT;") == 0;
+    if (ok) *out_id = new_id;           /* out-param untouched on any failure */
     if (!ok) srv_db_exec(db, "ROLLBACK;");
     srv_db_wunlock(db);
     return ok ? 0 : -1;
