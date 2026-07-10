@@ -23,7 +23,8 @@ vendor_objs() {
 if [ "$MODE" = "server" ]; then
     vendor_objs
     ${CC:-clang} -std=c11 -g -O0 -Wall -Wextra -isystem vendor \
-        srv_main.c \
+        srv_main.c srv_db.c srv_events.c srv_auth.c srv_web.c srv_rand.c \
+        sha256.c b64.c json.c nid.c \
         vendor/sqlite3.o vendor/civetweb.o \
         -lpthread -lm \
         -o solsrv
