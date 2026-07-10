@@ -75,10 +75,13 @@ int srv_db_open(SrvDb *db, const char *path) {
         db->w = NULL;
         return -1;
     }
+    /* Initialize mutex immediately after successful open, before any failure path. */
+    pthread_mutex_init(&db->wlock, NULL);
+
     if (db_exec_on(db->w, "PRAGMA journal_mode=WAL;"
                           "PRAGMA busy_timeout=5000;"
                           "PRAGMA foreign_keys=ON;"
-                          "PRAGMA synchronous=NORMAL;") != 0) return -1;
+                          "PRAGMA synchronous=NORMAL;") != 0) goto fail;
 
     ver = 0;
     st = NULL;
@@ -90,20 +93,25 @@ int srv_db_open(SrvDb *db, const char *path) {
 
     n = (int)(sizeof MIGRATIONS / sizeof MIGRATIONS[0]);
     for (i = ver; i < n; i++) {
-        if (db_exec_on(db->w, "BEGIN;") != 0) return -1;
+        if (db_exec_on(db->w, "BEGIN;") != 0) goto fail;
         if (db_exec_on(db->w, MIGRATIONS[i]) != 0) {
             db_exec_on(db->w, "ROLLBACK;");
-            return -1;
+            goto fail;
         }
         sprintf(bump, "PRAGMA user_version=%d;", i + 1);
         if (db_exec_on(db->w, bump) != 0 || db_exec_on(db->w, "COMMIT;") != 0) {
             db_exec_on(db->w, "ROLLBACK;");
-            return -1;
+            goto fail;
         }
     }
 
-    pthread_mutex_init(&db->wlock, NULL);
     return 0;
+
+fail:
+    sqlite3_close(db->w);
+    db->w = NULL;
+    pthread_mutex_destroy(&db->wlock);
+    return -1;
 }
 
 void srv_db_close(SrvDb *db) {
