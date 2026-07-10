@@ -57,3 +57,17 @@ mirror_test_dir/
 /workspace_test
 /furniture_test
 library/
+
+# Server (solsrv) artifacts
+/solsrv
+vendor/*.o
+/sha256_test
+/b64_test
+/srv_db_test
+/srv_events_test
+/srv_auth_test
+/srv_web_test
+/srv_*_test.db*
+/srv_itest.db*
+/srv_itest.cookies
+/solsrv.db*

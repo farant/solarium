@@ -3,6 +3,34 @@ set -eu
 
 MODE="${1:-debug}"
 
+# Compile the vendored server deps (SQLite + CivetWeb) into cached .o files.
+# Vendored code is not ours: compiled quietly (-w), rebuilt only when its
+# source changes. Server-only; the engine build never touches these.
+vendor_objs() {
+    if [ ! -f vendor/sqlite3.o ] || [ vendor/sqlite3.c -nt vendor/sqlite3.o ]; then
+        ${CC:-clang} -O2 -w -c vendor/sqlite3.c -o vendor/sqlite3.o \
+            -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION
+    fi
+    if [ ! -f vendor/civetweb.o ] || [ vendor/civetweb.c -nt vendor/civetweb.o ]; then
+        ${CC:-clang} -O2 -w -c vendor/civetweb.c -o vendor/civetweb.o \
+            -Ivendor -DNO_SSL -DNO_CGI -DNO_FILES
+    fi
+}
+
+# Build the solsrv server binary (sub-project 1 of the server arc). Same
+# sources build on macOS (local dev) and Linux (deploy): CC=gcc ./build.sh
+# server. POSIX + vendored CivetWeb/SQLite only — never links GL/GLFW.
+if [ "$MODE" = "server" ]; then
+    vendor_objs
+    ${CC:-clang} -std=c11 -g -O0 -Wall -Wextra -isystem vendor \
+        srv_main.c \
+        vendor/sqlite3.o vendor/civetweb.o \
+        -lpthread -lm \
+        -o solsrv
+    echo "built ./solsrv"
+    exit 0
+fi
+
 # Verify our code stays C89 / Dependable-C compatible. We don't BUILD in c89
 # mode (the normal build is c11) — we just check that the code COULD. GLFW/GL
 # headers go through -isystem so their own non-C89-isms don't trip -pedantic.
@@ -13,7 +41,7 @@ if [ "$MODE" = "c89check" ]; then
     # sources exceed that, so we allow overlength strings — all other C89
     # constraints stay strict.
     clang -std=c89 -pedantic-errors -Werror -Wall -Wextra -Wno-overlength-strings \
-        -fsyntax-only $GLFW_CFLAGS main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c tmcache.c scene.c mirror.c material.c mapmath.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c browser.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c diskpath.c multiselect.c widget.c app_synth.c
+        -fsyntax-only $GLFW_CFLAGS -isystem vendor main.c rhi_gl.c mesh.c flora.c rock.c gothic.c sweep.c texgen.c mesh_gpu.c ui.c text.c wtext.c wtcache.c tmcache.c scene.c mirror.c material.c mapmath.c scene_io.c stml.c nid.c sol_math.c camera.c collide.c bvh.c asset.c component.c particles.c synth.c wav.c mixer.c reverb.c skel.c json.c glb.c fuzzy.c browser.c palette.c route.c editor.c descend.c workspace.c furniture.c inventory.c boardpage.c caret.c diskpath.c multiselect.c widget.c app_synth.c srv_main.c
     echo "c89check: PASS — all sources are C89-pedantic clean"
     # Shader twin-lint: both backends bind uniforms BY NAME (GL:
     # glGetUniformLocation; Metal: struct-member reflection + u-named texture
