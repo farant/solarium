@@ -244,6 +244,8 @@ int main(int argc, char **argv) {
     static SrvApp app;              /* zero-initialized, process-lifetime */
     const char *port = "127.0.0.1:8080";
     const char *dbpath = "solsrv.db";
+    const char *adduser = NULL;
+    int seed = 0;
     struct mg_callbacks cbs;
     struct mg_context *ctx;
     const char *opts[8];
@@ -253,10 +255,82 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) port = argv[++i];
         else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) dbpath = argv[++i];
         else if (strcmp(argv[i], "-s") == 0) app.secure_cookies = 1;
+        else if (strcmp(argv[i], "--adduser") == 0 && i + 1 < argc) adduser = argv[++i];
+        else if (strcmp(argv[i], "--seed") == 0) seed = 1;
         else {
-            fprintf(stderr, "usage: solsrv [-p host:port] [-d dbfile] [-s]\n");
+            fprintf(stderr, "usage: solsrv [-p host:port] [-d dbfile] [-s]"
+                            " [--adduser name] [--seed]\n");
             return 2;
         }
+    }
+
+    if (adduser) {
+        char pw[256];
+        size_t l;
+        if (srv_db_open(&app.db, dbpath) != 0) return 1;
+        if (!fgets(pw, sizeof pw, stdin)) {
+            fprintf(stderr, "solsrv: --adduser reads the password from stdin\n");
+            srv_db_close(&app.db);
+            return 2;
+        }
+        l = strlen(pw);
+        while (l > 0 && (pw[l - 1] == '\n' || pw[l - 1] == '\r')) pw[--l] = 0;
+        if (srv_auth_user_create(&app.db, adduser, pw) != 0) {
+            fprintf(stderr, "solsrv: adduser failed"
+                    " (name [a-z0-9_-]{1,32}, unique; password >= 8 chars)\n");
+            srv_db_close(&app.db);
+            return 1;
+        }
+        printf("user '%s' created\n", adduser);
+        srv_db_close(&app.db);
+        return 0;
+    }
+
+    if (seed) {
+        static const char *TITLES[2] = { "Welcome to Solarium", "Reading list" };
+        char nidbuf[NID_LEN + 1];
+        char payload[128];
+        SrvEventIn ev;
+        sqlite3 *r;
+        sqlite3_stmt *st = NULL;
+        long id;
+        int existing = 0, k;
+
+        if (srv_db_open(&app.db, dbpath) != 0) return 1;
+        r = srv_db_ropen(&app.db);
+        if (r) {
+            if (sqlite3_prepare_v2(r, "SELECT COUNT(*) FROM boards", -1, &st, NULL) == SQLITE_OK
+                && sqlite3_step(st) == SQLITE_ROW) {
+                existing = sqlite3_column_int(st, 0);
+            }
+            sqlite3_finalize(st);
+            srv_db_rclose(r);
+        }
+        if (existing > 0) {
+            fprintf(stderr, "solsrv: boards exist, refusing to seed\n");
+            srv_db_close(&app.db);
+            return 1;
+        }
+        for (k = 0; k < 2; k++) {
+            nid_generate(nidbuf);
+            memset(&ev, 0, sizeof ev);
+            ev.actor_id = 0;                 /* system */
+            ev.origin_device = "seed";
+            ev.entity_kind = "board";
+            ev.entity_nid = nidbuf;
+            ev.op = "create";
+            /* static titles — nothing to JSON-escape */
+            sprintf(payload, "{\"title\":\"%s\"}", TITLES[k]);
+            ev.payload = payload;
+            if (srv_events_append(&app.db, &ev, &id) != 0) {
+                fprintf(stderr, "solsrv: seed append failed\n");
+                srv_db_close(&app.db);
+                return 1;
+            }
+        }
+        printf("seeded 2 boards\n");
+        srv_db_close(&app.db);
+        return 0;
     }
 
     if (srv_db_open(&app.db, dbpath) != 0) return 1;
