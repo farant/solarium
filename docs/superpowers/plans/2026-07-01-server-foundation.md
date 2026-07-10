@@ -3085,3 +3085,24 @@ Per the windows-arc / map-view lesson: after all tasks, a **final holistic revie
 Sync endpoints and client-op idempotency (sub-project 2, schema migration v2), `json_write` (sub-project 2), board detail pages / CSRF-tokened forms beyond login (sub-project 3), OAuth + MCP (sub-project 4), SSE/WebSockets, Docker/CI, Argon2.
 
 
+
+---
+
+## Post-review amendments (2026-07-10, recorded after execution)
+
+The branch was built task-by-task from this plan with per-task reviews plus a
+final whole-branch review. Two review waves changed code relative to the
+listings above (the Task 5 listings were synced in-place; these are the rest):
+
+- **srv_db.c** — `srv_db_open` failure paths now clean up (close handle, NULL
+  it, destroy mutex) via a `fail:` label; mutex is initialized right after a
+  successful open.
+- **srv_main.c** — `copy_capped` gained the same NULL guard as srv_events.c's;
+  the login throttle keys on a `throttle_key()` helper that trusts the last
+  X-Forwarded-For hop only when the TCP peer is loopback (behind Caddy every
+  peer is 127.0.0.1, so raw remote_addr was one global lockout bucket — a
+  spec §8/§9 conflict this plan inherited). srv_test.sh gained a tenth check
+  proving XFF re-keys the throttle.
+- **Deferred to sub-project 2** (recorded in the final review): sessions /
+  login_attempts sweep, length caps on client-supplied event fields,
+  `srv_auth_login` 0-vs-(-1) error contract, XFF spec reconciliation.
